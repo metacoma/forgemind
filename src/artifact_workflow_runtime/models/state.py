@@ -11,6 +11,11 @@ class WorkflowState(TypedDict, total=False):
     classification_request: JsonDict | None
     classification_result: JsonDict | None
     classification: JsonDict | None
+    route_request: JsonDict | None
+    route_result: JsonDict | None
+    route_decision: JsonDict | None
+    research_request: JsonDict | None
+    research_result: JsonDict | None
     observation_request: JsonDict | None
     observation_result: JsonDict | None
     context_packet: JsonDict | None
@@ -21,6 +26,8 @@ class WorkflowState(TypedDict, total=False):
     approval_request: JsonDict | None
     execution_request: JsonDict | None
     execution_result: JsonDict | None
+    publish_request: JsonDict | None
+    publish_result: JsonDict | None
     verification_request: JsonDict | None
     verification_result: JsonDict | None
     final_report: JsonDict | None

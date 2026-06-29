@@ -27,6 +27,18 @@ async def test_controller_emits_stage_events(tmp_path):
                     "risk_level": "medium",
                 }
             ],
+            "route_analysis": [
+                {
+                    "needs_repository_observation": True,
+                    "needs_world_observation": False,
+                    "needs_fresh_external_research": True,
+                    "can_plan_immediately": False,
+                    "required_evidence_types": ["official_docs", "repo_patterns"],
+                    "research_targets": ["official grpc docs"],
+                    "observation_focus": ["repo layout"],
+                    "reasoning": "Need fresh docs and repo facts before planning.",
+                }
+            ],
             "planning": [
                 {
                     "summary": "Implement the requested repository change.",
@@ -57,10 +69,16 @@ async def test_controller_emits_stage_events(tmp_path):
         }
     )
     store = ArtifactStore(tmp_path / "artifacts")
-    openhands = FakeOpenHandsAdapter(store, scripts={
-        "observe": ["Repository tree and existing clients inspected."],
-        "execute": ["Changed files: cpp/client.cpp\nCommands run: cmake --build ."],
-    })
+    openhands = FakeOpenHandsAdapter(
+        store,
+        scripts={
+            "observe": [
+                "Official grpc docs captured.",
+                "Repository tree and existing clients inspected.",
+            ],
+            "execute": ["Changed files: cpp/client.cpp\nCommands run: cmake --build ."],
+        },
+    )
 
     controller = WorkflowController(
         llm_backend=llm,
@@ -70,12 +88,14 @@ async def test_controller_emits_stage_events(tmp_path):
         event_sink=events.append,
     )
 
-    report = await controller.run(Task(description="Add C++ gRPC client to the repository"))
+    report = await controller.run(Task(description="Add C++ gRPC client to the repository using current official docs"))
 
     assert report.status
     stage_kinds = {(event.stage, event.kind) for event in events}
     assert ("classify", "stage_started") in stage_kinds
     assert ("classify", "stage_completed") in stage_kinds
+    assert ("route", "stage_completed") in stage_kinds
+    assert ("research", "stage_completed") in stage_kinds
     assert ("observe", "stage_completed") in stage_kinds
     assert ("execute", "stage_completed") in stage_kinds
     assert ("finalize", "stage_completed") in stage_kinds

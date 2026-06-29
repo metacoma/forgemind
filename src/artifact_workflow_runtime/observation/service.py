@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from artifact_workflow_runtime.models import ExecutionFamily, ObservationRequest, Task, TaskClassification
+from artifact_workflow_runtime.models import ExecutionFamily, ObservationRequest, RoutingDecision, Task, TaskClassification
 
 
 class ObservationService:
-    def build_request(self, task: Task, classification: TaskClassification) -> ObservationRequest:
-        focus = "\n".join(f"- {item}" for item in classification.observation_focus) or "- collect the minimum world facts needed"
+    def build_request(self, task: Task, classification: TaskClassification, route: RoutingDecision | None = None) -> ObservationRequest:
+        focus_items = list(classification.observation_focus)
+        if route is not None:
+            focus_items.extend(item for item in route.observation_focus if item not in focus_items)
+        focus = "\n".join(f"- {item}" for item in focus_items) or "- collect the minimum world facts needed"
         prompt = self._build_prompt(task, classification, focus)
         return ObservationRequest(
             task_id=task.id,
@@ -15,12 +18,50 @@ class ObservationService:
             metadata={"mode": "observe_only", "evidence_required": True},
         )
 
+    def build_research_request(self, task: Task, classification: TaskClassification, route: RoutingDecision) -> ObservationRequest:
+        targets = "\n".join(f"- {item}" for item in route.research_targets) or "- identify the official sources needed for this task"
+        evidence_types = "\n".join(f"- {item}" for item in route.required_evidence_types) or "- official_docs"
+        prompt = (
+            "You are gathering fresh external research evidence for a controller-driven workflow.\n"
+            "Observe only. Do not modify the local repository, hosts, or cluster.\n"
+            "Use internet access, package registries, official documentation sites, release pages, and repository metadata if available in the environment.\n"
+            "Prefer official sources over blogs or forum posts.\n"
+            "Return factual evidence only, with source attribution and freshness hints.\n\n"
+            f"Task: {task.description}\n"
+            f"Execution family: {classification.execution_family.value}\n"
+            f"Task intent: {classification.task_intent}\n\n"
+            "Research targets:\n"
+            f"{targets}\n\n"
+            "Required evidence types:\n"
+            f"{evidence_types}\n\n"
+            "Include in the result:\n"
+            "- official docs URLs and page titles if found\n"
+            "- package names and current versions if relevant\n"
+            "- release notes or breaking-change references if relevant\n"
+            "- short source-backed facts that will help planning\n"
+            "- unknowns and blockers\n"
+            "Do not produce a plan yet."
+        )
+        return ObservationRequest(
+            task_id=task.id,
+            execution_family=classification.execution_family,
+            capabilities=[],
+            prompt=prompt,
+            metadata={
+                "mode": "observe_only",
+                "evidence_required": True,
+                "source": "fresh_external_research",
+                "research_targets": list(route.research_targets),
+            },
+        )
+
     def _build_prompt(self, task: Task, classification: TaskClassification, focus: str) -> str:
         family = classification.execution_family
         if family == ExecutionFamily.REPOSITORY_CHANGE:
             return (
                 "You are gathering repository facts for a controller-driven workflow.\n"
                 "Observe only. Do not edit files, do not commit, do not push, do not mutate the repository.\n"
+                "The execution environment is a Docker container unless evidence shows otherwise.\n"
                 "Use only the task text, the existing environment, and already available credentials or checked-out workspaces.\n\n"
                 f"Task: {classification.normalized_task}\n"
                 f"Focus:\n{focus}\n\n"
@@ -28,6 +69,8 @@ class ObservationService:
                 "- repository root or clone location if found\n"
                 "- current branch and HEAD commit if available\n"
                 "- relevant files, directories, proto definitions, client implementations, build files\n"
+                "- current test topology, including integration harnesses and how other clients are validated\n"
+                "- dependency/setup commands needed to run build/unit/integration tests inside Docker\n"
                 "- concrete commands you ran and their outputs\n"
                 "- candidate build/test commands\n"
                 "- blockers and unknowns\n"

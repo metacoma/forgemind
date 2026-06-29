@@ -24,7 +24,7 @@ DEFAULT_TASK = (
     "Сначала собери факты через observation, затем спланируй и только потом меняй мир.\n"
     "Всегда оставляй evidence, changed files, commands и verification summary."
 )
-STAGES = ["intake", "classify", "observe", "build_context", "plan", "policy", "approval", "execute", "verify", "finalize"]
+STAGES = ["intake", "classify", "route", "research", "observe", "build_context", "plan", "policy", "approval", "execute", "publish", "verify", "finalize"]
 
 
 class RuntimeEventMessage(Message):
@@ -104,6 +104,13 @@ class ForgeMindTUI(App[None]):
     #overview-top {
         height: 10;
         margin: 0 0 1 0;
+    }
+    #overview-split {
+        height: 1fr;
+    }
+    #stage-detail-view {
+        height: 1fr;
+        border: round $panel;
     }
     .overview-card {
         width: 1fr;
@@ -217,7 +224,9 @@ class ForgeMindTUI(App[None]):
                         yield Static(id="transport-compact", classes="overview-card")
                         yield Static(id="final-compact", classes="overview-card")
                     yield Label("Pipeline stages", classes="section-title")
-                    yield DataTable(id="stage-table")
+                    with Horizontal(id="overview-split"):
+                        yield DataTable(id="stage-table")
+                        yield TextArea("", id="stage-detail-view")
             with TabPane("Events", id="events"):
                 with Vertical(id="events-pane"):
                     yield Label("Workflow events", classes="section-title")
@@ -257,12 +266,14 @@ class ForgeMindTUI(App[None]):
         conversation_table.add_columns("When", "Mode", "Conversation", "Sandbox", "WebSocket", "Status")
 
         self.query_one("#evidence-view", TextArea).read_only = True
+        self.query_one("#stage-detail-view", TextArea).read_only = True
         self.query_one("#report-view", TextArea).read_only = True
         self.query_one("#error-view", TextArea).read_only = True
         self._refresh_log_path()
         self._refresh_status_bar()
         self._refresh_summary_cards()
         self._refresh_transport_panels()
+        self._show_stage_by_name("intake")
         self.query_one("#task-editor", TextArea).focus()
 
     def action_clear_log(self) -> None:
@@ -317,6 +328,8 @@ class ForgeMindTUI(App[None]):
         self.query_one("#evidence-view", TextArea).text = ""
         self.query_one("#report-view", TextArea).text = ""
         self.query_one("#error-view", TextArea).text = ""
+        self.query_one("#run", Button).disabled = False
+        self.query_one("#open-cockpit", Button).disabled = False
         self._refresh_log_path()
         self._refresh_stage_table()
         self._refresh_status_bar()
@@ -325,16 +338,80 @@ class ForgeMindTUI(App[None]):
         self.query_one("#workflow-tabs", TabbedContent).active = "task"
         self.query_one("#task-editor", TextArea).focus()
 
-    @on(DataTable.RowSelected, "#artifacts-table")
-    def _on_artifact_selected(self, event: DataTable.RowSelected) -> None:
-        if event.row_key is None:
-            return
-        row_index = int(str(event.row_key))
+    def _show_artifact_by_index(self, row_index: int) -> None:
         if 0 <= row_index < len(self.artifact_rows):
             row = self.artifact_rows[row_index]
             path = Path(row["path"])
             if path.exists():
                 self.query_one("#evidence-view", TextArea).text = path.read_text(encoding="utf-8", errors="replace")
+            else:
+                self.query_one("#evidence-view", TextArea).text = f"Artifact file not found:\n{path}"
+
+    def _stage_detail_text(self, stage: str) -> str:
+        parts = [
+            f"Stage: {stage}",
+            f"Status: {self.stage_status.get(stage, 'pending')}",
+            f"Last update: {self.stage_started_at.get(stage, '')}",
+            "",
+            "Message:",
+            self.stage_message.get(stage, ''),
+        ]
+        if self.final_report is not None:
+            if stage == "route" and self.final_report.route is not None:
+                parts += [
+                    "",
+                    "Route decision:",
+                    json.dumps(self.final_report.route.model_dump(mode="json"), ensure_ascii=False, indent=2),
+                ]
+            elif stage == "research" and self.final_report.research is not None:
+                parts += [
+                    "",
+                    "Research result:",
+                    json.dumps(self.final_report.research.model_dump(mode="json"), ensure_ascii=False, indent=2),
+                ]
+            elif stage == "plan" and self.final_report.plan is not None:
+                parts += [
+                    "",
+                    "Execution plan:",
+                    json.dumps(self.final_report.plan.model_dump(mode="json"), ensure_ascii=False, indent=2),
+                ]
+            elif stage == "verify" and self.final_report.verification is not None:
+                parts += [
+                    "",
+                    "Verification:",
+                    json.dumps(self.final_report.verification.model_dump(mode="json"), ensure_ascii=False, indent=2),
+                ]
+        return "\n".join(str(part) for part in parts if part is not None)
+
+    def _show_stage_by_name(self, stage: str) -> None:
+        if stage in STAGES:
+            self.query_one("#stage-detail-view", TextArea).text = self._stage_detail_text(stage)
+
+    @on(DataTable.RowSelected, "#artifacts-table")
+    def _on_artifact_selected(self, event: DataTable.RowSelected) -> None:
+        try:
+            row_index = int(str(getattr(event.row_key, "value", event.row_key)))
+        except Exception:
+            return
+        self._show_artifact_by_index(row_index)
+
+    @on(DataTable.CellSelected, "#artifacts-table")
+    def _on_artifact_cell_selected(self, event: DataTable.CellSelected) -> None:
+        self._show_artifact_by_index(int(event.coordinate.row))
+
+    @on(DataTable.RowSelected, "#stage-table")
+    def _on_stage_selected(self, event: DataTable.RowSelected) -> None:
+        stage = str(getattr(event.row_key, "value", event.row_key))
+        self._show_stage_by_name(stage)
+
+    @on(DataTable.CellSelected, "#stage-table")
+    def _on_stage_cell_selected(self, event: DataTable.CellSelected) -> None:
+        try:
+            row = self.query_one("#stage-table", DataTable).get_row_at(event.coordinate.row)
+            stage = str(row[0])
+        except Exception:
+            stage = STAGES[int(event.coordinate.row)] if int(event.coordinate.row) < len(STAGES) else ""
+        self._show_stage_by_name(stage)
 
     @on(RuntimeEventMessage)
     def _on_runtime_event(self, message: RuntimeEventMessage) -> None:
@@ -363,6 +440,9 @@ class ForgeMindTUI(App[None]):
             self._append_log(event)
             self._ingest_artifact_payload(event.payload)
             self._refresh_stage_table()
+            if self.running and self.query_one("#workflow-tabs", TabbedContent).active == "task":
+                self.query_one("#workflow-tabs", TabbedContent).active = "overview"
+            self._show_stage_by_name(event.stage)
             self._refresh_status_bar()
             self._refresh_summary_cards()
         except Exception as exc:  # pragma: no cover - interactive path
@@ -371,6 +451,8 @@ class ForgeMindTUI(App[None]):
     @on(RunFinishedMessage)
     def _on_finished(self, message: RunFinishedMessage) -> None:
         self.running = False
+        self.query_one("#run", Button).disabled = False
+        self.query_one("#open-cockpit", Button).disabled = False
         self.final_report = message.report
         self.current_status = f"completed: {message.report.status}"
         self.current_stage = "finalize"
@@ -379,10 +461,13 @@ class ForgeMindTUI(App[None]):
         self._refresh_summary_cards()
         self._sync_artifacts_from_report(message.report)
         self.query_one("#workflow-tabs", TabbedContent).active = "overview"
+        self._show_stage_by_name("finalize")
 
     @on(RunFailedMessage)
     def _on_failed(self, message: RunFailedMessage) -> None:
         self.running = False
+        self.query_one("#run", Button).disabled = False
+        self.query_one("#open-cockpit", Button).disabled = False
         self.last_error = message.error_text
         self.current_status = "failed"
         self.query_one("#event-log", RichLog).write(f"Run failed: {message.error_text}")
@@ -552,6 +637,10 @@ class ForgeMindTUI(App[None]):
         final_lines = ["Final / verification", ""]
         if self.final_report is not None:
             final_lines.append(f"final_status: {self.final_report.status}")
+            if self.final_report.route is not None:
+                final_lines.append(f"needs_research: {self.final_report.route.needs_fresh_external_research}")
+                final_lines.append(f"needs_repo_obs: {self.final_report.route.needs_repository_observation}")
+                final_lines.append(f"needs_world_obs: {self.final_report.route.needs_world_observation}")
             if self.final_report.plan is not None:
                 final_lines.append(f"intent: {self.final_report.plan.task_intent}")
                 final_lines.append(f"deliverable: {self.final_report.plan.deliverable_kind}")
@@ -637,9 +726,12 @@ class ForgeMindTUI(App[None]):
         self.running = True
         self.current_stage = "boot"
         self.current_status = "initializing workflow"
+        self.query_one("#run", Button).disabled = True
+        self.query_one("#open-cockpit", Button).disabled = True
         self._refresh_status_bar()
         self.query_one("#event-log", RichLog).write("Starting workflow run...")
         self.query_one("#workflow-tabs", TabbedContent).active = "overview"
+        self.call_after_refresh(lambda: self.query_one("#stage-table", DataTable).focus())
         self.run_worker(self._run_workflow(), exclusive=True, thread=False)
 
     async def _run_workflow(self) -> None:

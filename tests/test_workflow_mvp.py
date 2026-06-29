@@ -21,21 +21,38 @@ async def test_workflow_mvp_runs_end_to_end(tmp_path) -> None:
                     "normalized_task": "Inspect repo and fix failing tests",
                     "needs_world_facts": True,
                     "execution_family": ExecutionFamily.REPOSITORY_CHANGE.value,
+                    "task_intent": "modify",
                     "capabilities": [Capability.REPO_READ.value, Capability.REPO_WRITE.value, Capability.GIT_WRITE.value],
                     "observation_focus": ["find failing test commands", "identify changed files"],
                     "reasoning": "Need repository facts before planning.",
                     "risk_level": "medium",
                 }
             ],
+            "route_analysis": [
+                {
+                    "needs_repository_observation": True,
+                    "needs_world_observation": False,
+                    "needs_fresh_external_research": False,
+                    "can_plan_immediately": False,
+                    "required_evidence_types": ["repo_structure", "repo_patterns"],
+                    "research_targets": [],
+                    "observation_focus": ["find failing test commands", "identify changed files"],
+                    "reasoning": "Need repository evidence before planning.",
+                }
+            ],
             "planning": [
                 {
                     "summary": "Edit failing code path and validate",
                     "execution_family": ExecutionFamily.REPOSITORY_CHANGE.value,
+                    "task_intent": "modify",
+                    "deliverable_kind": "repository_changes",
                     "capabilities": [Capability.REPO_WRITE.value, Capability.GIT_WRITE.value],
                     "steps": ["inspect failing path", "edit code", "run tests"],
                     "success_criteria": ["target tests pass"],
                     "verification_checks": ["run pytest target"],
                     "requires_mutation": True,
+                    "must_change_world": True,
+                    "expected_repo_changes": ["src/app.py updated"],
                     "reasoning": "Observation evidence indicates a concrete code fix is needed.",
                 }
             ],
@@ -69,19 +86,20 @@ async def test_workflow_mvp_runs_end_to_end(tmp_path) -> None:
     report = await controller.run(Task(description="Inspect repo metacoma/freeplane_plugin_grpc and fix failing tests"))
     assert report.status == "completed"
     assert report.classification is not None
+    assert report.route is not None and report.route.needs_repository_observation is True
     assert report.plan is not None
     assert report.policy is not None and report.policy.requires_approval is True
     assert report.approval is not None and report.approval.approved is True
     assert report.execution is not None
     assert report.verification is not None and report.verification.passed is True
     assert report.verification.checks_passed == ["run pytest target"]
-    assert len(report.artifact_ids) >= 8
+    assert len(report.artifact_ids) >= 9
     assert len(openhands.calls["observe"]) == 1
     assert len(openhands.calls["execute"]) == 1
     assert len(openhands.calls["verify"]) == 0
 
 
-async def test_repository_task_forces_observation_even_if_classifier_says_no_world_facts(tmp_path) -> None:
+async def test_route_analysis_can_require_repo_observation_even_if_classifier_says_no_world_facts(tmp_path) -> None:
     artifact_store = ArtifactStore(tmp_path / "artifacts")
     llm = ScriptedLLMBackend(
         {
@@ -90,21 +108,38 @@ async def test_repository_task_forces_observation_even_if_classifier_says_no_wor
                     "normalized_task": "Add C++ gRPC client",
                     "needs_world_facts": False,
                     "execution_family": ExecutionFamily.REPOSITORY_CHANGE.value,
+                    "task_intent": "implement",
                     "capabilities": [Capability.REPO_READ.value, Capability.REPO_WRITE.value],
                     "observation_focus": [],
-                    "reasoning": "Classifier underestimates need for repo facts.",
+                    "reasoning": "Classification alone is not enough.",
                     "risk_level": "medium",
+                }
+            ],
+            "route_analysis": [
+                {
+                    "needs_repository_observation": True,
+                    "needs_world_observation": False,
+                    "needs_fresh_external_research": False,
+                    "can_plan_immediately": False,
+                    "required_evidence_types": ["repo_patterns", "build_instructions"],
+                    "research_targets": [],
+                    "observation_focus": ["inspect existing clients", "inspect build files"],
+                    "reasoning": "Need repository observation before planning.",
                 }
             ],
             "planning": [
                 {
                     "summary": "Implement the new client after inspecting existing clients",
                     "execution_family": ExecutionFamily.REPOSITORY_CHANGE.value,
+                    "task_intent": "implement",
+                    "deliverable_kind": "repository_changes",
                     "capabilities": [Capability.REPO_WRITE.value],
                     "steps": ["inspect repo", "implement client", "build"],
                     "success_criteria": ["new client exists", "build works"],
                     "verification_checks": ["confirm files exist", "confirm build output"],
                     "requires_mutation": True,
+                    "must_change_world": True,
+                    "expected_repo_changes": ["cpp client files", "build config updates"],
                     "reasoning": "Repo evidence is required and was collected before planning.",
                 }
             ],
@@ -136,7 +171,88 @@ async def test_repository_task_forces_observation_even_if_classifier_says_no_wor
     )
     report = await controller.run(Task(description="Work with repository metacoma/freeplane_plugin_grpc and add a C++ gRPC client"))
     assert report.status == "completed"
+    assert report.route is not None and report.route.needs_repository_observation is True
     assert len(openhands.calls["observe"]) == 1
+
+
+async def test_route_analysis_can_require_fresh_external_research_before_planning(tmp_path) -> None:
+    artifact_store = ArtifactStore(tmp_path / "artifacts")
+    llm = ScriptedLLMBackend(
+        {
+            "classification": [
+                {
+                    "normalized_task": "Add C++ gRPC client using current docs",
+                    "needs_world_facts": False,
+                    "execution_family": ExecutionFamily.REPOSITORY_CHANGE.value,
+                    "task_intent": "implement",
+                    "capabilities": [Capability.REPO_READ.value, Capability.REPO_WRITE.value],
+                    "observation_focus": ["inspect existing clients"],
+                    "reasoning": "Need repo changes.",
+                    "risk_level": "medium",
+                }
+            ],
+            "route_analysis": [
+                {
+                    "needs_repository_observation": True,
+                    "needs_world_observation": False,
+                    "needs_fresh_external_research": True,
+                    "can_plan_immediately": False,
+                    "required_evidence_types": ["official_docs", "package_versions", "repo_patterns"],
+                    "research_targets": ["gRPC C++ official docs", "protobuf C++ generation docs"],
+                    "observation_focus": ["inspect existing clients", "inspect build files"],
+                    "reasoning": "Need both fresh docs and repo evidence before planning.",
+                }
+            ],
+            "planning": [
+                {
+                    "summary": "Implement C++ client using current gRPC and protobuf guidance",
+                    "execution_family": ExecutionFamily.REPOSITORY_CHANGE.value,
+                    "task_intent": "implement",
+                    "deliverable_kind": "repository_changes",
+                    "capabilities": [Capability.REPO_WRITE.value],
+                    "steps": ["inspect repo", "use current docs", "implement client", "build"],
+                    "success_criteria": ["cpp client exists", "build works"],
+                    "verification_checks": ["confirm files exist", "confirm build output"],
+                    "requires_mutation": True,
+                    "must_change_world": True,
+                    "expected_repo_changes": ["cpp client files", "build config updates"],
+                    "reasoning": "Research and repo evidence were both collected.",
+                }
+            ],
+            "verification": [
+                {
+                    "passed": True,
+                    "summary": "Execution evidence matches the researched plan.",
+                    "checks_passed": ["confirm files exist", "confirm build output"],
+                    "checks_failed": [],
+                    "missing_evidence": [],
+                    "confidence": "medium",
+                    "reasoning": "Research and repo evidence were available before execution.",
+                }
+            ],
+        }
+    )
+    openhands = FakeOpenHandsAdapter(
+        artifact_store,
+        scripts={
+            "observe": [
+                "Research evidence: official gRPC C++ docs and protobuf generation docs located with current version references.",
+                "Repository evidence: found existing ruby/rust/python/nodejs clients and build files.",
+            ],
+            "execute": ["Implemented cpp client and build integration; build passed."],
+        },
+    )
+    controller = WorkflowController(
+        llm_backend=llm,
+        openhands_adapter=openhands,
+        artifact_root=tmp_path / "artifacts",
+        approval_provider=StaticApprovalProvider(approve=True, reviewer="test"),
+    )
+    report = await controller.run(Task(description="Work with repository metacoma/freeplane_plugin_grpc and add a C++ gRPC client using the current official gRPC/protobuf docs"))
+    assert report.status == "completed"
+    assert report.route is not None and report.route.needs_fresh_external_research is True
+    assert report.research is not None and report.research.ok is True
+    assert len(openhands.calls["observe"]) == 2
 
 
 async def test_html_execution_evidence_fails_verification_without_second_openhands_run(tmp_path) -> None:
@@ -148,21 +264,38 @@ async def test_html_execution_evidence_fails_verification_without_second_openhan
                     "normalized_task": "Modify repo",
                     "needs_world_facts": True,
                     "execution_family": ExecutionFamily.REPOSITORY_CHANGE.value,
+                    "task_intent": "modify",
                     "capabilities": [Capability.REPO_READ.value, Capability.REPO_WRITE.value],
                     "observation_focus": ["inspect repo"],
                     "reasoning": "Need repo facts.",
                     "risk_level": "medium",
                 }
             ],
+            "route_analysis": [
+                {
+                    "needs_repository_observation": True,
+                    "needs_world_observation": False,
+                    "needs_fresh_external_research": False,
+                    "can_plan_immediately": False,
+                    "required_evidence_types": ["repo_structure"],
+                    "research_targets": [],
+                    "observation_focus": ["inspect repo"],
+                    "reasoning": "Need repository evidence before mutation.",
+                }
+            ],
             "planning": [
                 {
                     "summary": "Make repo change",
                     "execution_family": ExecutionFamily.REPOSITORY_CHANGE.value,
+                    "task_intent": "modify",
+                    "deliverable_kind": "repository_changes",
                     "capabilities": [Capability.REPO_WRITE.value],
                     "steps": ["edit file"],
                     "success_criteria": ["expected file changed"],
                     "verification_checks": ["confirm changed file", "confirm test output"],
                     "requires_mutation": True,
+                    "must_change_world": True,
+                    "expected_repo_changes": ["a file should change"],
                     "reasoning": "Need mutation.",
                 }
             ],
@@ -205,6 +338,18 @@ async def test_planner_cannot_degrade_implementation_task_into_documentation_onl
                     "risk_level": "medium",
                 }
             ],
+            "route_analysis": [
+                {
+                    "needs_repository_observation": True,
+                    "needs_world_observation": False,
+                    "needs_fresh_external_research": True,
+                    "can_plan_immediately": False,
+                    "required_evidence_types": ["repo_patterns", "official_docs", "api_examples"],
+                    "research_targets": ["gRPC C++ official docs", "protobuf C++ code generation docs"],
+                    "observation_focus": ["inspect existing clients", "inspect build files"],
+                    "reasoning": "Need both fresh external docs and repository evidence before planning implementation.",
+                }
+            ],
             "planning": [
                 {
                     "summary": "Analyze existing clients and document the steps to add C++ support",
@@ -226,7 +371,10 @@ async def test_planner_cannot_degrade_implementation_task_into_documentation_onl
     openhands = FakeOpenHandsAdapter(
         artifact_store,
         scripts={
-            "observe": ["Found ruby/rust/python/nodejs clients and proto/build files."],
+            "observe": [
+                "Research evidence: official gRPC and protobuf docs gathered.",
+                "Repository evidence: Found ruby/rust/python/nodejs clients and proto/build files.",
+            ],
             "execute": ["should not run"],
         },
     )
@@ -236,8 +384,108 @@ async def test_planner_cannot_degrade_implementation_task_into_documentation_onl
         artifact_root=tmp_path / "artifacts",
         approval_provider=StaticApprovalProvider(approve=True, reviewer="test"),
     )
-    report = await controller.run(Task(description="Work with repository metacoma/freeplane_plugin_grpc and add a C++ gRPC client"))
+    report = await controller.run(Task(description="Work with repository metacoma/freeplane_plugin_grpc and add a C++ gRPC client using current docs"))
     assert report.status == "blocked"
     assert report.policy is not None and report.policy.blocked is True
     assert any("degraded" in reason.lower() or "documentation" in reason.lower() for reason in report.policy.reasons)
     assert len(openhands.calls["execute"]) == 0
+
+
+async def test_repository_change_marks_incomplete_when_integration_and_push_obligations_missing(tmp_path) -> None:
+    artifact_store = ArtifactStore(tmp_path / "artifacts")
+    llm = ScriptedLLMBackend(
+        {
+            "classification": [
+                {
+                    "normalized_task": "Add C++ gRPC client",
+                    "needs_world_facts": True,
+                    "execution_family": ExecutionFamily.REPOSITORY_CHANGE.value,
+                    "task_intent": "implement",
+                    "capabilities": [Capability.REPO_READ.value, Capability.REPO_WRITE.value, Capability.GIT_WRITE.value],
+                    "observation_focus": ["inspect existing clients", "inspect test topology"],
+                    "reasoning": "Need repo evidence before planning.",
+                    "risk_level": "medium",
+                }
+            ],
+            "route_analysis": [
+                {
+                    "needs_repository_observation": True,
+                    "needs_world_observation": False,
+                    "needs_fresh_external_research": False,
+                    "can_plan_immediately": False,
+                    "required_evidence_types": ["repo_patterns", "build_instructions"],
+                    "research_targets": [],
+                    "observation_focus": ["inspect existing clients", "inspect integration tests"],
+                    "reasoning": "Need repository observation before planning.",
+                }
+            ],
+            "planning": [
+                {
+                    "summary": "Implement the C++ client and make the repo deliverable-ready",
+                    "execution_family": ExecutionFamily.REPOSITORY_CHANGE.value,
+                    "task_intent": "implement",
+                    "deliverable_kind": "repository_changes",
+                    "capabilities": [Capability.REPO_WRITE.value, Capability.GIT_WRITE.value],
+                    "steps": ["inspect repo", "implement client", "install deps", "run build", "run integration tests"],
+                    "success_criteria": ["cpp client exists", "build works", "integration tests cover the new client", "changes are pushed"],
+                    "verification_checks": ["confirm files exist", "confirm build output", "confirm integration test evidence", "confirm push evidence"],
+                    "requires_mutation": True,
+                    "must_change_world": True,
+                    "expected_repo_changes": ["cpp client files", "build config updates", "integration tests"],
+                    "required_test_levels": ["build", "unit", "integration"],
+                    "required_setup_steps": ["install grpc/protobuf/cmake test dependencies in docker container"],
+                    "require_commit": True,
+                    "require_push": True,
+                    "execution_environment": "docker_container",
+                    "environment_notes": ["execution runs inside Docker"],
+                    "reasoning": "New client surface requires integration coverage and publish completion.",
+                }
+            ],
+            "verification": [
+                {
+                    "passed": False,
+                    "summary": "The client was implemented, but integration tests were not shown and no push evidence was captured.",
+                    "checks_passed": ["confirm files exist", "confirm build output"],
+                    "checks_failed": ["confirm integration test evidence", "confirm push evidence"],
+                    "missing_evidence": ["integration test run", "git push result"],
+                    "confidence": "high",
+                    "reasoning": "Unit/build evidence exists, but required integration and publish obligations are missing.",
+                    "performed_test_levels": ["build", "unit"],
+                    "missing_test_levels": ["integration"],
+                    "setup_steps_performed": [],
+                    "missing_setup_steps": ["install grpc/protobuf/cmake test dependencies in docker container"],
+                    "commit_required": True,
+                    "push_required": True,
+                    "commit_done": False,
+                    "push_done": False,
+                    "missing_obligations": ["install docker test dependencies", "run integration tests", "commit changes", "push changes"],
+                    "completion_status": "partially_completed",
+                }
+            ],
+        }
+    )
+    openhands = FakeOpenHandsAdapter(
+        artifact_store,
+        scripts={
+            "observe": ["Observed existing clients and integration harness files in the repository."],
+            "execute": [
+                "Implemented the cpp client, updated build files, and ran unit tests only.",
+                "Checked git status in Docker container; changes remain uncommitted and nothing was pushed.",
+            ],
+            "verify": ["unused in evidence-backed verification"],
+        },
+    )
+    controller = WorkflowController(
+        llm_backend=llm,
+        openhands_adapter=openhands,
+        artifact_root=tmp_path / "artifacts",
+        approval_provider=StaticApprovalProvider(approve=True, reviewer="test"),
+    )
+    report = await controller.run(Task(description="Add a C++ gRPC client in the repository and leave the change pushed and fully tested"))
+    assert report.status == "partially_completed"
+    assert report.publish is not None
+    assert report.verification is not None
+    assert report.verification.missing_test_levels == ["integration"]
+    assert report.verification.push_required is True
+    assert report.verification.push_done is False
+    assert len(openhands.calls["execute"]) == 2

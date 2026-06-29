@@ -89,6 +89,18 @@ class TaskClassification(RuntimeModel):
     risk_level: str = "low"
 
 
+class RoutingDecision(RuntimeModel):
+    id: str = Field(default_factory=lambda: new_id("route"))
+    needs_repository_observation: bool = False
+    needs_world_observation: bool = False
+    needs_fresh_external_research: bool = False
+    can_plan_immediately: bool = True
+    required_evidence_types: list[str] = Field(default_factory=list)
+    research_targets: list[str] = Field(default_factory=list)
+    observation_focus: list[str] = Field(default_factory=list)
+    reasoning: str
+
+
 class ObservationRequest(RuntimeModel):
     id: str = Field(default_factory=lambda: new_id("observe_req"))
     task_id: str
@@ -145,6 +157,12 @@ class ExecutionPlan(RuntimeModel):
     requires_mutation: bool = False
     must_change_world: bool = False
     expected_repo_changes: list[str] = Field(default_factory=list)
+    required_test_levels: list[str] = Field(default_factory=list)
+    required_setup_steps: list[str] = Field(default_factory=list)
+    require_commit: bool = False
+    require_push: bool = False
+    execution_environment: str = "docker_container"
+    environment_notes: list[str] = Field(default_factory=list)
     reasoning: str
 
 
@@ -192,6 +210,29 @@ class ExecutionResult(RuntimeModel):
     created_at: str = Field(default_factory=utc_now)
 
 
+class PublishRequest(RuntimeModel):
+    id: str = Field(default_factory=lambda: new_id("publish_req"))
+    execution_result_id: str
+    task_id: str
+    prompt: str
+    require_commit: bool = False
+    require_push: bool = False
+    metadata: JsonDict = Field(default_factory=dict)
+
+
+class PublishResult(RuntimeModel):
+    id: str = Field(default_factory=lambda: new_id("publish_res"))
+    request_id: str
+    ok: bool
+    summary: str
+    evidence_text: str
+    artifacts: list[Artifact] = Field(default_factory=list)
+    conversation_id: str | None = None
+    transport_error: bool = False
+    evidence_kind: str = "agent_text"
+    created_at: str = Field(default_factory=utc_now)
+
+
 class VerificationRequest(RuntimeModel):
     id: str = Field(default_factory=lambda: new_id("verify_req"))
     execution_result_id: str
@@ -210,6 +251,16 @@ class EvidenceVerification(RuntimeModel):
     missing_evidence: list[str] = Field(default_factory=list)
     confidence: str = "low"
     reasoning: str
+    performed_test_levels: list[str] = Field(default_factory=list)
+    missing_test_levels: list[str] = Field(default_factory=list)
+    setup_steps_performed: list[str] = Field(default_factory=list)
+    missing_setup_steps: list[str] = Field(default_factory=list)
+    commit_required: bool = False
+    push_required: bool = False
+    commit_done: bool = False
+    push_done: bool = False
+    missing_obligations: list[str] = Field(default_factory=list)
+    completion_status: str = "partially_completed"
 
 
 class VerificationResult(RuntimeModel):
@@ -225,6 +276,16 @@ class VerificationResult(RuntimeModel):
     missing_evidence: list[str] = Field(default_factory=list)
     confidence: str = "low"
     verifier_backend: str = "evidence_llm"
+    performed_test_levels: list[str] = Field(default_factory=list)
+    missing_test_levels: list[str] = Field(default_factory=list)
+    setup_steps_performed: list[str] = Field(default_factory=list)
+    missing_setup_steps: list[str] = Field(default_factory=list)
+    commit_required: bool = False
+    push_required: bool = False
+    commit_done: bool = False
+    push_done: bool = False
+    missing_obligations: list[str] = Field(default_factory=list)
+    completion_status: str = "partially_completed"
     created_at: str = Field(default_factory=utc_now)
 
 
@@ -234,11 +295,14 @@ class FinalReport(RuntimeModel):
     status: str
     summary: str
     classification: TaskClassification | None = None
+    route: RoutingDecision | None = None
     plan: ExecutionPlan | None = None
     policy: PolicyDecision | None = None
     approval: ApprovalRequest | None = None
+    research: ObservationResult | None = None
     observation: ObservationResult | None = None
     execution: ExecutionResult | None = None
+    publish: PublishResult | None = None
     verification: VerificationResult | None = None
     artifact_ids: list[str] = Field(default_factory=list)
     created_at: str = Field(default_factory=utc_now)

@@ -5,8 +5,13 @@ from typing import Any
 
 from artifact_workflow_runtime.artifacts import ArtifactStore
 from artifact_workflow_runtime.context import ContextBuilder
-from artifact_workflow_runtime.families import family_requires_evidence_gate, family_requires_observation, infer_task_intent, task_text_suggests_world_facts
-from artifact_workflow_runtime.llm_backend.prompts import build_classification_prompt, build_plan_prompt, build_verification_prompt
+from artifact_workflow_runtime.families import family_requires_evidence_gate
+from artifact_workflow_runtime.llm_backend.prompts import (
+    build_classification_prompt,
+    build_plan_prompt,
+    build_route_prompt,
+    build_verification_prompt,
+)
 from artifact_workflow_runtime.models import (
     ApprovalRequest,
     ContextPacket,
@@ -17,6 +22,9 @@ from artifact_workflow_runtime.models import (
     LLMRequest,
     ObservationResult,
     PolicyDecision,
+    PublishRequest,
+    PublishResult,
+    RoutingDecision,
     Task,
     TaskClassification,
     VerificationRequest,
@@ -47,12 +55,12 @@ class WorkflowServices:
     event_sink: EventSink | None = None
 
 
-def _effective_task_intent(task: Task, classification: TaskClassification) -> str:
-    inferred = infer_task_intent(task.description)
-    classified = (classification.task_intent or "").strip().lower()
-    if inferred in {"implement", "modify"} and classified not in {"implement", "modify"}:
-        return inferred
-    return classified or inferred or "investigate"
+_ALLOWED_INTENTS = {"implement", "modify", "investigate", "document", "verify"}
+
+
+def _effective_task_intent(classification: TaskClassification) -> str:
+    intent = (classification.task_intent or "").strip().lower()
+    return intent if intent in _ALLOWED_INTENTS else "investigate"
 
 
 def _plan_is_analysis_only(plan: ExecutionPlan) -> bool:
@@ -64,15 +72,16 @@ def _plan_is_analysis_only(plan: ExecutionPlan) -> bool:
     return has_analysis and not has_implementation
 
 
-def _plan_intent_mismatch(task: Task, classification: TaskClassification, plan: ExecutionPlan) -> str | None:
-    expected = _effective_task_intent(task, classification)
+def _plan_intent_mismatch(classification: TaskClassification, plan: ExecutionPlan) -> str | None:
+    expected = _effective_task_intent(classification)
     raw_actual = (plan.task_intent or "").strip().lower()
     raw_deliverable = (plan.deliverable_kind or "").strip().lower()
     text = " ".join([plan.summary, *plan.steps, *plan.success_criteria]).lower()
-    has_implementation_markers = any(marker in text for marker in ("implement", "add", "modify", "edit", "write code", "create", "update build", "run test", "compile", "fix"))
-    actual = raw_actual
-    if actual not in {"implement", "modify", "investigate", "document", "verify"}:
-        actual = ""
+    has_implementation_markers = any(
+        marker in text
+        for marker in ("implement", "add", "modify", "edit", "write code", "create", "update build", "run test", "compile", "fix")
+    )
+    actual = raw_actual if raw_actual in _ALLOWED_INTENTS else ""
     if actual in {"", "investigate"} and (plan.requires_mutation or plan.must_change_world or has_implementation_markers):
         actual = "implement"
     deliverable = raw_deliverable
@@ -92,19 +101,28 @@ def _plan_intent_mismatch(task: Task, classification: TaskClassification, plan: 
     return None
 
 
-
 def _append_artifact_id(state: WorkflowState, artifact_id: str) -> list[str]:
     return [*(state.get("artifact_ids") or []), artifact_id]
 
 
+def _publish_required(plan: ExecutionPlan) -> bool:
+    return bool(plan.require_commit or plan.require_push)
 
-def _extend_artifact_ids(state: WorkflowState, artifact_ids: list[str]) -> list[str]:
-    return [*(state.get("artifact_ids") or []), *artifact_ids]
+
+def _normalized_completion_status(parsed: EvidenceVerification) -> str:
+    if parsed.completion_status and parsed.completion_status != "partially_completed":
+        return parsed.completion_status
+    if parsed.passed and not parsed.missing_test_levels and not parsed.missing_setup_steps and not parsed.missing_obligations:
+        return "completed"
+    if parsed.passed and (parsed.push_required or parsed.commit_required) and (not parsed.push_done or not parsed.commit_done):
+        return "verified_not_published"
+    if not parsed.passed and (parsed.checks_passed or parsed.checks_failed or parsed.missing_test_levels or parsed.missing_obligations):
+        return "partially_completed"
+    return "blocked" if parsed.missing_evidence and not parsed.checks_passed else ("completed" if parsed.passed else "partially_completed")
 
 
 async def _emit(services: WorkflowServices, kind: str, stage: str, message: str, **payload: Any) -> None:
     await emit_event(services.event_sink, kind, stage, message, payload)
-
 
 
 def build_workflow_graph(services: WorkflowServices):
@@ -125,7 +143,16 @@ def build_workflow_graph(services: WorkflowServices):
         request = LLMRequest(kind="classification", prompt=build_classification_prompt(task), task_id=task.id)
         result, parsed = await services.llm_backend.complete_json(request, TaskClassification)
         artifact = services.artifact_store.add_json("classification", parsed.model_dump(mode="json"))
-        await _emit(services, "stage_completed", "classify", "Classification completed", execution_family=parsed.execution_family.value, needs_world_facts=parsed.needs_world_facts, task_intent=parsed.task_intent, artifact_id=artifact.id)
+        await _emit(
+            services,
+            "stage_completed",
+            "classify",
+            "Classification completed",
+            execution_family=parsed.execution_family.value,
+            needs_world_facts=parsed.needs_world_facts,
+            task_intent=parsed.task_intent,
+            artifact_id=artifact.id,
+        )
         return {
             "classification_request": request.model_dump(mode="json"),
             "classification_result": result.model_dump(mode="json"),
@@ -134,21 +161,91 @@ def build_workflow_graph(services: WorkflowServices):
             "status": "classified",
         }
 
-    def classify_next(state: WorkflowState) -> str:
+    async def route_node(state: WorkflowState) -> dict[str, Any]:
         task = Task.model_validate(state["task"])
         classification = TaskClassification.model_validate(state["classification"])
-        must_observe = classification.needs_world_facts or family_requires_observation(classification.execution_family) or task_text_suggests_world_facts(task.description)
-        return "observe" if must_observe else "build_context"
+        await _emit(services, "stage_started", "route", "Analyzing evidence requirements before planning", task_id=task.id)
+        request = LLMRequest(kind="route_analysis", prompt=build_route_prompt(task, classification), task_id=task.id)
+        result, parsed = await services.llm_backend.complete_json(request, RoutingDecision)
+        artifact = services.artifact_store.add_json("route_decision", parsed.model_dump(mode="json"))
+        await _emit(
+            services,
+            "stage_completed",
+            "route",
+            "Route decision completed",
+            needs_repository_observation=parsed.needs_repository_observation,
+            needs_world_observation=parsed.needs_world_observation,
+            needs_fresh_external_research=parsed.needs_fresh_external_research,
+            can_plan_immediately=parsed.can_plan_immediately,
+            artifact_id=artifact.id,
+        )
+        return {
+            "route_request": request.model_dump(mode="json"),
+            "route_result": result.model_dump(mode="json"),
+            "route_decision": parsed.model_dump(mode="json"),
+            "artifact_ids": _append_artifact_id(state, artifact.id),
+            "status": "routed",
+        }
 
-    async def observe_node(state: WorkflowState) -> dict[str, Any]:
+    def route_next(state: WorkflowState) -> str:
+        decision = RoutingDecision.model_validate(state["route_decision"])
+        if decision.needs_fresh_external_research:
+            return "research"
+        if decision.needs_repository_observation or decision.needs_world_observation:
+            return "observe"
+        return "build_context"
+
+    async def research_node(state: WorkflowState) -> dict[str, Any]:
         task = Task.model_validate(state["task"])
-        await _emit(services, "stage_started", "observe", "Collecting world facts through OpenHands", task_id=task.id)
         classification = TaskClassification.model_validate(state["classification"])
-        request = services.observation_service.build_request(task, classification)
+        route = RoutingDecision.model_validate(state["route_decision"])
+        await _emit(services, "stage_started", "research", "Collecting fresh external research evidence", task_id=task.id)
+        request = services.observation_service.build_research_request(task, classification, route)
         result = await services.openhands_adapter.observe(request)
         artifact_ids = list(state.get("artifact_ids") or [])
         artifact_ids.extend(artifact.id for artifact in result.artifacts)
-        await _emit(services, "stage_completed", "observe", "Observation completed", ok=result.ok, conversation_id=result.conversation_id, evidence_kind=result.evidence_kind, artifact_ids=[artifact.id for artifact in result.artifacts])
+        await _emit(
+            services,
+            "stage_completed",
+            "research",
+            "Research observation completed",
+            ok=result.ok,
+            conversation_id=result.conversation_id,
+            evidence_kind=result.evidence_kind,
+            artifact_ids=[artifact.id for artifact in result.artifacts],
+        )
+        return {
+            "research_request": request.model_dump(mode="json"),
+            "research_result": result.model_dump(mode="json"),
+            "artifact_ids": artifact_ids,
+            "status": "researched",
+        }
+
+    def research_next(state: WorkflowState) -> str:
+        decision = RoutingDecision.model_validate(state["route_decision"])
+        if decision.needs_repository_observation or decision.needs_world_observation:
+            return "observe"
+        return "build_context"
+
+    async def observe_node(state: WorkflowState) -> dict[str, Any]:
+        task = Task.model_validate(state["task"])
+        classification = TaskClassification.model_validate(state["classification"])
+        route = RoutingDecision.model_validate(state["route_decision"])
+        await _emit(services, "stage_started", "observe", "Collecting world facts through OpenHands", task_id=task.id)
+        request = services.observation_service.build_request(task, classification, route)
+        result = await services.openhands_adapter.observe(request)
+        artifact_ids = list(state.get("artifact_ids") or [])
+        artifact_ids.extend(artifact.id for artifact in result.artifacts)
+        await _emit(
+            services,
+            "stage_completed",
+            "observe",
+            "Observation completed",
+            ok=result.ok,
+            conversation_id=result.conversation_id,
+            evidence_kind=result.evidence_kind,
+            artifact_ids=[artifact.id for artifact in result.artifacts],
+        )
         return {
             "observation_request": request.model_dump(mode="json"),
             "observation_result": result.model_dump(mode="json"),
@@ -165,14 +262,23 @@ def build_workflow_graph(services: WorkflowServices):
             task_artifact = services.artifact_store.get(state["task_artifact"]["id"])
             artifacts.append(task_artifact)
             artifact_texts[task_artifact.id] = services.artifact_store.read_text(task_artifact.id)
-        if state.get("observation_result"):
-            for art in state["observation_result"].get("artifacts", []):
-                artifact = services.artifact_store.get(art["id"])
-                artifacts.append(artifact)
-                artifact_texts[artifact.id] = services.artifact_store.read_text(artifact.id)
+        for result_key in ("research_result", "observation_result"):
+            if state.get(result_key):
+                for art in state[result_key].get("artifacts", []):
+                    artifact = services.artifact_store.get(art["id"])
+                    artifacts.append(artifact)
+                    artifact_texts[artifact.id] = services.artifact_store.read_text(artifact.id)
         context_packet = services.context_builder.build(task, artifacts, artifact_texts=artifact_texts)
         artifact = services.artifact_store.add_text("context_packet", context_packet.text, metadata={"task_id": task.id})
-        await _emit(services, "stage_completed", "build_context", "Context packet built", artifact_count=len(context_packet.artifact_ids), section_count=len(context_packet.sections), artifact_id=artifact.id)
+        await _emit(
+            services,
+            "stage_completed",
+            "build_context",
+            "Context packet built",
+            artifact_count=len(context_packet.artifact_ids),
+            section_count=len(context_packet.sections),
+            artifact_id=artifact.id,
+        )
         return {
             "context_packet": context_packet.model_dump(mode="json"),
             "artifact_ids": _append_artifact_id(state, artifact.id),
@@ -181,6 +287,7 @@ def build_workflow_graph(services: WorkflowServices):
 
     async def plan_node(state: WorkflowState) -> dict[str, Any]:
         task = Task.model_validate(state["task"])
+        classification = TaskClassification.model_validate(state["classification"])
         await _emit(services, "stage_started", "plan", "Generating execution plan from task and evidence", task_id=task.id)
         context_packet_raw = state.get("context_packet")
         if context_packet_raw is None:
@@ -188,13 +295,23 @@ def build_workflow_graph(services: WorkflowServices):
         context_packet = ContextPacket.model_validate(context_packet_raw)
         request = LLMRequest(
             kind="planning",
-            prompt=build_plan_prompt(task, context_packet, _effective_task_intent(task, TaskClassification.model_validate(state["classification"]))),
+            prompt=build_plan_prompt(task, context_packet, _effective_task_intent(classification)),
             task_id=task.id,
             context_packet_id=context_packet.id,
         )
         result, parsed = await services.llm_backend.complete_json(request, ExecutionPlan)
         artifact = services.artifact_store.add_json("execution_plan", parsed.model_dump(mode="json"))
-        await _emit(services, "stage_completed", "plan", "Execution plan generated", execution_family=parsed.execution_family.value, task_intent=parsed.task_intent, deliverable_kind=parsed.deliverable_kind, requires_mutation=parsed.requires_mutation, artifact_id=artifact.id)
+        await _emit(
+            services,
+            "stage_completed",
+            "plan",
+            "Execution plan generated",
+            execution_family=parsed.execution_family.value,
+            task_intent=parsed.task_intent,
+            deliverable_kind=parsed.deliverable_kind,
+            requires_mutation=parsed.requires_mutation,
+            artifact_id=artifact.id,
+        )
         return {
             "plan_request": request.model_dump(mode="json"),
             "plan_result": result.model_dump(mode="json"),
@@ -204,13 +321,14 @@ def build_workflow_graph(services: WorkflowServices):
         }
 
     async def policy_node(state: WorkflowState) -> dict[str, Any]:
+        classification = TaskClassification.model_validate(state["classification"])
+        route = RoutingDecision.model_validate(state["route_decision"])
+        plan = ExecutionPlan.model_validate(state["plan"])
         task = Task.model_validate(state["task"])
         await _emit(services, "stage_started", "policy", "Checking policy and evidence gates", task_id=task.id)
-        classification = TaskClassification.model_validate(state["classification"])
-        plan = ExecutionPlan.model_validate(state["plan"])
         reasons: list[str] = []
         blocked = False
-        mismatch = _plan_intent_mismatch(task, classification, plan)
+        mismatch = _plan_intent_mismatch(classification, plan)
         if mismatch:
             blocked = True
             reasons.append(mismatch)
@@ -224,6 +342,16 @@ def build_workflow_graph(services: WorkflowServices):
                 if not observation.ok:
                     blocked = True
                     reasons.append("Execution requires usable observation evidence, but observation failed or returned transport garbage.")
+        if route.needs_fresh_external_research:
+            research_raw = state.get("research_result")
+            if research_raw is None:
+                blocked = True
+                reasons.append("Planning and execution require fresh external research evidence, but none was captured.")
+            else:
+                research = ObservationResult.model_validate(research_raw)
+                if not research.ok:
+                    blocked = True
+                    reasons.append("Fresh external research was required, but the research observation failed or returned unusable evidence.")
         if blocked:
             decision = PolicyDecision(
                 allowed=False,
@@ -236,7 +364,17 @@ def build_workflow_graph(services: WorkflowServices):
         else:
             decision = services.policy_engine.decide(classification, plan)
         artifact = services.artifact_store.add_json("policy_decision", decision.model_dump(mode="json"))
-        await _emit(services, "stage_completed", "policy", "Policy decision recorded", allowed=decision.allowed, blocked=decision.blocked, requires_approval=decision.requires_approval, reasons=list(decision.reasons), artifact_id=artifact.id)
+        await _emit(
+            services,
+            "stage_completed",
+            "policy",
+            "Policy decision recorded",
+            allowed=decision.allowed,
+            blocked=decision.blocked,
+            requires_approval=decision.requires_approval,
+            reasons=list(decision.reasons),
+            artifact_id=artifact.id,
+        )
         return {
             "policy_decision": decision.model_dump(mode="json"),
             "artifact_ids": _append_artifact_id(state, artifact.id),
@@ -277,19 +415,28 @@ def build_workflow_graph(services: WorkflowServices):
         await _emit(services, "stage_started", "execute", "Executing plan in OpenHands", task_id=task.id)
         plan = ExecutionPlan.model_validate(state["plan"])
         observation_result = ObservationResult.model_validate(state["observation_result"]) if state.get("observation_result") else None
+        context_packet = ContextPacket.model_validate(state["context_packet"]) if state.get("context_packet") else None
         observation_text = observation_result.evidence_text if observation_result else "No observation evidence was collected."
+        context_text = context_packet.text if context_packet else ""
         prompt = (
             "You are executing an approved controller plan.\n"
             "Use the environment as needed and make the requested changes.\n"
-            "Ground your work in the observation evidence below.\n\n"
+            "Ground your work in the evidence below.\n"
+            "The original task intent is primary; do not silently degrade implementation work into analysis-only output.\n\n"
             f"Task: {task.description}\n\n"
+            f"ContextPacket:\n{context_text}\n\n"
             f"Observation evidence:\n{observation_text}\n\n"
             f"Plan summary: {plan.summary}\n"
             "Steps:\n"
             + "\n".join(f"- {step}" for step in plan.steps)
             + "\n\nSuccess criteria:\n"
             + "\n".join(f"- {item}" for item in plan.success_criteria)
-            + "\n\nWhen finished, report concrete evidence: changed files, commands run, outputs, test/build results, blockers."
+            + "\n\nThe environment is a Docker container. Install any dependencies required to run the required test levels inside the container.\n"
+            + f"Required setup steps: {plan.required_setup_steps}\n"
+            + f"Required test levels: {plan.required_test_levels}\n"
+            + f"Require commit: {plan.require_commit}\n"
+            + f"Require push: {plan.require_push}\n"
+            + "\nWhen finished, report concrete evidence: changed files, commands run, outputs, setup/install steps, test/build results, blockers."
         )
         request = ExecutionRequest(
             task_id=task.id,
@@ -303,7 +450,17 @@ def build_workflow_graph(services: WorkflowServices):
         result = await services.openhands_adapter.execute(request)
         artifact_ids = list(state.get("artifact_ids") or [])
         artifact_ids.extend(artifact.id for artifact in result.artifacts)
-        await _emit(services, "stage_completed", "execute", "Execution finished", ok=result.ok, conversation_id=result.conversation_id, transport_error=result.transport_error, evidence_kind=result.evidence_kind, artifact_ids=[artifact.id for artifact in result.artifacts])
+        await _emit(
+            services,
+            "stage_completed",
+            "execute",
+            "Execution finished",
+            ok=result.ok,
+            conversation_id=result.conversation_id,
+            transport_error=result.transport_error,
+            evidence_kind=result.evidence_kind,
+            artifact_ids=[artifact.id for artifact in result.artifacts],
+        )
         return {
             "execution_request": request.model_dump(mode="json"),
             "execution_result": result.model_dump(mode="json"),
@@ -311,11 +468,88 @@ def build_workflow_graph(services: WorkflowServices):
             "status": "executed",
         }
 
+    def execute_next(state: WorkflowState) -> str:
+        plan = ExecutionPlan.model_validate(state["plan"])
+        execution = ExecutionResult.model_validate(state["execution_result"])
+        if execution.ok and _publish_required(plan):
+            return "publish"
+        return "verify"
+
+    async def publish_node(state: WorkflowState) -> dict[str, Any]:
+        task = Task.model_validate(state["task"])
+        plan = ExecutionPlan.model_validate(state["plan"])
+        execution = ExecutionResult.model_validate(state["execution_result"])
+        await _emit(services, "stage_started", "publish", "Ensuring commit/push obligations are satisfied", task_id=task.id)
+        prompt = (
+            "You are performing repository completion steps after implementation.\n"
+            "You are running inside a Docker container.\n"
+            "Use the existing workspace, credentials, and git remote configuration if available.\n"
+            "Do not re-implement the feature. Focus only on repository completion obligations.\n\n"
+            f"Task: {task.description}\n\n"
+            f"Require commit: {plan.require_commit}\n"
+            f"Require push: {plan.require_push}\n"
+            f"Execution summary: {execution.summary}\n\n"
+            "Do the following as needed:\n"
+            "- inspect git status and current branch\n"
+            "- create a commit if required and changes are not committed\n"
+            "- push the branch/changes if required and remote credentials allow it\n"
+            "- report exact commands, commit hashes, branch names, push results, and blockers\n"
+            "- if nothing is needed, state that commit/push obligations were already satisfied\n"
+        )
+        request = PublishRequest(
+            execution_result_id=execution.id,
+            task_id=task.id,
+            prompt=prompt,
+            require_commit=plan.require_commit,
+            require_push=plan.require_push,
+            metadata={"mode": "repo_completion", "execution_environment": plan.execution_environment},
+        )
+        run = await services.openhands_adapter.execute(
+            ExecutionRequest(
+                task_id=task.id,
+                execution_family=plan.execution_family,
+                capabilities=plan.capabilities,
+                prompt=prompt,
+                plan_summary="publish obligations",
+                metadata={"mode": "publish", "require_commit": plan.require_commit, "require_push": plan.require_push},
+            )
+        )
+        artifact_ids = list(state.get("artifact_ids") or [])
+        artifact_ids.extend(artifact.id for artifact in run.artifacts)
+        result = PublishResult(
+            request_id=request.id,
+            ok=run.ok,
+            summary=run.summary,
+            evidence_text=run.evidence_text,
+            artifacts=run.artifacts,
+            conversation_id=run.conversation_id,
+            transport_error=run.transport_error,
+            evidence_kind=run.evidence_kind,
+        )
+        await _emit(
+            services,
+            "stage_completed",
+            "publish",
+            "Publish obligations attempted",
+            ok=result.ok,
+            conversation_id=result.conversation_id,
+            require_commit=plan.require_commit,
+            require_push=plan.require_push,
+            artifact_ids=[artifact.id for artifact in result.artifacts],
+        )
+        return {
+            "publish_request": request.model_dump(mode="json"),
+            "publish_result": result.model_dump(mode="json"),
+            "artifact_ids": artifact_ids,
+            "status": "published",
+        }
+
     async def verify_node(state: WorkflowState) -> dict[str, Any]:
         task = Task.model_validate(state["task"])
         await _emit(services, "stage_started", "verify", "Verifying execution evidence", task_id=task.id)
         plan = ExecutionPlan.model_validate(state["plan"])
         execution = ExecutionResult.model_validate(state["execution_result"])
+        publish = PublishResult.model_validate(state["publish_result"]) if state.get("publish_result") else None
         artifact_ids = list(state.get("artifact_ids") or [])
         request = VerificationRequest(
             execution_result_id=execution.id,
@@ -334,10 +568,13 @@ def build_workflow_graph(services: WorkflowServices):
                 missing_evidence=["usable execution evidence"],
                 confidence="high" if execution.transport_error else "medium",
                 reasoning="Verification is blocked because execution evidence was empty or transport-corrupted.",
+                missing_obligations=["usable execution evidence"],
+                completion_status="blocked",
             )
             raw_text = parsed.model_dump_json(indent=2)
             verification_artifact = services.artifact_store.add_json("verification_assessment", parsed.model_dump(mode="json"))
             artifact_ids.append(verification_artifact.id)
+            completion_status = _normalized_completion_status(parsed)
             result = VerificationResult(
                 request_id=request.id,
                 passed=parsed.passed,
@@ -349,6 +586,16 @@ def build_workflow_graph(services: WorkflowServices):
                 missing_evidence=parsed.missing_evidence,
                 confidence=parsed.confidence,
                 verifier_backend="evidence_guard",
+                performed_test_levels=parsed.performed_test_levels,
+                missing_test_levels=parsed.missing_test_levels,
+                setup_steps_performed=parsed.setup_steps_performed,
+                missing_setup_steps=parsed.missing_setup_steps,
+                commit_required=parsed.commit_required,
+                push_required=parsed.push_required,
+                commit_done=parsed.commit_done,
+                push_done=parsed.push_done,
+                missing_obligations=parsed.missing_obligations,
+                completion_status=completion_status,
             )
         else:
             context_packet_raw = state.get("context_packet")
@@ -357,7 +604,7 @@ def build_workflow_graph(services: WorkflowServices):
             context_packet = ContextPacket.model_validate(context_packet_raw)
             llm_request = LLMRequest(
                 kind="verification",
-                prompt=build_verification_prompt(task, context_packet, plan, execution),
+                prompt=build_verification_prompt(task, context_packet, plan, execution, publish),
                 task_id=task.id,
                 context_packet_id=context_packet.id,
             )
@@ -369,6 +616,7 @@ def build_workflow_graph(services: WorkflowServices):
                 metadata={"request_id": llm_request.id, "backend": llm_result.backend, "model": llm_result.model},
             )
             artifact_ids.extend([verification_artifact.id, llm_artifact.id])
+            completion_status = _normalized_completion_status(parsed)
             request = VerificationRequest(
                 execution_result_id=execution.id,
                 execution_family=plan.execution_family,
@@ -388,8 +636,31 @@ def build_workflow_graph(services: WorkflowServices):
                 missing_evidence=parsed.missing_evidence,
                 confidence=parsed.confidence,
                 verifier_backend=llm_result.backend or "direct_llm",
+                performed_test_levels=parsed.performed_test_levels,
+                missing_test_levels=parsed.missing_test_levels,
+                setup_steps_performed=parsed.setup_steps_performed,
+                missing_setup_steps=parsed.missing_setup_steps,
+                commit_required=parsed.commit_required,
+                push_required=parsed.push_required,
+                commit_done=parsed.commit_done,
+                push_done=parsed.push_done,
+                missing_obligations=parsed.missing_obligations,
+                completion_status=completion_status,
             )
-        await _emit(services, "stage_completed", "verify", "Verification completed", passed=result.passed, confidence=result.confidence, checks_passed=len(result.checks_passed), checks_failed=len(result.checks_failed), missing_evidence=list(result.missing_evidence))
+        await _emit(
+            services,
+            "stage_completed",
+            "verify",
+            "Verification completed",
+            passed=result.passed,
+            confidence=result.confidence,
+            checks_passed=len(result.checks_passed),
+            checks_failed=len(result.checks_failed),
+            missing_evidence=list(result.missing_evidence),
+            missing_test_levels=list(result.missing_test_levels),
+            missing_obligations=list(result.missing_obligations),
+            completion_status=result.completion_status,
+        )
         return {
             "verification_request": request.model_dump(mode="json"),
             "verification_result": result.model_dump(mode="json"),
@@ -403,11 +674,14 @@ def build_workflow_graph(services: WorkflowServices):
         report = services.final_report_builder.build(
             task=task,
             classification=TaskClassification.model_validate(state["classification"]) if state.get("classification") else None,
+            route=RoutingDecision.model_validate(state["route_decision"]) if state.get("route_decision") else None,
             plan=ExecutionPlan.model_validate(state["plan"]) if state.get("plan") else None,
             policy=PolicyDecision.model_validate(state["policy_decision"]) if state.get("policy_decision") else None,
             approval=ApprovalRequest.model_validate(state["approval_request"]) if state.get("approval_request") else None,
+            research=ObservationResult.model_validate(state["research_result"]) if state.get("research_result") else None,
             observation=ObservationResult.model_validate(state["observation_result"]) if state.get("observation_result") else None,
             execution=ExecutionResult.model_validate(state["execution_result"]) if state.get("execution_result") else None,
+            publish=PublishResult.model_validate(state["publish_result"]) if state.get("publish_result") else None,
             verification=VerificationResult.model_validate(state["verification_result"]) if state.get("verification_result") else None,
             artifact_ids=list(state.get("artifact_ids") or []),
         )
@@ -422,24 +696,30 @@ def build_workflow_graph(services: WorkflowServices):
     graph = StateGraph(WorkflowState)
     graph.add_node("intake", intake_node)
     graph.add_node("classify", classify_node)
+    graph.add_node("route", route_node)
+    graph.add_node("research", research_node)
     graph.add_node("observe", observe_node)
     graph.add_node("build_context", build_context_node)
     graph.add_node("plan", plan_node)
     graph.add_node("policy", policy_node)
     graph.add_node("approval", approval_node)
     graph.add_node("execute", execute_node)
+    graph.add_node("publish", publish_node)
     graph.add_node("verify", verify_node)
     graph.add_node("finalize", finalize_node)
 
     graph.set_entry_point("intake")
     graph.add_edge("intake", "classify")
-    graph.add_conditional_edges("classify", classify_next, {"observe": "observe", "build_context": "build_context"})
+    graph.add_edge("classify", "route")
+    graph.add_conditional_edges("route", route_next, {"research": "research", "observe": "observe", "build_context": "build_context"})
+    graph.add_conditional_edges("research", research_next, {"observe": "observe", "build_context": "build_context"})
     graph.add_edge("observe", "build_context")
     graph.add_edge("build_context", "plan")
     graph.add_edge("plan", "policy")
     graph.add_conditional_edges("policy", policy_next, {"approval": "approval", "execute": "execute", "finalize": "finalize"})
     graph.add_conditional_edges("approval", approval_next, {"execute": "execute", "finalize": "finalize"})
-    graph.add_edge("execute", "verify")
+    graph.add_conditional_edges("execute", execute_next, {"publish": "publish", "verify": "verify"})
+    graph.add_edge("publish", "verify")
     graph.add_edge("verify", "finalize")
     graph.add_edge("finalize", END)
     return graph.compile()
