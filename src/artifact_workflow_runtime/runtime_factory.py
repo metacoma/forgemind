@@ -34,6 +34,7 @@ def build_controller(
         reuse_sandbox=reuse,
         sandbox_id=sandbox_id,
         conversation_id=conversation_id,
+        event_sink=event_sink,
     )
     openhands_adapter = OpenHandsAdapter(openhands_instance, artifact_store)
     return WorkflowController(

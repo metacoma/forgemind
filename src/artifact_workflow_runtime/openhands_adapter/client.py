@@ -11,11 +11,60 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import httpx
 import websockets
 
+from artifact_workflow_runtime.runtime_events import EventSink, emit_event
+
 from .models import AppConversationStart, JsonDict, OpenHandsRunResult
 
 EventCallback = Callable[[JsonDict], None]
 
 SECRET_FIELD_NAMES = {"secrets", "secret", "api_key", "token", "password", "key"}
+
+
+def _transport_note(event_sink: EventSink | None, kind: str, message: str, payload: JsonDict | None = None) -> None:
+    if event_sink is None:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(emit_event(event_sink, kind, "transport", message, payload or {}))
+
+
+def _make_transport_event_callback(event_sink: EventSink | None) -> EventCallback | None:
+    if event_sink is None:
+        return None
+
+    def callback(event: JsonDict) -> None:
+        if "_websocket" in event:
+            ws_kind = str(event.get("_websocket") or "event")
+            payload: JsonDict = {}
+            if event.get("url"):
+                payload["ws_url"] = str(event.get("url"))
+            if ws_kind == "connect":
+                _transport_note(event_sink, "websocket_connected", "WebSocket connected", payload)
+            elif ws_kind == "disconnect":
+                _transport_note(event_sink, "websocket_disconnected", "WebSocket disconnected", payload)
+            else:
+                _transport_note(event_sink, f"websocket_{ws_kind}", f"WebSocket {ws_kind}", payload)
+            return
+
+        kind = str(event.get("kind") or "")
+        if kind == "ConversationStateUpdateEvent" and str(event.get("key") or "") == "execution_status":
+            status = str(event.get("value") or "")
+            _transport_note(event_sink, "execution_status", f"execution_status={status}", {"execution_status": status, "last_status": status})
+            return
+        if kind == "MessageEvent" and (str(event.get("source") or "") == "agent" or is_agent_message(event)):
+            text = extract_message_text(event).strip()
+            _transport_note(event_sink, "assistant_message", "Assistant message received", {"chars": len(text), "preview": _clip(text, max_chars=140)})
+            return
+        if kind == "ActionEvent":
+            _transport_note(event_sink, "action_event", _action_line(event), {"tool_name": str(event.get("tool_name") or "")})
+            return
+        if kind == "ObservationEvent":
+            _transport_note(event_sink, "observation_event", _observation_line(event), {"tool_name": str(event.get("tool_name") or "")})
+            return
+
+    return callback
 
 
 def load_json_value(value: str, *, source: str = "JSON") -> Any:
@@ -901,6 +950,7 @@ class OpenHandsClient:
         conversation: AppConversationStart,
         *,
         on_event: EventCallback | None = None,
+        transport_event_sink: EventSink | None = None,
         raw_websocket: bool = False,
         open_timeout: float = 20.0,
         retry_seconds: float = 240.0,
@@ -931,6 +981,7 @@ class OpenHandsClient:
 
             urls = self.build_v1_websocket_urls(conversation)
             for ws_url in urls:
+                _transport_note(transport_event_sink, "websocket_connecting", "Trying WebSocket candidate", {"ws_url": ws_url})
                 if raw_websocket:
                     print(f"[socket] connecting {ws_url}", file=sys.stderr)
                 try:
@@ -960,6 +1011,7 @@ class OpenHandsClient:
                     websockets.exceptions.WebSocketException,
                 ) as exc:
                     last_exc = exc
+                    _transport_note(transport_event_sink, "websocket_failed", f"WebSocket candidate failed: {type(exc).__name__}: {exc}", {"ws_url": ws_url})
                     if raw_websocket:
                         print(f"[socket] failed {ws_url}: {type(exc).__name__}: {exc}", file=sys.stderr)
                     continue
@@ -978,6 +1030,7 @@ class OpenHandsClient:
                 conversation,
                 verbose=raw_websocket,
             )
+            _transport_note(transport_event_sink, "websocket_retry", "Retrying WebSocket after metadata refresh", {"conversation_id": conversation.conversation_id, "websocket_url": conversation.conversation_url or conversation.agent_server_url or self.endpoint})
             if raw_websocket:
                 status = "after disconnect" if connected_once else "not ready yet"
                 print(
@@ -1337,6 +1390,7 @@ async def run_conversation_and_collect(
     debug_events: bool = False,
     raw_websocket: bool = False,
     event_callback: EventCallback | None = None,
+    event_sink: EventSink | None = None,
     exit_when_terminal: bool = True,
     start_poll_interval: float = 5.0,
     websocket_open_timeout: float = 20.0,
@@ -1374,15 +1428,16 @@ async def run_conversation_and_collect(
     secrets_file: str | None = None,
     secret: list[str] | None = None,
 ) -> OpenHandsRunResult:
-    """Create one app conversation, wait for terminal status, and return final text.
-
-    This is the library-level primitive used by both the low-level watcher CLI
-    and the role+summary abstraction. It has the same explicit-only payload
-    behavior as ``run_prompt_and_watch``: no AppConversationStartRequest field is
-    sent unless the caller provided it.
-    """
+    """Create one app conversation, wait for terminal status, and return final text."""
     client = OpenHandsClient(endpoint, api_key=api_key)
     verbose = bool(show_events or raw_events or debug_events or raw_websocket)
+    transport_callback = _make_transport_event_callback(event_sink)
+
+    def combined_event_callback(event: JsonDict) -> None:
+        if event_callback:
+            event_callback(event)
+        if transport_callback:
+            transport_callback(event)
 
     payload = build_app_conversation_payload(
         payload_file=payload_file,
@@ -1417,36 +1472,30 @@ async def run_conversation_and_collect(
     )
 
     if print_payload:
-        print(
-            json.dumps(redact_secrets(payload), ensure_ascii=False, indent=2, sort_keys=True),
-            file=sys.stderr,
-        )
+        print(json.dumps(redact_secrets(payload), ensure_ascii=False, indent=2, sort_keys=True), file=sys.stderr)
 
     if verbose:
         field_list = ", ".join(sorted(payload.keys()))
-        print(
-            f"[setup] creating V1 app conversation with explicit fields only: {field_list}",
-            file=sys.stderr,
-        )
-    started = await client.start_app_conversation(
-        payload=payload,
-        poll_interval=start_poll_interval,
-        verbose_start=verbose,
-    )
+        print(f"[setup] creating V1 app conversation with explicit fields only: {field_list}", file=sys.stderr)
+    await emit_event(event_sink, "start_payload_ready", "transport", "Prepared OpenHands start payload", {"fields": sorted(payload.keys())})
+
+    started = await client.start_app_conversation(payload=payload, poll_interval=start_poll_interval, verbose_start=verbose)
     if verbose:
         print(f"[setup] conversation_id={started.conversation_id}", file=sys.stderr)
         if started.agent_server_url:
             print(f"[setup] agent_server_url={started.agent_server_url}", file=sys.stderr)
         if started.conversation_url:
             print(f"[setup] conversation_url={started.conversation_url}", file=sys.stderr)
+    await emit_event(event_sink, "conversation_ready", "transport", "OpenHands start task became ready", {
+        "conversation_id": started.conversation_id,
+        "sandbox_id": started.sandbox_id,
+        "websocket_url": started.conversation_url or started.agent_server_url or endpoint,
+        "session_api_key": bool(started.session_api_key),
+        "mode": "new",
+    })
 
     terminal_task: asyncio.Task[JsonDict] | None = None
     if exit_when_terminal and rest_terminal_watch:
-        # Optional fallback only. It is disabled by default because some
-        # OpenHands builds expose stale or app-level terminal metadata before
-        # the agent has actually finished producing its final answer. The
-        # authoritative default signal is the websocket
-        # ConversationStateUpdateEvent key=execution_status.
         terminal_task = asyncio.create_task(client.wait_until_terminal(started.conversation_id))
 
     final_text: str | None = None
@@ -1459,7 +1508,8 @@ async def run_conversation_and_collect(
 
     event_iter = client.stream_v1_events(
         started,
-        on_event=event_callback,
+        on_event=combined_event_callback,
+        transport_event_sink=event_sink,
         raw_websocket=raw_websocket,
         open_timeout=websocket_open_timeout,
         retry_seconds=websocket_retry_seconds,
@@ -1471,20 +1521,13 @@ async def run_conversation_and_collect(
             if terminal_seen and not final_text and terminal_deadline is not None:
                 timeout = max(0.0, terminal_deadline - asyncio.get_running_loop().time())
             try:
-                if timeout is None:
-                    event = await anext(event_iter)
-                else:
-                    event = await asyncio.wait_for(anext(event_iter), timeout=timeout)
+                event = await anext(event_iter) if timeout is None else await asyncio.wait_for(anext(event_iter), timeout=timeout)
             except StopAsyncIteration:
                 break
             except asyncio.TimeoutError:
-                # Terminal status arrived before the final answer event. Stop
-                # waiting on the websocket and try REST fallbacks below.
                 break
             except OpenHandsError as exc:
-                # If every websocket candidate failed, still try REST final-text
-                # fallback below. This preserves useful results from runs that
-                # actually completed in the UI, and avoids raw tracebacks.
+                await emit_event(event_sink, "websocket_stream_failed", "transport", f"WebSocket stream failed: {exc}", {"fallback": "rest_messages"})
                 if verbose:
                     print(f"[warn] websocket stream failed; trying REST fallback: {exc}", file=sys.stderr)
                 break
@@ -1515,31 +1558,20 @@ async def run_conversation_and_collect(
                 final_status = status
                 if final_text:
                     break
-                # Do not trust an early/replayed `finished` before the websocket
-                # showed the agent actually running or doing work. This was the
-                # v10/v11 regression: the CLI could stop while the UI still had
-                # the agent running. Error-like terminal states are still honored.
                 if status == "finished" and not (saw_running_status or saw_agent_activity):
                     if verbose:
                         print("[warn] ignoring early execution_status=finished before agent activity", file=sys.stderr)
                     continue
-                # Some OpenHands builds/UI paths emit execution_status=finished
-                # just before the final MessageEvent or only expose the final
-                # text through REST conversation history. Do not declare an
-                # empty answer immediately. Keep reading briefly, then fallback.
                 terminal_seen = True
                 terminal_deadline = asyncio.get_running_loop().time() + max(0.0, terminal_grace_seconds)
                 continue
 
-            # Fallback for versions that do not emit execution_status over the
-            # websocket. Avoid breaking before at least one assistant message was
-            # observed unless the backend says the conversation ended in error.
             if exit_when_terminal and terminal_task and terminal_task.done():
                 try:
                     info = terminal_task.result()
                 except asyncio.CancelledError:
                     raise
-                except Exception as exc:  # pragma: no cover - defensive watcher path
+                except Exception as exc:
                     print(f"[warn] terminal watcher failed; continuing websocket stream: {exc}", file=sys.stderr)
                     terminal_task = None
                     continue
@@ -1549,23 +1581,12 @@ async def run_conversation_and_collect(
                 if final_text or execution_status in {"error", "stuck", "waiting_for_confirmation"}:
                     final_status = execution_status or sandbox_status or None
                     if final_text:
-                        if verbose:
-                            print(
-                                "[done] conversation terminal: "
-                                f"sandbox_status={sandbox_status or None} "
-                                f"execution_status={execution_status or None}",
-                                file=sys.stderr,
-                            )
                         break
                     terminal_seen = True
                     terminal_deadline = asyncio.get_running_loop().time() + max(0.0, terminal_grace_seconds)
                     terminal_task = None
                     continue
-                # The REST poll raced ahead of the websocket replay. Give the
-                # websocket a chance to deliver the final MessageEvent.
                 terminal_task = None
-    except KeyboardInterrupt:
-        raise
     finally:
         if terminal_task:
             terminal_task.cancel()
@@ -1573,15 +1594,13 @@ async def run_conversation_and_collect(
 
     text = final_text.strip() if final_text and final_text.strip() else ""
     if not text:
+        await emit_event(event_sink, "rest_fallback_started", "transport", "Trying REST fallback for final text", {"conversation_id": started.conversation_id, "fallback": "rest_messages"})
         fallback_text = await client.fetch_final_text_fallback(started)
         text = fallback_text.strip() if fallback_text and fallback_text.strip() else ""
-    return OpenHandsRunResult(
-        text=text,
-        status=final_status,
-        conversation_id=started.conversation_id,
-        start=started,
-        seen_event_ids=frozenset(seen_event_ids),
-    )
+        await emit_event(event_sink, "rest_fallback_finished", "transport", "REST fallback completed", {"conversation_id": started.conversation_id, "fallback": "rest_messages", "chars": len(text)})
+    await emit_event(event_sink, "result_collected", "transport", "Collected OpenHands result text", {"conversation_id": started.conversation_id, "chars": len(text), "last_status": final_status or ""})
+    return OpenHandsRunResult(text=text, status=final_status, conversation_id=started.conversation_id, start=started, seen_event_ids=frozenset(seen_event_ids))
+
 
 async def collect_started_conversation(
     *,
@@ -1594,22 +1613,24 @@ async def collect_started_conversation(
     debug_events: bool = False,
     raw_websocket: bool = False,
     event_callback: EventCallback | None = None,
+    event_sink: EventSink | None = None,
     exit_when_terminal: bool = True,
     websocket_open_timeout: float = 20.0,
     websocket_retry_seconds: float = 240.0,
     terminal_grace_seconds: float = 15.0,
 ) -> OpenHandsRunResult:
-    """Collect the result for an already-created OpenHands conversation.
-
-    This is the SDK-level primitive used by OpenHandsConversation.wait_finished().
-    It does not create a sandbox and does not send a user message. It only listens
-    to the existing conversation event stream and extracts the final assistant
-    answer.
-    """
+    """Collect the result for an already-created OpenHands conversation."""
     client = OpenHandsClient(endpoint, api_key=api_key)
     verbose = bool(show_events or raw_events or debug_events or raw_websocket)
-    seen_event_ids: set[str] = set(known_event_ids or set())
+    transport_callback = _make_transport_event_callback(event_sink)
 
+    def combined_event_callback(event: JsonDict) -> None:
+        if event_callback:
+            event_callback(event)
+        if transport_callback:
+            transport_callback(event)
+
+    seen_event_ids: set[str] = set(known_event_ids or set())
     final_text: str | None = None
     final_status: str | None = None
     terminal_seen = False
@@ -1619,27 +1640,25 @@ async def collect_started_conversation(
 
     event_iter = client.stream_v1_events(
         conversation,
-        on_event=event_callback,
+        on_event=combined_event_callback,
+        transport_event_sink=event_sink,
         raw_websocket=raw_websocket,
         open_timeout=websocket_open_timeout,
         retry_seconds=websocket_retry_seconds,
     )
-
     try:
         while True:
             timeout: float | None = None
             if terminal_seen and not final_text and terminal_deadline is not None:
                 timeout = max(0.0, terminal_deadline - asyncio.get_running_loop().time())
             try:
-                if timeout is None:
-                    event = await anext(event_iter)
-                else:
-                    event = await asyncio.wait_for(anext(event_iter), timeout=timeout)
+                event = await anext(event_iter) if timeout is None else await asyncio.wait_for(anext(event_iter), timeout=timeout)
             except StopAsyncIteration:
                 break
             except asyncio.TimeoutError:
                 break
             except OpenHandsError as exc:
+                await emit_event(event_sink, "websocket_stream_failed", "transport", f"WebSocket stream failed: {exc}", {"conversation_id": conversation.conversation_id, "fallback": "rest_messages"})
                 if verbose:
                     print(f"[warn] websocket stream failed; trying REST fallback: {exc}", file=sys.stderr)
                 break
@@ -1679,22 +1698,17 @@ async def collect_started_conversation(
                 terminal_seen = True
                 terminal_deadline = asyncio.get_running_loop().time() + max(0.0, terminal_grace_seconds)
                 continue
-    except KeyboardInterrupt:
-        raise
     finally:
         await event_iter.aclose()
 
     text = final_text.strip() if final_text and final_text.strip() else ""
     if not text:
+        await emit_event(event_sink, "rest_fallback_started", "transport", "Trying REST fallback for existing conversation", {"conversation_id": conversation.conversation_id, "fallback": "rest_messages"})
         fallback_text = await client.fetch_final_text_fallback(conversation)
         text = fallback_text.strip() if fallback_text and fallback_text.strip() else ""
-    return OpenHandsRunResult(
-        text=text,
-        status=final_status,
-        conversation_id=conversation.conversation_id,
-        start=conversation,
-        seen_event_ids=frozenset(seen_event_ids),
-    )
+        await emit_event(event_sink, "rest_fallback_finished", "transport", "REST fallback completed", {"conversation_id": conversation.conversation_id, "fallback": "rest_messages", "chars": len(text)})
+    await emit_event(event_sink, "result_collected", "transport", "Collected OpenHands result text", {"conversation_id": conversation.conversation_id, "chars": len(text), "last_status": final_status or ""})
+    return OpenHandsRunResult(text=text, status=final_status, conversation_id=conversation.conversation_id, start=conversation, seen_event_ids=frozenset(seen_event_ids))
 
 
 async def run_followup_message_and_collect(
@@ -1709,34 +1723,36 @@ async def run_followup_message_and_collect(
     debug_events: bool = False,
     raw_websocket: bool = False,
     event_callback: EventCallback | None = None,
+    event_sink: EventSink | None = None,
     exit_when_terminal: bool = True,
     websocket_open_timeout: float = 20.0,
     websocket_retry_seconds: float = 240.0,
     terminal_grace_seconds: float = 15.0,
 ) -> OpenHandsRunResult:
-    """Send a follow-up prompt to an existing conversation and collect its answer.
-
-    This does not call POST /api/v1/app-conversations and therefore does not
-    create a new sandbox. It sends a user message to the existing agent-server
-    conversation and then listens for new events, ignoring already-seen replayed
-    events by event id.
-    """
+    """Send a follow-up prompt to an existing conversation and collect its answer."""
     client = OpenHandsClient(endpoint, api_key=api_key)
     verbose = bool(show_events or raw_events or debug_events or raw_websocket)
-    seen_event_ids: set[str] = set(known_event_ids or set())
+    transport_callback = _make_transport_event_callback(event_sink)
 
-    # Refresh runtime metadata first: long tasks can update conversation_url or
-    # session_api_key after the initial READY response.
-    conversation = await client._refresh_app_conversation_start_metadata(
-        conversation,
-        verbose=raw_websocket,
-    )
+    def combined_event_callback(event: JsonDict) -> None:
+        if event_callback:
+            event_callback(event)
+        if transport_callback:
+            transport_callback(event)
+
+    seen_event_ids: set[str] = set(known_event_ids or set())
+    conversation = await client._refresh_app_conversation_start_metadata(conversation, verbose=raw_websocket)
+    await emit_event(event_sink, "conversation_metadata_refreshed", "transport", "Refreshed OpenHands conversation metadata", {
+        "conversation_id": conversation.conversation_id,
+        "sandbox_id": conversation.sandbox_id,
+        "websocket_url": conversation.conversation_url or conversation.agent_server_url or endpoint,
+        "session_api_key": bool(conversation.session_api_key),
+        "mode": "followup",
+    })
 
     if verbose:
-        print(
-            f"[followup] sending message to existing conversation {conversation.conversation_id}",
-            file=sys.stderr,
-        )
+        print(f"[followup] sending message to existing conversation {conversation.conversation_id}", file=sys.stderr)
+    await emit_event(event_sink, "followup_sent", "transport", "Sent follow-up message to existing conversation", {"conversation_id": conversation.conversation_id, "mode": "followup", "followup": True})
     await client.send_message_to_existing_conversation(conversation, prompt, run=True)
 
     final_text: str | None = None
@@ -1748,27 +1764,25 @@ async def run_followup_message_and_collect(
 
     event_iter = client.stream_v1_events(
         conversation,
-        on_event=event_callback,
+        on_event=combined_event_callback,
+        transport_event_sink=event_sink,
         raw_websocket=raw_websocket,
         open_timeout=websocket_open_timeout,
         retry_seconds=websocket_retry_seconds,
     )
-
     try:
         while True:
             timeout: float | None = None
             if terminal_seen and not final_text and terminal_deadline is not None:
                 timeout = max(0.0, terminal_deadline - asyncio.get_running_loop().time())
             try:
-                if timeout is None:
-                    event = await anext(event_iter)
-                else:
-                    event = await asyncio.wait_for(anext(event_iter), timeout=timeout)
+                event = await anext(event_iter) if timeout is None else await asyncio.wait_for(anext(event_iter), timeout=timeout)
             except StopAsyncIteration:
                 break
             except asyncio.TimeoutError:
                 break
             except OpenHandsError as exc:
+                await emit_event(event_sink, "websocket_stream_failed", "transport", f"Follow-up WebSocket failed: {exc}", {"conversation_id": conversation.conversation_id, "fallback": "rest_messages", "mode": "followup"})
                 if verbose:
                     print(f"[warn] follow-up websocket failed; trying REST fallback: {exc}", file=sys.stderr)
                 break
@@ -1808,25 +1822,17 @@ async def run_followup_message_and_collect(
                 terminal_seen = True
                 terminal_deadline = asyncio.get_running_loop().time() + max(0.0, terminal_grace_seconds)
                 continue
-    except KeyboardInterrupt:
-        raise
     finally:
         await event_iter.aclose()
 
     text = final_text.strip() if final_text and final_text.strip() else ""
     if not text:
+        await emit_event(event_sink, "rest_fallback_started", "transport", "Trying REST fallback for follow-up", {"conversation_id": conversation.conversation_id, "fallback": "rest_messages", "mode": "followup"})
         fallback_text = await client.fetch_final_text_fallback(conversation)
-        # REST fallback may return the previous main answer; only use it as a
-        # last resort. JSON validation in the role layer will reject bad summary
-        # text and ask again in the same conversation.
         text = fallback_text.strip() if fallback_text and fallback_text.strip() else ""
-    return OpenHandsRunResult(
-        text=text,
-        status=final_status,
-        conversation_id=conversation.conversation_id,
-        start=conversation,
-        seen_event_ids=frozenset(seen_event_ids),
-    )
+        await emit_event(event_sink, "rest_fallback_finished", "transport", "REST fallback completed", {"conversation_id": conversation.conversation_id, "fallback": "rest_messages", "chars": len(text), "mode": "followup"})
+    await emit_event(event_sink, "result_collected", "transport", "Collected OpenHands result text", {"conversation_id": conversation.conversation_id, "chars": len(text), "last_status": final_status or "", "mode": "followup"})
+    return OpenHandsRunResult(text=text, status=final_status, conversation_id=conversation.conversation_id, start=conversation, seen_event_ids=frozenset(seen_event_ids))
 
 
 async def run_prompt_and_watch(

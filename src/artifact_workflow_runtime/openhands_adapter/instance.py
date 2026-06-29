@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from artifact_workflow_runtime.runtime_events import EventSink, emit_event
+
 from .client import (
     AppConversationStart,
     OpenHandsClient,
@@ -20,6 +22,7 @@ class OpenHandsInstance:
         reuse_sandbox: bool = False,
         sandbox_id: str | None = None,
         conversation_id: str | None = None,
+        event_sink: EventSink | None = None,
     ) -> None:
         self.endpoint = endpoint.rstrip("/")
         self.api_key = api_key
@@ -27,6 +30,7 @@ class OpenHandsInstance:
         self.reuse_sandbox = reuse_sandbox
         self.explicit_sandbox_id = sandbox_id
         self.explicit_conversation_id = conversation_id
+        self.event_sink = event_sink
         self._sandbox_cache: dict[str, str] = {}
         self._resolved_sandbox_id: str | None = sandbox_id
         self._active_conversation: AppConversationStart | None = None
@@ -34,10 +38,13 @@ class OpenHandsInstance:
 
     async def _resolve_sandbox_id(self, *, model: str | None) -> str | None:
         if self.explicit_sandbox_id:
+            await emit_event(self.event_sink, "sandbox_pinned", "transport", "Using pinned sandbox id", {"sandbox_id": self.explicit_sandbox_id, "mode": "pinned"})
             return self.explicit_sandbox_id
         if not self.reuse_sandbox:
+            await emit_event(self.event_sink, "sandbox_reuse_disabled", "transport", "Sandbox reuse disabled", {"mode": "fresh"})
             return None
         if self._resolved_sandbox_id:
+            await emit_event(self.event_sink, "sandbox_reuse_cache_hit", "transport", "Using cached reusable sandbox", {"sandbox_id": self._resolved_sandbox_id, "mode": "reuse"})
             return self._resolved_sandbox_id
         client = OpenHandsClient(self.endpoint, api_key=self.api_key)
         sandbox_id = await find_reusable_sandbox_for_model(
@@ -47,6 +54,9 @@ class OpenHandsInstance:
         )
         if sandbox_id:
             self._resolved_sandbox_id = sandbox_id
+            await emit_event(self.event_sink, "sandbox_reuse_found", "transport", "Found reusable sandbox", {"sandbox_id": sandbox_id, "model": model or self.default_model, "mode": "reuse"})
+        else:
+            await emit_event(self.event_sink, "sandbox_reuse_miss", "transport", "No reusable sandbox found; starting fresh", {"model": model or self.default_model, "mode": "fresh"})
         return sandbox_id
 
     async def _run_followup(
@@ -58,15 +68,42 @@ class OpenHandsInstance:
         conversation = self._active_conversation
         if conversation is None:
             raise RuntimeError("No active OpenHands conversation to continue")
+        await emit_event(
+            self.event_sink,
+            "conversation_followup",
+            "transport",
+            "Continuing existing OpenHands conversation",
+            {
+                "conversation_id": conversation.conversation_id,
+                "sandbox_id": conversation.sandbox_id,
+                "followup": True,
+                "mode": "followup",
+            },
+        )
         result = await run_followup_message_and_collect(
             endpoint=self.endpoint,
             api_key=self.api_key,
             conversation=conversation,
             prompt=prompt,
             known_event_ids=frozenset(self._seen_event_ids),
+            event_sink=self.event_sink,
         )
         self._active_conversation = result.start
         self._seen_event_ids = set(result.seen_event_ids)
+        await emit_event(
+            self.event_sink,
+            "conversation_bound",
+            "transport",
+            "Collected follow-up result",
+            {
+                "conversation_id": result.start.conversation_id,
+                "sandbox_id": result.start.sandbox_id,
+                "last_status": result.status,
+                "mode": "followup",
+                "websocket_url": result.start.conversation_url or result.start.agent_server_url or self.endpoint,
+                "session_api_key": bool(result.start.session_api_key),
+            },
+        )
         if self.reuse_sandbox and result.start.sandbox_id:
             self._resolved_sandbox_id = result.start.sandbox_id
             resolved_model = model or self.default_model
@@ -82,6 +119,18 @@ class OpenHandsInstance:
         title: str | None = None,
     ) -> OpenHandsRunResult:
         resolved_sandbox_id = await self._resolve_sandbox_id(model=model)
+        await emit_event(
+            self.event_sink,
+            "conversation_starting",
+            "transport",
+            "Starting OpenHands conversation",
+            {
+                "sandbox_id": resolved_sandbox_id,
+                "conversation_id": self.explicit_conversation_id,
+                "model": model or self.default_model,
+                "mode": "new",
+            },
+        )
         result = await run_conversation_and_collect(
             endpoint=self.endpoint,
             api_key=self.api_key,
@@ -90,9 +139,24 @@ class OpenHandsInstance:
             sandbox_id=resolved_sandbox_id,
             conversation_id=self.explicit_conversation_id,
             title=title,
+            event_sink=self.event_sink,
         )
         self._active_conversation = result.start
         self._seen_event_ids = set(result.seen_event_ids)
+        await emit_event(
+            self.event_sink,
+            "conversation_started",
+            "transport",
+            "OpenHands conversation started",
+            {
+                "conversation_id": result.start.conversation_id,
+                "sandbox_id": result.start.sandbox_id,
+                "last_status": result.status,
+                "mode": "new",
+                "websocket_url": result.start.conversation_url or result.start.agent_server_url or self.endpoint,
+                "session_api_key": bool(result.start.session_api_key),
+            },
+        )
         if self.reuse_sandbox and result.start.sandbox_id:
             self._resolved_sandbox_id = result.start.sandbox_id
             resolved_model = model or self.default_model
