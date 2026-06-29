@@ -145,8 +145,10 @@ class ForgeMindTUI(App[None]):
     current_stage = reactive("idle")
     current_status = reactive("idle")
 
-    def __init__(self) -> None:
+    def __init__(self, *, initial_task: str | None = None, initial_config: dict[str, Any] | None = None) -> None:
         super().__init__()
+        self.initial_task = initial_task or DEFAULT_TASK
+        self.initial_config = initial_config or {}
         self.stage_status: dict[str, str] = {stage: "pending" for stage in STAGES}
         self.stage_message: dict[str, str] = {stage: "" for stage in STAGES}
         self.stage_started_at: dict[str, str] = {stage: "" for stage in STAGES}
@@ -174,7 +176,7 @@ class ForgeMindTUI(App[None]):
             with TabPane("Task", id="task"):
                 with Vertical(id="task-pane"):
                     yield Label("Task composer", classes="section-title")
-                    yield TextArea(DEFAULT_TASK, id="task-editor")
+                    yield TextArea(self.initial_task, id="task-editor")
                     with Horizontal(id="task-actions"):
                         yield Button("Run workflow", id="run", variant="primary")
                         yield Button("Reset view", id="reset")
@@ -182,21 +184,21 @@ class ForgeMindTUI(App[None]):
                     with Horizontal(id="config-columns"):
                         with Vertical(classes="config-card"):
                             yield Label("Direct LLM", classes="section-title")
-                            yield Input(value="http://127.0.0.1:4000/v1", id="direct-llm-endpoint", placeholder="Direct LLM endpoint")
-                            yield Input(value="qwen36-35b", id="direct-llm-model", placeholder="Direct LLM model")
-                            yield Input(value="sk-local", id="direct-llm-api-key", placeholder="Direct LLM API key", password=True)
+                            yield Input(value=str(self.initial_config.get("direct_llm_endpoint", "http://127.0.0.1:4000/v1")), id="direct-llm-endpoint", placeholder="Direct LLM endpoint")
+                            yield Input(value=str(self.initial_config.get("direct_llm_model", "qwen36-35b")), id="direct-llm-model", placeholder="Direct LLM model")
+                            yield Input(value=str(self.initial_config.get("direct_llm_api_key", "sk-local") or ""), id="direct-llm-api-key", placeholder="Direct LLM API key", password=True)
                         with Vertical(classes="config-card"):
                             yield Label("OpenHands", classes="section-title")
-                            yield Input(value="http://127.0.0.1:3000", id="openhands-endpoint", placeholder="OpenHands endpoint")
-                            yield Input(value="qwen36-35b", id="openhands-model", placeholder="OpenHands model")
-                            yield Input(value="", id="openhands-api-key", placeholder="OpenHands API key", password=True)
+                            yield Input(value=str(self.initial_config.get("openhands_endpoint", "http://127.0.0.1:3000")), id="openhands-endpoint", placeholder="OpenHands endpoint")
+                            yield Input(value=str(self.initial_config.get("openhands_model", "qwen36-35b")), id="openhands-model", placeholder="OpenHands model")
+                            yield Input(value=str(self.initial_config.get("openhands_api_key", "") or ""), id="openhands-api-key", placeholder="OpenHands API key", password=True)
                         with Vertical(classes="config-card"):
                             yield Label("Runtime", classes="section-title")
-                            yield Input(value="run-artifacts", id="artifact-dir", placeholder="Artifact directory")
-                            yield Input(value="", id="sandbox-id", placeholder="Pinned sandbox id")
-                            yield Input(value="", id="conversation-id", placeholder="Pinned conversation id")
-                            yield Checkbox("Reuse sandbox", value=True, id="reuse")
-                            yield Checkbox("Auto approve mutations", value=True, id="auto-approve")
+                            yield Input(value=str(self.initial_config.get("artifact_dir", "run-artifacts")), id="artifact-dir", placeholder="Artifact directory")
+                            yield Input(value=str(self.initial_config.get("sandbox_id", "") or ""), id="sandbox-id", placeholder="Pinned sandbox id")
+                            yield Input(value=str(self.initial_config.get("conversation_id", "") or ""), id="conversation-id", placeholder="Pinned conversation id")
+                            yield Checkbox("Reuse sandbox", value=bool(self.initial_config.get("reuse", True)), id="reuse")
+                            yield Checkbox("Auto approve mutations", value=bool(self.initial_config.get("auto_approve", True)), id="auto-approve")
             with TabPane("Overview", id="overview"):
                 with Vertical(id="overview-pane"):
                     with Horizontal(id="overview-top"):
@@ -592,5 +594,5 @@ class ForgeMindTUI(App[None]):
 
 
 
-def run_tui() -> None:
-    ForgeMindTUI().run()
+def run_tui(*, initial_task: str | None = None, initial_config: dict[str, Any] | None = None) -> None:
+    ForgeMindTUI(initial_task=initial_task, initial_config=initial_config).run()
