@@ -15,6 +15,7 @@ from textual.widgets import Button, Checkbox, DataTable, Footer, Header, Input, 
 from rich.text import Text
 
 from artifact_workflow_runtime.models import FinalReport, Task
+from artifact_workflow_runtime.openhands_adapter.client import OpenHandsClient, extract_message_text, run_followup_message_and_collect
 from artifact_workflow_runtime.runtime_events import RuntimeEvent
 from artifact_workflow_runtime.runtime_factory import build_controller
 
@@ -49,6 +50,28 @@ class InternalErrorMessage(Message):
     def __init__(self, context: str, error_text: str) -> None:
         self.context = context
         self.error_text = error_text
+        super().__init__()
+
+
+class ConversationListLoadedMessage(Message):
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.rows = rows
+        super().__init__()
+
+
+class ConversationLoadedMessage(Message):
+    def __init__(self, conversation_id: str, details: str, transcript: str) -> None:
+        self.conversation_id = conversation_id
+        self.details = details
+        self.transcript = transcript
+        super().__init__()
+
+
+class ConversationSentMessage(Message):
+    def __init__(self, conversation_id: str, transcript: str, response_text: str) -> None:
+        self.conversation_id = conversation_id
+        self.transcript = transcript
+        self.response_text = response_text
         super().__init__()
 
 
@@ -98,7 +121,7 @@ class ForgeMindTUI(App[None]):
     Input, Checkbox, Button {
         margin: 0 0 1 0;
     }
-    #overview-pane, #events-pane, #transport-pane, #artifacts-pane, #report-pane, #errors-pane {
+    #overview-pane, #events-pane, #transport-pane, #artifacts-pane, #conversations-pane, #report-pane, #errors-pane {
         padding: 0 1;
     }
     #overview-top {
@@ -144,6 +167,28 @@ class ForgeMindTUI(App[None]):
     #artifact-split {
         height: 1fr;
     }
+    #conversation-split {
+        height: 1fr;
+    }
+    #conversation-detail-pane {
+        width: 2fr;
+    }
+    #conversation-meta, #conversation-chat-view {
+        border: round $panel;
+        padding: 1;
+        margin: 0 0 1 0;
+    }
+    #conversation-chat-view {
+        height: 1fr;
+    }
+    #conversation-input {
+        height: 8;
+        border: round $panel;
+    }
+    #conversation-actions {
+        height: auto;
+        margin: 1 0 0 0;
+    }
     #evidence-view, #report-view {
         height: 1fr;
         border: round $panel;
@@ -170,6 +215,8 @@ class ForgeMindTUI(App[None]):
         self.stage_started_at: dict[str, str] = {stage: "" for stage in STAGES}
         self.artifact_rows: list[dict[str, Any]] = []
         self.conversation_rows: list[dict[str, Any]] = []
+        self.browser_conversation_rows: list[dict[str, Any]] = []
+        self.selected_conversation_id: str | None = None
         self.final_report: FinalReport | None = None
         self.last_error: str | None = None
         self.error_history: list[str] = []
@@ -244,6 +291,19 @@ class ForgeMindTUI(App[None]):
                 with Horizontal(id="artifact-split"):
                     yield DataTable(id="artifacts-table")
                     yield TextArea("", id="evidence-view")
+            with TabPane("Conversations", id="conversations"):
+                with Vertical(id="conversations-pane"):
+                    with Horizontal(id="conversation-actions"):
+                        yield Button("Refresh conversations", id="refresh-conversations")
+                        yield Button("Load selected", id="load-conversation")
+                        yield Button("Use current run conversation", id="use-current-conversation")
+                        yield Button("Send to conversation", id="send-conversation-message", variant="primary")
+                    with Horizontal(id="conversation-split"):
+                        yield DataTable(id="conversation-browser-table")
+                        with Vertical(id="conversation-detail-pane"):
+                            yield Static(id="conversation-meta")
+                            yield TextArea("", id="conversation-chat-view")
+                            yield TextArea("", id="conversation-input")
             with TabPane("Report", id="report"):
                 with Vertical(id="report-pane"):
                     yield Label("Final report", classes="section-title")
@@ -264,17 +324,22 @@ class ForgeMindTUI(App[None]):
 
         conversation_table = self.query_one("#conversation-table", DataTable)
         conversation_table.add_columns("When", "Mode", "Conversation", "Sandbox", "WebSocket", "Status")
+        conversation_browser_table = self.query_one("#conversation-browser-table", DataTable)
+        conversation_browser_table.add_columns("Updated", "Title", "Conversation", "Sandbox", "Status")
 
         self.query_one("#evidence-view", TextArea).read_only = True
         self.query_one("#stage-detail-view", TextArea).read_only = True
+        self.query_one("#conversation-chat-view", TextArea).read_only = True
         self.query_one("#report-view", TextArea).read_only = True
         self.query_one("#error-view", TextArea).read_only = True
         self._refresh_log_path()
         self._refresh_status_bar()
         self._refresh_summary_cards()
         self._refresh_transport_panels()
+        self._set_static_text("#conversation-meta", "No conversation selected")
         self._show_stage_by_name("intake")
         self.query_one("#task-editor", TextArea).focus()
+        self.run_worker(self._load_conversation_browser(), exclusive=False, thread=False)
 
     def action_clear_log(self) -> None:
         self.query_one("#event-log", RichLog).clear()
@@ -287,6 +352,7 @@ class ForgeMindTUI(App[None]):
     def action_show_task(self) -> None:
         self.query_one("#workflow-tabs", TabbedContent).active = "task"
         self.query_one("#task-editor", TextArea).focus()
+        self.run_worker(self._load_conversation_browser(), exclusive=False, thread=False)
 
     @on(Button.Pressed, "#run")
     def _on_run(self) -> None:
@@ -323,9 +389,15 @@ class ForgeMindTUI(App[None]):
         })
         self.query_one("#artifacts-table", DataTable).clear(columns=False)
         self.query_one("#conversation-table", DataTable).clear(columns=False)
+        self.browser_conversation_rows.clear()
+        self.selected_conversation_id = None
+        self.query_one("#conversation-browser-table", DataTable).clear(columns=False)
         self.query_one("#event-log", RichLog).clear()
         self.query_one("#transport-log", RichLog).clear()
         self.query_one("#evidence-view", TextArea).text = ""
+        self.query_one("#conversation-meta", Static).update(Text("No conversation selected"))
+        self.query_one("#conversation-chat-view", TextArea).text = ""
+        self.query_one("#conversation-input", TextArea).text = ""
         self.query_one("#report-view", TextArea).text = ""
         self.query_one("#error-view", TextArea).text = ""
         self.query_one("#run", Button).disabled = False
@@ -337,6 +409,47 @@ class ForgeMindTUI(App[None]):
         self._refresh_transport_panels()
         self.query_one("#workflow-tabs", TabbedContent).active = "task"
         self.query_one("#task-editor", TextArea).focus()
+        self.run_worker(self._load_conversation_browser(), exclusive=False, thread=False)
+
+    def _client_for_conversations(self) -> OpenHandsClient:
+        return OpenHandsClient(
+            self.query_one("#openhands-endpoint", Input).value,
+            api_key=self.query_one("#openhands-api-key", Input).value or None,
+        )
+
+    def _format_conversation_messages(self, messages: list[dict[str, Any]]) -> str:
+        lines: list[str] = []
+        for item in messages:
+            role = str(item.get("role") or item.get("source") or item.get("type") or "message")
+            text = extract_message_text(item).strip()
+            if not text:
+                llm_message = item.get("llm_message")
+                if isinstance(llm_message, dict):
+                    role = str(llm_message.get("role") or role)
+                text = json.dumps(item, ensure_ascii=False, indent=2)
+            lines.append(f"[{role}]\n{text}")
+        return "\n\n".join(lines) if lines else "No messages available for this conversation."
+
+    def _build_conversation_details(self, row: dict[str, Any]) -> str:
+        details = {
+            "conversation_id": row.get("conversation_id", ""),
+            "sandbox_id": row.get("sandbox_id", ""),
+            "status": row.get("status", ""),
+            "title": row.get("title", ""),
+            "updated_at": row.get("updated_at", ""),
+            "mode": row.get("mode", ""),
+            "websocket_url": row.get("websocket_url", ""),
+        }
+        return json.dumps(details, ensure_ascii=False, indent=2)
+
+    def _select_browser_conversation(self, row_index: int) -> None:
+        if 0 <= row_index < len(self.browser_conversation_rows):
+            row = self.browser_conversation_rows[row_index]
+            self.selected_conversation_id = str(row.get("conversation_id") or "") or None
+            self._set_static_text("#conversation-meta", self._build_conversation_details(row))
+            conversation_id = self.selected_conversation_id
+            if conversation_id:
+                self.run_worker(self._load_conversation_detail(conversation_id), exclusive=False, thread=False)
 
     def _show_artifact_by_index(self, row_index: int) -> None:
         if 0 <= row_index < len(self.artifact_rows):
@@ -413,6 +526,73 @@ class ForgeMindTUI(App[None]):
             stage = STAGES[int(event.coordinate.row)] if int(event.coordinate.row) < len(STAGES) else ""
         self._show_stage_by_name(stage)
 
+    @on(DataTable.RowSelected, "#conversation-browser-table")
+    def _on_browser_conversation_selected(self, event: DataTable.RowSelected) -> None:
+        try:
+            row_index = int(str(getattr(event.row_key, "value", event.row_key)))
+        except Exception:
+            return
+        self._select_browser_conversation(row_index)
+
+    @on(DataTable.CellSelected, "#conversation-browser-table")
+    def _on_browser_conversation_cell_selected(self, event: DataTable.CellSelected) -> None:
+        self._select_browser_conversation(int(event.coordinate.row))
+
+    @on(Button.Pressed, "#refresh-conversations")
+    def _on_refresh_conversations(self) -> None:
+        self.run_worker(self._load_conversation_browser(), exclusive=False, thread=False)
+
+    @on(Button.Pressed, "#load-conversation")
+    def _on_load_conversation(self) -> None:
+        if self.selected_conversation_id:
+            self.run_worker(self._load_conversation_detail(self.selected_conversation_id), exclusive=False, thread=False)
+
+    @on(Button.Pressed, "#use-current-conversation")
+    def _on_use_current_conversation(self) -> None:
+        current = str(self.transport_state.get("conversation_id") or "")
+        if not current:
+            return
+        self.selected_conversation_id = current
+        self.run_worker(self._load_conversation_detail(current), exclusive=False, thread=False)
+        self.query_one("#workflow-tabs", TabbedContent).active = "conversations"
+
+    @on(Button.Pressed, "#send-conversation-message")
+    def _on_send_conversation_message(self) -> None:
+        conversation_id = self.selected_conversation_id
+        text_value = self.query_one("#conversation-input", TextArea).text.strip()
+        if not conversation_id or not text_value:
+            return
+        self.run_worker(self._send_conversation_message(conversation_id, text_value), exclusive=False, thread=False)
+
+    @on(ConversationListLoadedMessage)
+    def _on_conversation_list_loaded(self, message: ConversationListLoadedMessage) -> None:
+        table = self.query_one("#conversation-browser-table", DataTable)
+        table.clear(columns=False)
+        self.browser_conversation_rows = list(message.rows)
+        for idx, row in enumerate(self.browser_conversation_rows):
+            table.add_row(
+                row.get("updated_at", ""),
+                row.get("title", ""),
+                row.get("conversation_id", ""),
+                row.get("sandbox_id", ""),
+                row.get("status", ""),
+                key=str(idx),
+            )
+
+    @on(ConversationLoadedMessage)
+    def _on_conversation_loaded(self, message: ConversationLoadedMessage) -> None:
+        self.selected_conversation_id = message.conversation_id
+        self._set_static_text("#conversation-meta", message.details)
+        self.query_one("#conversation-chat-view", TextArea).text = message.transcript
+
+    @on(ConversationSentMessage)
+    def _on_conversation_sent(self, message: ConversationSentMessage) -> None:
+        self.selected_conversation_id = message.conversation_id
+        self.query_one("#conversation-input", TextArea).text = ""
+        self.query_one("#conversation-chat-view", TextArea).text = message.transcript
+        self.query_one("#workflow-tabs", TabbedContent).active = "conversations"
+        self.query_one("#transport-log", RichLog).write(f"[manual_chat] sent to {message.conversation_id}: {message.response_text[:160]}")
+
     @on(RuntimeEventMessage)
     def _on_runtime_event(self, message: RuntimeEventMessage) -> None:
         try:
@@ -480,6 +660,62 @@ class ForgeMindTUI(App[None]):
     def _on_internal_error(self, message: InternalErrorMessage) -> None:
         self._record_error(message.context, message.error_text)
         self.query_one("#workflow-tabs", TabbedContent).active = "errors"
+
+    async def _load_conversation_browser(self) -> None:
+        try:
+            client = self._client_for_conversations()
+            data = await client.search_app_conversations(limit=100, include_sub_conversations=True)
+            items = data.get("items") if isinstance(data, dict) else data
+            rows: list[dict[str, Any]] = []
+            if isinstance(items, list):
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    rows.append({
+                        "conversation_id": str(item.get("id") or item.get("conversation_id") or ""),
+                        "sandbox_id": str(item.get("sandbox_id") or ""),
+                        "status": str(item.get("status") or ""),
+                        "title": str(item.get("title") or item.get("name") or ""),
+                        "updated_at": str(item.get("updated_at") or item.get("created_at") or ""),
+                        "mode": str(item.get("mode") or "search"),
+                        "websocket_url": "",
+                    })
+            rows = [row for row in rows if row.get("conversation_id")]
+            rows.sort(key=lambda row: row.get("updated_at", ""), reverse=True)
+            self.post_message(ConversationListLoadedMessage(rows))
+        except Exception as exc:  # pragma: no cover - interactive path
+            self.post_message(InternalErrorMessage("conversation_list", self._format_exception(exc)))
+
+    async def _load_conversation_detail(self, conversation_id: str) -> None:
+        try:
+            client = self._client_for_conversations()
+            start = await client.get_existing_conversation_start(conversation_id)
+            messages = await client.get_conversation_messages(conversation_id)
+            row = next((r for r in self.browser_conversation_rows if r.get("conversation_id") == conversation_id), None)
+            payload = row or {}
+            payload = {**payload, "conversation_id": conversation_id, "sandbox_id": start.sandbox_id or payload.get("sandbox_id", ""), "websocket_url": start.conversation_url or start.agent_server_url or payload.get("websocket_url", "")}
+            details = self._build_conversation_details(payload)
+            transcript = self._format_conversation_messages(messages)
+            self.post_message(ConversationLoadedMessage(conversation_id, details, transcript))
+        except Exception as exc:  # pragma: no cover - interactive path
+            self.post_message(InternalErrorMessage("conversation_detail", self._format_exception(exc)))
+
+    async def _send_conversation_message(self, conversation_id: str, text_value: str) -> None:
+        try:
+            client = self._client_for_conversations()
+            start = await client.get_existing_conversation_start(conversation_id)
+            result = await run_followup_message_and_collect(
+                endpoint=self.query_one("#openhands-endpoint", Input).value,
+                conversation=start,
+                prompt=text_value,
+                api_key=self.query_one("#openhands-api-key", Input).value or None,
+                event_sink=lambda event: self.post_message(RuntimeEventMessage(event)),
+            )
+            messages = await client.get_conversation_messages(conversation_id)
+            transcript = self._format_conversation_messages(messages)
+            self.post_message(ConversationSentMessage(conversation_id, transcript, result.text))
+        except Exception as exc:  # pragma: no cover - interactive path
+            self.post_message(InternalErrorMessage("conversation_send", self._format_exception(exc)))
 
     def _append_log(self, event: RuntimeEvent) -> None:
         payload = json.dumps(event.payload, ensure_ascii=False, sort_keys=True) if event.payload else ""
@@ -648,6 +884,17 @@ class ForgeMindTUI(App[None]):
                 verdict = "PASS" if self.final_report.verification.passed else "FAIL"
                 final_lines.append(f"verification: {verdict}")
                 final_lines.append(f"confidence: {self.final_report.verification.confidence}")
+                if getattr(self.final_report.verification, "completion_status", None):
+                    final_lines.append(f"completion: {self.final_report.verification.completion_status}")
+                performed = getattr(self.final_report.verification, "performed_test_levels", None) or []
+                missing = getattr(self.final_report.verification, "missing_test_levels", None) or []
+                if performed:
+                    final_lines.append(f"tests_done: {', '.join(performed)}")
+                if missing:
+                    final_lines.append(f"tests_missing: {', '.join(missing)}")
+                missing_obligations = getattr(self.final_report.verification, "missing_obligations", None) or []
+                if missing_obligations:
+                    final_lines.append(f"obligations_missing: {len(missing_obligations)}")
         else:
             final_lines.append("no final report yet")
         self._set_static_text("#final-compact", "\n".join(final_lines))
@@ -689,15 +936,6 @@ class ForgeMindTUI(App[None]):
         self.last_error = f"{context}: {first_line}"
         self.query_one("#error-view", TextArea).text = "\n".join(self.error_history)
         self.query_one("#event-log", RichLog).write(f"ERROR[{context}] {self.last_error}")
-        try:
-            if self.log_file_path is None:
-                self._refresh_log_path()
-            assert self.log_file_path is not None
-            with self.log_file_path.open("a", encoding="utf-8") as fh:
-                fh.write(entry)
-        except Exception:
-            pass
-
         try:
             if self.log_file_path is None:
                 self._refresh_log_path()

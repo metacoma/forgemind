@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 
-from artifact_workflow_runtime.models import ContextPacket, ExecutionPlan, ExecutionResult, PublishResult, Task, TaskClassification
+from artifact_workflow_runtime.models import Capability, ContextPacket, ExecutionPlan, ExecutionResult, PublishResult, Task, TaskClassification
+
+
+ALLOWED_CAPABILITY_VALUES = [cap.value for cap in Capability]
 
 
 CLASSIFICATION_SCHEMA_HINT = {
@@ -10,7 +13,7 @@ CLASSIFICATION_SCHEMA_HINT = {
     "needs_world_facts": "boolean",
     "execution_family": "documentation_only|repository_change|host_operation|cluster_operation|network_investigation",
     "task_intent": "implement|modify|investigate|document|verify",
-    "capabilities": ["repo_read"],
+    "capabilities": ALLOWED_CAPABILITY_VALUES[:1],
     "observation_focus": ["string"],
     "reasoning": "string",
     "risk_level": "low|medium|high",
@@ -32,7 +35,7 @@ PLAN_SCHEMA_HINT = {
     "execution_family": "documentation_only|repository_change|host_operation|cluster_operation|network_investigation",
     "task_intent": "implement|modify|investigate|document|verify",
     "deliverable_kind": "repository_changes|host_changes|cluster_changes|network_findings|documentation|analysis",
-    "capabilities": ["repo_read"],
+    "capabilities": ALLOWED_CAPABILITY_VALUES[:1],
     "steps": ["string"],
     "success_criteria": ["string"],
     "verification_checks": ["string"],

@@ -4,6 +4,7 @@ from artifact_workflow_runtime.models import Capability
 
 MUTATING_CAPABILITIES = {
     Capability.REPO_WRITE,
+    Capability.REPO_CREATE_PR,
     Capability.SHELL_WRITE,
     Capability.GIT_WRITE,
     Capability.K8S_WRITE,

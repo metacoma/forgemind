@@ -491,6 +491,65 @@ class OpenHandsClient:
             return data
         return None
 
+
+
+    async def get_existing_conversation_start(self, conversation_id: str) -> AppConversationStart:
+        """Build a best-effort AppConversationStart for an existing conversation id."""
+        info = await self.get_app_conversation(conversation_id)
+        if not info:
+            return AppConversationStart(conversation_id=conversation_id)
+        conversation_url = str(info.get("conversation_url") or info.get("url") or "") or None
+        agent_server_url = str(
+            info.get("agent_server_url")
+            or _find_first_string_by_key(info, {"agent_server_url", "runtime_url"})
+            or ""
+        ) or None
+        session_api_key = _find_first_string_by_key(
+            info,
+            {"session_api_key", "session_key", "runtime_session_api_key"},
+        )
+        return AppConversationStart(
+            conversation_id=conversation_id,
+            task_id=str(info.get("task_id") or "") or None,
+            status=str(info.get("status") or "") or None,
+            sandbox_id=str(info.get("sandbox_id") or "") or None,
+            agent_server_url=agent_server_url,
+            conversation_url=conversation_url,
+            session_api_key=session_api_key,
+            raw_conversation=info,
+        )
+
+    async def get_conversation_messages(self, conversation_id: str) -> list[JsonDict]:
+        """Fetch message history for an existing conversation from the agent-server API."""
+        conversation = await self.get_existing_conversation_start(conversation_id)
+        headers = self._headers_with_session_key(conversation.session_api_key)
+        endpoints: list[str] = []
+        seen: set[str] = set()
+        for base in self.build_agent_conversation_api_bases(conversation):
+            endpoints.append(f"{base.rstrip('/')}/messages")
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as http:
+            for url in endpoints:
+                if url in seen:
+                    continue
+                seen.add(url)
+                try:
+                    response = await http.get(url, headers=headers)
+                except httpx.HTTPError:
+                    continue
+                content_type = response.headers.get("content-type", "")
+                if response.status_code >= 400 or "json" not in content_type.lower():
+                    continue
+                try:
+                    data = response.json()
+                except ValueError:
+                    continue
+                if isinstance(data, list):
+                    return [item for item in data if isinstance(item, dict)]
+                if isinstance(data, dict):
+                    messages = data.get("messages")
+                    if isinstance(messages, list):
+                        return [item for item in messages if isinstance(item, dict)]
+        return []
     async def search_sandboxes(
         self,
         limit: int = 100,

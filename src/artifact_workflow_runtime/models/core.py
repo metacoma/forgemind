@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 JsonDict = dict[str, Any]
 
@@ -26,6 +26,7 @@ class Capability(str, Enum):
     DOCUMENT_READ = "document_read"
     REPO_READ = "repo_read"
     REPO_WRITE = "repo_write"
+    REPO_CREATE_PR = "repo_create_pr"
     SHELL_READ = "shell_read"
     SHELL_WRITE = "shell_write"
     GIT_READ = "git_read"
@@ -34,6 +35,53 @@ class Capability(str, Enum):
     K8S_READ = "k8s_read"
     K8S_WRITE = "k8s_write"
     NETWORK_DIAGNOSTICS = "network_diagnostics"
+
+    @classmethod
+    def coerce(cls, value: object) -> "Capability | None":
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, str):
+            return None
+        key = value.strip().lower().replace("-", "_").replace(" ", "_")
+        aliases: dict[str, Capability] = {
+            "repo_create_pr": cls.REPO_CREATE_PR,
+            "create_pr": cls.REPO_CREATE_PR,
+            "pull_request": cls.REPO_CREATE_PR,
+            "pr": cls.REPO_CREATE_PR,
+            "repo_push": cls.GIT_WRITE,
+            "git_push": cls.GIT_WRITE,
+            "push": cls.GIT_WRITE,
+            "git_commit": cls.GIT_WRITE,
+            "commit": cls.GIT_WRITE,
+            "repo_commit": cls.GIT_WRITE,
+            "repo_rw": cls.REPO_WRITE,
+            "repo_ro": cls.REPO_READ,
+            "shell_execute": cls.SHELL_WRITE,
+            "run_shell": cls.SHELL_WRITE,
+            "kubernetes_read": cls.K8S_READ,
+            "kubernetes_write": cls.K8S_WRITE,
+            "net_diag": cls.NETWORK_DIAGNOSTICS,
+        }
+        mapped = aliases.get(key)
+        if mapped is not None:
+            return mapped
+        for member in cls:
+            if key == member.value or key == member.name.lower():
+                return member
+        return None
+
+
+def _normalize_capability_list(value: object) -> list[Capability]:
+    if value is None:
+        return []
+    items = value if isinstance(value, list) else [value]
+    normalized: list[Capability] = []
+    for item in items:
+        cap = Capability.coerce(item)
+        if cap is None or cap in normalized:
+            continue
+        normalized.append(cap)
+    return normalized
 
 
 class ExecutionFamily(str, Enum):
@@ -88,6 +136,11 @@ class TaskClassification(RuntimeModel):
     reasoning: str
     risk_level: str = "low"
 
+    @field_validator("capabilities", mode="before")
+    @classmethod
+    def _validate_capabilities(cls, value: object) -> list[Capability]:
+        return _normalize_capability_list(value)
+
 
 class RoutingDecision(RuntimeModel):
     id: str = Field(default_factory=lambda: new_id("route"))
@@ -108,6 +161,11 @@ class ObservationRequest(RuntimeModel):
     capabilities: list[Capability] = Field(default_factory=list)
     prompt: str
     metadata: JsonDict = Field(default_factory=dict)
+
+    @field_validator("capabilities", mode="before")
+    @classmethod
+    def _validate_capabilities(cls, value: object) -> list[Capability]:
+        return _normalize_capability_list(value)
 
 
 class ObservationResult(RuntimeModel):
@@ -165,6 +223,11 @@ class ExecutionPlan(RuntimeModel):
     environment_notes: list[str] = Field(default_factory=list)
     reasoning: str
 
+    @field_validator("capabilities", mode="before")
+    @classmethod
+    def _validate_capabilities(cls, value: object) -> list[Capability]:
+        return _normalize_capability_list(value)
+
 
 class PolicyDecision(RuntimeModel):
     id: str = Field(default_factory=lambda: new_id("policy"))
@@ -175,6 +238,11 @@ class PolicyDecision(RuntimeModel):
     execution_family: ExecutionFamily
     capabilities: list[Capability] = Field(default_factory=list)
     created_at: str = Field(default_factory=utc_now)
+
+    @field_validator("capabilities", mode="before")
+    @classmethod
+    def _validate_capabilities(cls, value: object) -> list[Capability]:
+        return _normalize_capability_list(value)
 
 
 class ApprovalRequest(RuntimeModel):
@@ -195,6 +263,11 @@ class ExecutionRequest(RuntimeModel):
     prompt: str
     plan_summary: str | None = None
     metadata: JsonDict = Field(default_factory=dict)
+
+    @field_validator("capabilities", mode="before")
+    @classmethod
+    def _validate_capabilities(cls, value: object) -> list[Capability]:
+        return _normalize_capability_list(value)
 
 
 class ExecutionResult(RuntimeModel):
