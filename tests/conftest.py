@@ -56,6 +56,7 @@ class FakeOpenHandsServer:
     patched_payloads: list[JsonDict] = field(default_factory=list)
     followup_payloads: list[JsonDict] = field(default_factory=list)
     title: str | None = None
+    _conversation_counter: int = 0
 
     async def start(self) -> "FakeOpenHandsServer":
         app = web.Application()
@@ -95,6 +96,9 @@ class FakeOpenHandsServer:
     async def handle_create_app_conversation(self, request: web.Request) -> web.Response:
         payload = await request.json()
         self.created_payloads.append(payload)
+        self._conversation_counter += 1
+        self.conversation_id = f"conv-{self._conversation_counter}"
+        self.task_id = f"task-{self._conversation_counter}"
         return web.json_response({"id": self.task_id, "status": "WORKING"})
 
     async def handle_patch_app_conversation(self, request: web.Request) -> web.Response:

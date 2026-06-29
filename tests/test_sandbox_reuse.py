@@ -44,7 +44,7 @@ async def test_openhands_instance_reuses_existing_sandbox(fake_openhands_server)
     ]
 
 
-async def test_openhands_instance_reuses_existing_conversation_for_followups(fake_openhands_server) -> None:
+async def test_openhands_instance_reuses_sandbox_but_starts_new_conversation_each_run(fake_openhands_server) -> None:
     instance = OpenHandsInstance(
         fake_openhands_server.endpoint,
         default_model=fake_openhands_server.llm_model,
@@ -52,12 +52,9 @@ async def test_openhands_instance_reuses_existing_conversation_for_followups(fak
     )
     first = await instance.run(prompt="observe repo")
     second = await instance.run(prompt="verify repo")
-    assert first.conversation_id == second.conversation_id == fake_openhands_server.conversation_id
-    assert len(fake_openhands_server.created_payloads) == 1
-    assert fake_openhands_server.followup_payloads == [
-        {
-            "role": "user",
-            "content": [{"text": "verify repo", "cache_prompt": False, "type": "text"}],
-            "run": True,
-        }
-    ]
+    assert first.start.sandbox_id == second.start.sandbox_id == fake_openhands_server.sandbox_id
+    assert first.conversation_id != second.conversation_id
+    assert len(fake_openhands_server.created_payloads) == 2
+    assert fake_openhands_server.followup_payloads == []
+    assert fake_openhands_server.created_payloads[0]["sandbox_id"] == fake_openhands_server.sandbox_id
+    assert fake_openhands_server.created_payloads[1]["sandbox_id"] == fake_openhands_server.sandbox_id
