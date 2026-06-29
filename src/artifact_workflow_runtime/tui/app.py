@@ -10,6 +10,7 @@ from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import Button, Checkbox, DataTable, Footer, Header, Input, Label, RichLog, Static, TabbedContent, TabPane, TextArea
+from rich.text import Text
 
 from artifact_workflow_runtime.models import FinalReport, Task
 from artifact_workflow_runtime.runtime_events import RuntimeEvent
@@ -491,6 +492,9 @@ class ForgeMindTUI(App[None]):
         if needs_rebuild:
             self._rebuild_stage_table()
 
+    def _set_static_text(self, selector: str, content: str) -> None:
+        self.query_one(selector, Static).update(Text(str(content)))
+
     def _refresh_status_bar(self) -> None:
         run_state = "running" if self.running else "idle"
         self.query_one("#status-bar", Static).update(
@@ -501,7 +505,7 @@ class ForgeMindTUI(App[None]):
         run_lines = ["Workflow", "", f"current_stage: {self.current_stage}", f"status: {self.current_status}", f"artifacts_seen: {len(self.artifact_rows)}"]
         if self.last_error:
             run_lines.append(f"last_error: {self.last_error}")
-        self.query_one("#run-summary", Static).update("\n".join(run_lines))
+        self._set_static_text("#run-summary", "\n".join(run_lines))
 
         transport_lines = [
             "Transport",
@@ -512,7 +516,7 @@ class ForgeMindTUI(App[None]):
             f"followups: {self.transport_state.get('followups', 0)}",
             f"events: {self.transport_state.get('event_count', 0)}",
         ]
-        self.query_one("#transport-compact", Static).update("\n".join(transport_lines))
+        self._set_static_text("#transport-compact", "\n".join(transport_lines))
 
         final_lines = ["Final / verification", ""]
         if self.final_report is not None:
@@ -526,7 +530,7 @@ class ForgeMindTUI(App[None]):
                 final_lines.append(f"confidence: {self.final_report.verification.confidence}")
         else:
             final_lines.append("no final report yet")
-        self.query_one("#final-compact", Static).update("\n".join(final_lines))
+        self._set_static_text("#final-compact", "\n".join(final_lines))
 
     def _refresh_transport_panels(self) -> None:
         lines = [
@@ -542,9 +546,10 @@ class ForgeMindTUI(App[None]):
             f"events_seen: {self.transport_state.get('event_count', 0)}",
             f"followups: {self.transport_state.get('followups', 0)}",
         ]
-        self.query_one("#transport-summary", Static).update("\n".join(lines))
-        self.query_one("#transport-last-event", Static).update(
-            "Last transport note\n\n" + str(self.transport_state.get("last_message", ""))
+        self._set_static_text("#transport-summary", "\n".join(lines))
+        self._set_static_text(
+            "#transport-last-event",
+            "Last transport note\n\n" + str(self.transport_state.get("last_message", "")),
         )
 
     def _build_config(self) -> dict[str, Any]:
