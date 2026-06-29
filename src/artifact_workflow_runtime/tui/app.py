@@ -554,7 +554,6 @@ class ForgeMindTUI(App[None]):
         self.query_one("#workflow-tabs", TabbedContent).active = "overview"
         self.run_worker(self._run_workflow(), exclusive=True, thread=False)
 
-    @work(exclusive=True)
     async def _run_workflow(self) -> None:
         def event_sink(event: RuntimeEvent) -> None:
             self.post_message(RuntimeEventMessage(event))
