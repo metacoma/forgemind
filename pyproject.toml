@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "artifact-workflow-runtime"
+version = "0.1.0"
+description = "Standalone artifact-backed workflow runtime with separate Direct LLM and OpenHands execution backends"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "pydantic>=2.7,<3",
+  "httpx>=0.27",
+  "websockets>=13,<16",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8",
+  "pytest-asyncio>=0.23",
+  "aiohttp>=3.9",
+]
+langgraph = [
+  "langgraph>=0.2",
+]
+
+[project.scripts]
+artifact-workflow-run = "artifact_workflow_runtime.cli:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/artifact_workflow_runtime"]
