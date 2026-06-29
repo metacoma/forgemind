@@ -152,7 +152,16 @@ class OpenHandsClient:
             raise OpenHandsHTTPError(method, path, response)
         if not response.content:
             return {}
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError:
+            content_type = response.headers.get("content-type", "")
+            text_body = response.text
+            if "application/json" in content_type.lower():
+                raise OpenHandsError(
+                    f"{method} {path} returned invalid JSON despite content-type {content_type!r}: {text_body[:500]}"
+                )
+            return {"raw_text": text_body, "content_type": content_type or None}
         if isinstance(data, (dict, list)):
             return data
         return {"value": data}
@@ -275,6 +284,10 @@ class OpenHandsClient:
             data = await self._request("GET", path, headers=self._headers_with_session_key(start.session_api_key))
         except OpenHandsError:
             return ""
+        if isinstance(data, dict):
+            raw_text = data.get("raw_text")
+            if isinstance(raw_text, str) and raw_text.strip():
+                return raw_text.strip()
         messages = data if isinstance(data, list) else data.get("messages") if isinstance(data, dict) else []
         final = ""
         if isinstance(messages, list):
