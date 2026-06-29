@@ -82,6 +82,7 @@ class TaskClassification(RuntimeModel):
     normalized_task: str
     needs_world_facts: bool
     execution_family: ExecutionFamily
+    task_intent: str = "investigate"
     capabilities: list[Capability] = Field(default_factory=list)
     observation_focus: list[str] = Field(default_factory=list)
     reasoning: str
@@ -105,6 +106,8 @@ class ObservationResult(RuntimeModel):
     evidence_text: str
     artifacts: list[Artifact] = Field(default_factory=list)
     conversation_id: str | None = None
+    transport_error: bool = False
+    evidence_kind: str = "agent_text"
     created_at: str = Field(default_factory=utc_now)
 
 
@@ -133,11 +136,15 @@ class ExecutionPlan(RuntimeModel):
     id: str = Field(default_factory=lambda: new_id("plan"))
     summary: str
     execution_family: ExecutionFamily
+    task_intent: str = "investigate"
+    deliverable_kind: str = "analysis"
     capabilities: list[Capability] = Field(default_factory=list)
     steps: list[str] = Field(default_factory=list)
     success_criteria: list[str] = Field(default_factory=list)
     verification_checks: list[str] = Field(default_factory=list)
     requires_mutation: bool = False
+    must_change_world: bool = False
+    expected_repo_changes: list[str] = Field(default_factory=list)
     reasoning: str
 
 
@@ -180,6 +187,8 @@ class ExecutionResult(RuntimeModel):
     evidence_text: str
     artifacts: list[Artifact] = Field(default_factory=list)
     conversation_id: str | None = None
+    transport_error: bool = False
+    evidence_kind: str = "agent_text"
     created_at: str = Field(default_factory=utc_now)
 
 
@@ -188,7 +197,19 @@ class VerificationRequest(RuntimeModel):
     execution_result_id: str
     execution_family: ExecutionFamily
     prompt: str
+    artifact_ids: list[str] = Field(default_factory=list)
+    checks: list[str] = Field(default_factory=list)
     metadata: JsonDict = Field(default_factory=dict)
+
+
+class EvidenceVerification(RuntimeModel):
+    passed: bool
+    summary: str
+    checks_passed: list[str] = Field(default_factory=list)
+    checks_failed: list[str] = Field(default_factory=list)
+    missing_evidence: list[str] = Field(default_factory=list)
+    confidence: str = "low"
+    reasoning: str
 
 
 class VerificationResult(RuntimeModel):
@@ -199,6 +220,11 @@ class VerificationResult(RuntimeModel):
     evidence_text: str
     artifacts: list[Artifact] = Field(default_factory=list)
     conversation_id: str | None = None
+    checks_passed: list[str] = Field(default_factory=list)
+    checks_failed: list[str] = Field(default_factory=list)
+    missing_evidence: list[str] = Field(default_factory=list)
+    confidence: str = "low"
+    verifier_backend: str = "evidence_llm"
     created_at: str = Field(default_factory=utc_now)
 
 

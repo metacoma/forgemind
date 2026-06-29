@@ -13,6 +13,19 @@ from artifact_workflow_runtime.models import (
 from .instance import OpenHandsInstance
 
 
+HTML_MARKERS = ("<!doctype html", "<html", "reactrouter", "window.__reactroutercontext", "let&#x27;s start building")
+
+
+def _classify_run_text(text: str) -> tuple[bool, str]:
+    stripped = text.strip()
+    if not stripped:
+        return True, "empty_response"
+    lowered = stripped.lower()
+    if any(marker in lowered for marker in HTML_MARKERS):
+        return True, "html_transport_error"
+    return False, "agent_text"
+
+
 class OpenHandsAdapter:
     def __init__(self, instance: OpenHandsInstance, artifact_store: ArtifactStore) -> None:
         self.instance = instance
@@ -23,18 +36,22 @@ class OpenHandsAdapter:
             prompt=request.prompt,
             title=f"observe:{request.task_id}",
         )
+        transport_error, evidence_kind = _classify_run_text(run.text)
         artifact = self.artifact_store.add_text(
             "observation_evidence",
             run.text,
-            metadata={"conversation_id": run.conversation_id, "request_id": request.id},
+            metadata={"conversation_id": run.conversation_id, "request_id": request.id, "evidence_kind": evidence_kind},
         )
+        summary = run.text.strip()[:400] if not transport_error else "OpenHands did not return usable observation evidence."
         return ObservationResult(
             request_id=request.id,
-            ok=bool(run.text.strip()),
-            summary=run.text.strip()[:400],
+            ok=bool(run.text.strip()) and not transport_error,
+            summary=summary,
             evidence_text=run.text,
             artifacts=[artifact],
             conversation_id=run.conversation_id,
+            transport_error=transport_error,
+            evidence_kind=evidence_kind,
         )
 
     async def execute(self, request: ExecutionRequest) -> ExecutionResult:
@@ -42,18 +59,22 @@ class OpenHandsAdapter:
             prompt=request.prompt,
             title=f"execute:{request.task_id}",
         )
+        transport_error, evidence_kind = _classify_run_text(run.text)
         artifact = self.artifact_store.add_text(
             "execution_evidence",
             run.text,
-            metadata={"conversation_id": run.conversation_id, "request_id": request.id},
+            metadata={"conversation_id": run.conversation_id, "request_id": request.id, "evidence_kind": evidence_kind},
         )
+        summary = run.text.strip()[:400] if not transport_error else "OpenHands did not return usable execution evidence."
         return ExecutionResult(
             request_id=request.id,
-            ok=bool(run.text.strip()),
-            summary=run.text.strip()[:400],
+            ok=bool(run.text.strip()) and not transport_error,
+            summary=summary,
             evidence_text=run.text,
             artifacts=[artifact],
             conversation_id=run.conversation_id,
+            transport_error=transport_error,
+            evidence_kind=evidence_kind,
         )
 
     async def verify(self, request: VerificationRequest) -> VerificationResult:
@@ -61,18 +82,28 @@ class OpenHandsAdapter:
             prompt=request.prompt,
             title="verify",
         )
+        transport_error, evidence_kind = _classify_run_text(run.text)
         text_lower = run.text.lower()
-        passed = "pass" in text_lower or "ok" in text_lower or "success" in text_lower
+        passed = ("pass" in text_lower or "ok" in text_lower or "success" in text_lower) and not transport_error
         artifact = self.artifact_store.add_text(
             "verification_evidence",
             run.text,
-            metadata={"conversation_id": run.conversation_id, "request_id": request.id},
+            metadata={"conversation_id": run.conversation_id, "request_id": request.id, "evidence_kind": evidence_kind},
         )
+        summary = run.text.strip()[:400] if not transport_error else "OpenHands did not return usable verification evidence."
+        checks_passed = request.checks if passed else []
+        checks_failed = [] if passed else list(request.checks)
+        missing_evidence = ["usable verification evidence"] if transport_error or not run.text.strip() else []
         return VerificationResult(
             request_id=request.id,
             passed=passed,
-            summary=run.text.strip()[:400],
+            summary=summary,
             evidence_text=run.text,
             artifacts=[artifact],
             conversation_id=run.conversation_id,
+            checks_passed=checks_passed,
+            checks_failed=checks_failed,
+            missing_evidence=missing_evidence,
+            confidence="low" if missing_evidence else "medium",
+            verifier_backend="openhands",
         )

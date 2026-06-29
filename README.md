@@ -107,3 +107,28 @@ artifact-workflow-run \
   --reuse \
   --auto-approve
 ```
+
+
+## Modern TUI cockpit
+
+The project now ships with an optional Textual-based TUI. Textual provides a full Python app framework for terminal UIs, with widgets such as `DataTable`, `RichLog`, `Tree`, `MarkdownViewer`, `Input`, and `TextArea`, plus support for workers, a command palette, CLI integration, and running over SSH. Rich remains valuable for renderables like tables, trees, live views, and logs, while prompt_toolkit is a strong lower-level option for full-screen terminal apps when you want to build the layout and key bindings more manually. Textual is the best fit here because this runtime needs a high-information cockpit rather than a raw prompt shell.
+
+Install the TUI extra:
+
+```bash
+pip install -e '.[tui]'
+```
+
+Run the cockpit:
+
+```bash
+artifact-workflow-tui
+```
+
+The TUI shows:
+- live pipeline stage status
+- event log with stage-level telemetry
+- artifacts table with preview
+- evidence viewer
+- final JSON report
+- editable task and backend configuration

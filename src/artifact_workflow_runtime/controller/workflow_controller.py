@@ -9,10 +9,11 @@ from artifact_workflow_runtime.models import FinalReport, Task
 from artifact_workflow_runtime.observation import ObservationService
 from artifact_workflow_runtime.policy import ApprovalProvider, PolicyEngine
 from artifact_workflow_runtime.reports import FinalReportBuilder
+from artifact_workflow_runtime.runtime_events import EventSink
 
 
 class WorkflowController:
-    def __init__(self, *, llm_backend, openhands_adapter, artifact_root: str | Path, approval_provider: ApprovalProvider | None = None) -> None:
+    def __init__(self, *, llm_backend, openhands_adapter, artifact_root: str | Path, approval_provider: ApprovalProvider | None = None, event_sink: EventSink | None = None) -> None:
         adapter_store = getattr(openhands_adapter, "artifact_store", None)
         self.artifact_store = adapter_store if isinstance(adapter_store, ArtifactStore) else ArtifactStore(artifact_root)
         self.services = WorkflowServices(
@@ -24,6 +25,7 @@ class WorkflowController:
             policy_engine=PolicyEngine(),
             approval_provider=approval_provider or getattr(openhands_adapter, "approval_provider", None),
             final_report_builder=FinalReportBuilder(),
+            event_sink=event_sink,
         )
         if self.services.approval_provider is None:
             from artifact_workflow_runtime.policy import StaticApprovalProvider
