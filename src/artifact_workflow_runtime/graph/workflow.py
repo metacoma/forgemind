@@ -185,9 +185,6 @@ def build_workflow_graph(services: WorkflowServices):
             execution_family=plan.execution_family,
             capabilities=plan.capabilities,
             prompt=prompt,
-            repository=task.repository,
-            branch=task.branch,
-            git_provider=task.git_provider,
             plan_summary=plan.summary,
         )
         result = await services.openhands_adapter.execute(request)
@@ -215,9 +212,6 @@ def build_workflow_graph(services: WorkflowServices):
             execution_result_id=execution.id,
             execution_family=plan.execution_family,
             prompt=prompt,
-            repository=task.repository,
-            branch=task.branch,
-            git_provider=task.git_provider,
         )
         result = await services.openhands_adapter.verify(request)
         artifact_ids = list(state.get("artifact_ids") or [])

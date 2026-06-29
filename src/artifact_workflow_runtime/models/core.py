@@ -48,9 +48,6 @@ class Task(RuntimeModel):
     id: str = Field(default_factory=lambda: new_id("task"))
     title: str | None = None
     description: str
-    repository: str | None = None
-    branch: str | None = None
-    git_provider: str | None = None
     metadata: JsonDict = Field(default_factory=dict)
     created_at: str = Field(default_factory=utc_now)
 
@@ -97,9 +94,6 @@ class ObservationRequest(RuntimeModel):
     execution_family: ExecutionFamily
     capabilities: list[Capability] = Field(default_factory=list)
     prompt: str
-    repository: str | None = None
-    branch: str | None = None
-    git_provider: str | None = None
     metadata: JsonDict = Field(default_factory=dict)
 
 
@@ -174,9 +168,6 @@ class ExecutionRequest(RuntimeModel):
     execution_family: ExecutionFamily
     capabilities: list[Capability] = Field(default_factory=list)
     prompt: str
-    repository: str | None = None
-    branch: str | None = None
-    git_provider: str | None = None
     plan_summary: str | None = None
     metadata: JsonDict = Field(default_factory=dict)
 
@@ -197,9 +188,6 @@ class VerificationRequest(RuntimeModel):
     execution_result_id: str
     execution_family: ExecutionFamily
     prompt: str
-    repository: str | None = None
-    branch: str | None = None
-    git_provider: str | None = None
     metadata: JsonDict = Field(default_factory=dict)
 
 

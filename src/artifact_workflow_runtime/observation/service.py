@@ -8,7 +8,9 @@ class ObservationService:
         focus = "\n".join(f"- {item}" for item in classification.observation_focus) or "- collect the minimum world facts needed"
         prompt = (
             "You are gathering world facts for a controller-driven workflow.\n"
-            "Do not decide the plan. Do not mutate the world. Observe only.\n\n"
+            "Do not decide the plan. Do not mutate the world. Observe only.\n"
+            "Use only the task text, the available environment, and already available credentials or checked-out workspaces.\n"
+            "Do not rely on hidden controller fields such as repository/provider metadata.\n\n"
             f"Task: {classification.normalized_task}\n"
             f"Execution family: {classification.execution_family.value}\n"
             f"Focus:\n{focus}\n\n"
@@ -19,8 +21,5 @@ class ObservationService:
             execution_family=classification.execution_family,
             capabilities=classification.capabilities,
             prompt=prompt,
-            repository=task.repository,
-            branch=task.branch,
-            git_provider=task.git_provider,
             metadata={"mode": "observe_only"},
         )

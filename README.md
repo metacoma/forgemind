@@ -73,8 +73,16 @@ pip install -e '.[test,langgraph]'
 ## CLI
 
 ```bash
-artifact-workflow-run   --task "Inspect repo and fix failing test"   --repository owner/repo   --direct-llm-endpoint http://localhost:4000/v1   --direct-llm-model openai/reasoner   --openhands-endpoint http://localhost:3000   --openhands-model openai/executor
+artifact-workflow-run \
+  --task "Работай с репозиторием metacoma/freeplane_plugin_grpc, склонируй его и внеси нужные изменения" \
+  --direct-llm-endpoint http://localhost:4000/v1 \
+  --direct-llm-model openai/reasoner \
+  --openhands-endpoint http://localhost:3000 \
+  --openhands-model openai/executor
 ```
+
+Важно: runtime больше **не принимает** `--repository/--branch/--git-provider` как пользовательские флаги.
+Источник истины для целевого репозитория, ветки, хоста или кластера — **текст задачи** и/или уже существующий sandbox OpenHands.
 
 CLI печатает финальный JSON report и сохраняет artifacts в `./run-artifacts`.
 
@@ -82,7 +90,6 @@ CLI печатает финальный JSON report и сохраняет artifa
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)
 - [REUSE_PLAN.md](REUSE_PLAN.md)
-
 
 ## OpenHands sandbox reuse
 
@@ -92,9 +99,7 @@ Example:
 
 ```bash
 artifact-workflow-run \
-  --task "Inspect repo and fix failing tests" \
-  --repository owner/repo \
-  --git-provider github \
+  --task "Inspect repo and fix failing tests in metacoma/freeplane_plugin_grpc" \
   --direct-llm-endpoint http://127.0.0.1:4000/v1 \
   --direct-llm-model openai/reasoner \
   --openhands-endpoint http://127.0.0.1:3000 \

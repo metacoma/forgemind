@@ -55,7 +55,7 @@ async def test_workflow_mvp_runs_end_to_end(tmp_path) -> None:
         artifact_root=tmp_path / "artifacts",
         approval_provider=StaticApprovalProvider(approve=True, reviewer="test"),
     )
-    report = await controller.run(Task(description="Inspect repo and fix failing tests", repository="owner/repo", git_provider="github"))
+    report = await controller.run(Task(description="Inspect repo metacoma/freeplane_plugin_grpc and fix failing tests"))
     assert report.status == "completed"
     assert report.classification is not None
     assert report.plan is not None

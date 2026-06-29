@@ -17,9 +17,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="artifact-workflow-run")
     parser.add_argument("--task", required=True, help="User task text")
     parser.add_argument("--title", default=None)
-    parser.add_argument("--repository", default=None)
-    parser.add_argument("--branch", default=None)
-    parser.add_argument("--git-provider", default=None)
     parser.add_argument("--artifact-dir", default="run-artifacts")
 
     parser.add_argument("--direct-llm-endpoint", required=True)
@@ -55,7 +52,7 @@ async def _run(args: argparse.Namespace) -> int:
         artifact_root=Path(args.artifact_dir),
         approval_provider=StaticApprovalProvider(approve=args.auto_approve, reviewer="cli"),
     )
-    task = Task(title=args.title, description=args.task, repository=args.repository, branch=args.branch, git_provider=args.git_provider)
+    task = Task(title=args.title, description=args.task)
     report = await controller.run(task)
     print(json.dumps(report.model_dump(mode="json"), ensure_ascii=False, indent=2))
     return 0

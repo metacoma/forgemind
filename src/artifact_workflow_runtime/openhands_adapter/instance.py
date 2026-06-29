@@ -46,9 +46,6 @@ class OpenHandsInstance:
         *,
         prompt: str,
         model: str | None = None,
-        repository: str | None = None,
-        branch: str | None = None,
-        git_provider: str | None = None,
         title: str | None = None,
     ) -> OpenHandsRunResult:
         resolved_sandbox_id = await self._resolve_sandbox_id(model=model)
@@ -57,9 +54,6 @@ class OpenHandsInstance:
             api_key=self.api_key,
             prompt=prompt,
             llm_model=model or self.default_model,
-            selected_repository=repository,
-            selected_branch=branch,
-            git_provider=git_provider,
             sandbox_id=resolved_sandbox_id,
             conversation_id=self.explicit_conversation_id,
             title=title,

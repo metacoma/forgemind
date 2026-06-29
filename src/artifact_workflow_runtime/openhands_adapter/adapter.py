@@ -21,9 +21,6 @@ class OpenHandsAdapter:
     async def observe(self, request: ObservationRequest) -> ObservationResult:
         run = await self.instance.run(
             prompt=request.prompt,
-            repository=request.repository,
-            branch=request.branch,
-            git_provider=request.git_provider,
             title=f"observe:{request.task_id}",
         )
         artifact = self.artifact_store.add_text(
@@ -43,9 +40,6 @@ class OpenHandsAdapter:
     async def execute(self, request: ExecutionRequest) -> ExecutionResult:
         run = await self.instance.run(
             prompt=request.prompt,
-            repository=request.repository,
-            branch=request.branch,
-            git_provider=request.git_provider,
             title=f"execute:{request.task_id}",
         )
         artifact = self.artifact_store.add_text(
@@ -65,9 +59,6 @@ class OpenHandsAdapter:
     async def verify(self, request: VerificationRequest) -> VerificationResult:
         run = await self.instance.run(
             prompt=request.prompt,
-            repository=request.repository,
-            branch=request.branch,
-            git_provider=request.git_provider,
             title="verify",
         )
         text_lower = run.text.lower()
