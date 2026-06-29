@@ -219,6 +219,7 @@ class ForgeMindTUI(App[None]):
         self.stage_status: dict[str, str] = {stage: "pending" for stage in STAGES}
         self.stage_message: dict[str, str] = {stage: "" for stage in STAGES}
         self.stage_started_at: dict[str, str] = {stage: "" for stage in STAGES}
+        self.stage_payloads: dict[str, dict[str, Any]] = {stage: {} for stage in STAGES}
         self.artifact_rows: list[dict[str, Any]] = []
         self.conversation_rows: list[dict[str, Any]] = []
         self.browser_conversation_rows: list[dict[str, Any]] = []
@@ -459,33 +460,31 @@ class ForgeMindTUI(App[None]):
             if conversation_id:
                 self.run_worker(self._load_conversation_detail(conversation_id), exclusive=False, thread=False)
 
+    def _artifact_display_text(self, row: dict[str, Any]) -> str:
+        raw_path = str(row.get("path") or "").strip()
+        preview = str(row.get("preview") or "")
+        header = (
+            f"Artifact ID: {row.get('id', '')}\n"
+            f"Kind: {row.get('kind', '')}\n"
+            f"Path: {raw_path or '<none>'}\n\n"
+        )
+        if not raw_path:
+            return header + "No artifact file path was resolved for this item.\n\n" + preview
+        path = Path(raw_path)
+        try:
+            if path.exists() and path.is_file():
+                return header + path.read_text(encoding="utf-8", errors="replace")
+            if path.exists() and path.is_dir():
+                return header + "Artifact path points to a directory, not a file.\n\n" + preview
+            return header + f"Artifact file not found:\n{path}\n\n" + preview
+        except Exception as exc:  # pragma: no cover - interactive path
+            return header + f"Failed to read artifact: {exc}\n\n" + preview
+
     def _show_artifact_by_index(self, row_index: int) -> None:
         if 0 <= row_index < len(self.artifact_rows):
             row = self.artifact_rows[row_index]
-            raw_path = str(row.get("path") or "").strip()
-            preview = str(row.get("preview") or "")
-            header = (
-                f"Artifact ID: {row.get('id', '')}\n"
-                f"Kind: {row.get('kind', '')}\n"
-                f"Path: {raw_path or '<none>'}\n\n"
-            )
-            if raw_path:
-                path = Path(raw_path)
-                if path.exists() and path.is_file():
-                    self.query_one("#evidence-view", TextArea).text = header + path.read_text(
-                        encoding="utf-8", errors="replace"
-                    )
-                    return
-                if path.exists() and path.is_dir():
-                    self.query_one("#evidence-view", TextArea).text = (
-                        header + "Artifact path points to a directory, not a file.\n\n" + preview
-                    )
-                    return
-                self.query_one("#evidence-view", TextArea).text = header + f"Artifact file not found:\n{path}"
-                return
-            self.query_one("#evidence-view", TextArea).text = (
-                header + "No artifact file path was resolved for this item.\n\n" + preview
-            )
+            self.query_one("#evidence-view", TextArea).text = self._artifact_display_text(row)
+            self.query_one("#workflow-tabs", TabbedContent).active = "artifacts"
 
     def _stage_detail_text(self, stage: str) -> str:
         parts = [
@@ -496,6 +495,13 @@ class ForgeMindTUI(App[None]):
             "Message:",
             self.stage_message.get(stage, ''),
         ]
+        payload = self.stage_payloads.get(stage) or {}
+        if payload:
+            parts += [
+                "",
+                "Latest event payload:",
+                json.dumps(payload, ensure_ascii=False, indent=2),
+            ]
         if self.final_report is not None:
             if stage == "route" and self.final_report.route is not None:
                 parts += [
@@ -509,17 +515,35 @@ class ForgeMindTUI(App[None]):
                     "Research result:",
                     json.dumps(self.final_report.research.model_dump(mode="json"), ensure_ascii=False, indent=2),
                 ]
+            elif stage == "observe" and self.final_report.observation is not None:
+                parts += [
+                    "",
+                    "Observation result:",
+                    json.dumps(self.final_report.observation.model_dump(mode="json"), ensure_ascii=False, indent=2),
+                ]
             elif stage == "plan" and self.final_report.plan is not None:
                 parts += [
                     "",
                     "Execution plan:",
                     json.dumps(self.final_report.plan.model_dump(mode="json"), ensure_ascii=False, indent=2),
                 ]
+            elif stage == "publish" and self.final_report.publish is not None:
+                parts += [
+                    "",
+                    "Publish result:",
+                    json.dumps(self.final_report.publish.model_dump(mode="json"), ensure_ascii=False, indent=2),
+                ]
             elif stage == "verify" and self.final_report.verification is not None:
                 parts += [
                     "",
                     "Verification:",
                     json.dumps(self.final_report.verification.model_dump(mode="json"), ensure_ascii=False, indent=2),
+                ]
+            elif stage == "finalize":
+                parts += [
+                    "",
+                    "Final report summary:",
+                    json.dumps(self.final_report.model_dump(mode="json"), ensure_ascii=False, indent=2),
                 ]
         return "\n".join(str(part) for part in parts if part is not None)
 
@@ -644,6 +668,8 @@ class ForgeMindTUI(App[None]):
                 self.current_status = event.message
             self.stage_message[event.stage] = event.message
             self.stage_started_at[event.stage] = event.timestamp
+            if event.payload:
+                self.stage_payloads[event.stage] = dict(event.payload)
             self._append_log(event)
             self._ingest_artifact_payload(event.payload)
             self._refresh_stage_table()
@@ -881,7 +907,7 @@ class ForgeMindTUI(App[None]):
         )
 
     def _workflow_path_text(self) -> str:
-        lines = ["Global path", ""]
+        lines = ["Global path", "", "Stage flow:"]
         for stage in STAGES:
             status = self.stage_status.get(stage, "pending")
             message = self.stage_message.get(stage, "")
@@ -896,49 +922,100 @@ class ForgeMindTUI(App[None]):
                 line += f" — {message}"
             lines.append(line)
 
-        if self.final_report is not None:
-            lines += ["", "Decision summary:"]
-            route = getattr(self.final_report, "route", None)
-            if route is not None:
+        route_source = getattr(self.final_report, "route", None) if self.final_report is not None else None
+        if route_source is None and self.stage_payloads.get("route"):
+            route_source = self.stage_payloads.get("route")
+        plan_source = getattr(self.final_report, "plan", None) if self.final_report is not None else None
+        if plan_source is None and self.stage_payloads.get("plan"):
+            plan_source = self.stage_payloads.get("plan")
+        verify_source = getattr(self.final_report, "verification", None) if self.final_report is not None else None
+        if verify_source is None and self.stage_payloads.get("verify"):
+            verify_source = self.stage_payloads.get("verify")
+        publish_source = getattr(self.final_report, "publish", None) if self.final_report is not None else None
+        if publish_source is None and self.stage_payloads.get("publish"):
+            publish_source = self.stage_payloads.get("publish")
+
+        lines += ["", "Global decisions:"]
+        if route_source is not None:
+            if hasattr(route_source, "needs_fresh_external_research"):
                 lines.append(
                     "route -> research={research}, repo_obs={repo}, world_obs={world}, can_plan={plan}".format(
-                        research=getattr(route, "needs_fresh_external_research", None),
-                        repo=getattr(route, "needs_repository_observation", None),
-                        world=getattr(route, "needs_world_observation", None),
-                        plan=getattr(route, "can_plan_immediately", None),
+                        research=getattr(route_source, "needs_fresh_external_research", None),
+                        repo=getattr(route_source, "needs_repository_observation", None),
+                        world=getattr(route_source, "needs_world_observation", None),
+                        plan=getattr(route_source, "can_plan_immediately", None),
                     )
                 )
-            plan = getattr(self.final_report, "plan", None)
-            if plan is not None:
+            else:
+                lines.append("route payload -> " + json.dumps(route_source, ensure_ascii=False, sort_keys=True)[:300])
+
+        if plan_source is not None:
+            if hasattr(plan_source, "task_intent"):
                 lines.append(
-                    "plan -> intent={intent}, deliverable={deliverable}, commit={commit}, push={push}".format(
-                        intent=getattr(plan, "task_intent", ""),
-                        deliverable=getattr(plan, "deliverable_kind", ""),
-                        commit=getattr(plan, "require_commit", None),
-                        push=getattr(plan, "require_push", None),
+                    "plan -> intent={intent}, deliverable={deliverable}, commit={commit}, push={push}, env={env}".format(
+                        intent=getattr(plan_source, "task_intent", ""),
+                        deliverable=getattr(plan_source, "deliverable_kind", ""),
+                        commit=getattr(plan_source, "require_commit", None),
+                        push=getattr(plan_source, "require_push", None),
+                        env=getattr(plan_source, "execution_environment", ""),
                     )
                 )
-                required_tests = getattr(plan, "required_test_levels", None) or []
+                required_tests = getattr(plan_source, "required_test_levels", None) or []
                 if required_tests:
                     lines.append("required tests -> " + ", ".join(required_tests))
-            verification = getattr(self.final_report, "verification", None)
-            if verification is not None:
+                required_setup = getattr(plan_source, "required_setup_steps", None) or []
+                if required_setup:
+                    lines.append("required setup -> " + ", ".join(required_setup))
+            else:
+                lines.append("plan payload -> " + json.dumps(plan_source, ensure_ascii=False, sort_keys=True)[:300])
+
+        if publish_source is not None:
+            if hasattr(publish_source, "ok"):
+                lines.append(f"publish -> ok={getattr(publish_source, 'ok', None)}")
+                summary = str(getattr(publish_source, 'summary', '') or '')
+                if summary:
+                    lines.append("publish summary -> " + summary[:200])
+            else:
+                lines.append("publish payload -> " + json.dumps(publish_source, ensure_ascii=False, sort_keys=True)[:300])
+
+        if verify_source is not None:
+            if hasattr(verify_source, "passed"):
                 lines.append(
-                    "verify -> passed={passed}, completion={completion}".format(
-                        passed=getattr(verification, "passed", None),
-                        completion=getattr(verification, "completion_status", ""),
+                    "verify -> passed={passed}, completion={completion}, commit_done={commit_done}, push_done={push_done}".format(
+                        passed=getattr(verify_source, "passed", None),
+                        completion=getattr(verify_source, "completion_status", ""),
+                        commit_done=getattr(verify_source, "commit_done", None),
+                        push_done=getattr(verify_source, "push_done", None),
                     )
                 )
-                performed = getattr(verification, "performed_test_levels", None) or []
-                missing = getattr(verification, "missing_test_levels", None) or []
+                performed = getattr(verify_source, "performed_test_levels", None) or []
+                missing = getattr(verify_source, "missing_test_levels", None) or []
+                missing_setup = getattr(verify_source, "missing_setup_steps", None) or []
+                pr_failed = getattr(verify_source, "pr_checks_failed", None) or []
+                pr_pending = getattr(verify_source, "pr_checks_pending", None) or []
+                obligations = getattr(verify_source, "missing_obligations", None) or []
                 if performed:
                     lines.append("performed tests -> " + ", ".join(performed))
                 if missing:
                     lines.append("missing tests -> " + ", ".join(missing))
-                obligations = getattr(verification, "missing_obligations", None) or []
+                if missing_setup:
+                    lines.append("missing setup -> " + ", ".join(missing_setup))
+                if pr_failed:
+                    lines.append("PR checks failed -> " + ", ".join(pr_failed))
+                if pr_pending:
+                    lines.append("PR checks pending -> " + ", ".join(pr_pending))
                 if obligations:
                     lines.append("missing obligations -> " + "; ".join(str(x) for x in obligations))
-            lines.append(f"final -> status={self.final_report.status}")
+            else:
+                lines.append("verify payload -> " + json.dumps(verify_source, ensure_ascii=False, sort_keys=True)[:300])
+
+        if self.final_report is not None:
+            lines += ["", f"Final outcome -> status={self.final_report.status}"]
+            summary = str(getattr(self.final_report, 'summary', '') or '')
+            if summary:
+                lines.append("final summary -> " + summary[:300])
+        else:
+            lines += ["", f"Current outcome -> stage={self.current_stage}, status={self.current_status}"]
         return "\n".join(lines)
 
     def _refresh_summary_cards(self) -> None:
@@ -983,6 +1060,14 @@ class ForgeMindTUI(App[None]):
                 missing_obligations = getattr(self.final_report.verification, "missing_obligations", None) or []
                 if missing_obligations:
                     final_lines.append(f"obligations_missing: {len(missing_obligations)}")
+                pr_failed = getattr(self.final_report.verification, "pr_checks_failed", None) or []
+                pr_pending = getattr(self.final_report.verification, "pr_checks_pending", None) or []
+                if pr_failed:
+                    final_lines.append(f"pr_failed: {len(pr_failed)}")
+                if pr_pending:
+                    final_lines.append(f"pr_pending: {len(pr_pending)}")
+            if self.final_report.publish is not None:
+                final_lines.append(f"publish_ok: {self.final_report.publish.ok}")
         else:
             final_lines.append("no final report yet")
         self._set_static_text("#final-compact", "\n".join(final_lines))
