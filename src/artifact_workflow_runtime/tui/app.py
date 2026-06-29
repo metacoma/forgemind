@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from textual import on, work
+from textual import on
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
@@ -39,6 +41,13 @@ class RunFinishedMessage(Message):
 
 class RunFailedMessage(Message):
     def __init__(self, error_text: str) -> None:
+        self.error_text = error_text
+        super().__init__()
+
+
+class InternalErrorMessage(Message):
+    def __init__(self, context: str, error_text: str) -> None:
+        self.context = context
         self.error_text = error_text
         super().__init__()
 
@@ -89,7 +98,7 @@ class ForgeMindTUI(App[None]):
     Input, Checkbox, Button {
         margin: 0 0 1 0;
     }
-    #overview-pane, #events-pane, #transport-pane, #artifacts-pane, #report-pane {
+    #overview-pane, #events-pane, #transport-pane, #artifacts-pane, #report-pane, #errors-pane {
         padding: 0 1;
     }
     #overview-top {
@@ -156,6 +165,8 @@ class ForgeMindTUI(App[None]):
         self.conversation_rows: list[dict[str, Any]] = []
         self.final_report: FinalReport | None = None
         self.last_error: str | None = None
+        self.error_history: list[str] = []
+        self.log_file_path: Path | None = None
         self.transport_state: dict[str, Any] = {
             "mode": "idle",
             "conversation_id": "",
@@ -228,6 +239,10 @@ class ForgeMindTUI(App[None]):
                 with Vertical(id="report-pane"):
                     yield Label("Final report", classes="section-title")
                     yield TextArea("", id="report-view")
+            with TabPane("Errors", id="errors"):
+                with Vertical(id="errors-pane"):
+                    yield Label("Errors / tracebacks", classes="section-title")
+                    yield TextArea("", id="error-view")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -243,6 +258,8 @@ class ForgeMindTUI(App[None]):
 
         self.query_one("#evidence-view", TextArea).read_only = True
         self.query_one("#report-view", TextArea).read_only = True
+        self.query_one("#error-view", TextArea).read_only = True
+        self._refresh_log_path()
         self._refresh_status_bar()
         self._refresh_summary_cards()
         self._refresh_transport_panels()
@@ -278,6 +295,7 @@ class ForgeMindTUI(App[None]):
         self.current_status = "idle"
         self.final_report = None
         self.last_error = None
+        self.error_history.clear()
         self.artifact_rows.clear()
         self.conversation_rows.clear()
         self.transport_state.update({
@@ -298,6 +316,8 @@ class ForgeMindTUI(App[None]):
         self.query_one("#transport-log", RichLog).clear()
         self.query_one("#evidence-view", TextArea).text = ""
         self.query_one("#report-view", TextArea).text = ""
+        self.query_one("#error-view", TextArea).text = ""
+        self._refresh_log_path()
         self._refresh_stage_table()
         self._refresh_status_bar()
         self._refresh_summary_cards()
@@ -318,32 +338,35 @@ class ForgeMindTUI(App[None]):
 
     @on(RuntimeEventMessage)
     def _on_runtime_event(self, message: RuntimeEventMessage) -> None:
-        event = message.event
-        if event.stage == "transport":
-            self._append_transport_event(event)
-            self._refresh_transport_panels()
-            self._refresh_summary_cards()
-            return
+        try:
+            event = message.event
+            if event.stage == "transport":
+                self._append_transport_event(event)
+                self._refresh_transport_panels()
+                self._refresh_summary_cards()
+                return
 
-        if event.kind == "stage_started":
-            self.stage_status[event.stage] = "running"
-            self.current_stage = event.stage
-            self.current_status = event.message
-        elif event.kind == "stage_completed":
-            self.stage_status[event.stage] = "done"
-            self.current_stage = event.stage
-            self.current_status = event.message
-        elif event.kind == "stage_failed":
-            self.stage_status[event.stage] = "failed"
-            self.current_stage = event.stage
-            self.current_status = event.message
-        self.stage_message[event.stage] = event.message
-        self.stage_started_at[event.stage] = event.timestamp
-        self._append_log(event)
-        self._ingest_artifact_payload(event.payload)
-        self._refresh_stage_table()
-        self._refresh_status_bar()
-        self._refresh_summary_cards()
+            if event.kind == "stage_started":
+                self.stage_status[event.stage] = "running"
+                self.current_stage = event.stage
+                self.current_status = event.message
+            elif event.kind == "stage_completed":
+                self.stage_status[event.stage] = "done"
+                self.current_stage = event.stage
+                self.current_status = event.message
+            elif event.kind == "stage_failed":
+                self.stage_status[event.stage] = "failed"
+                self.current_stage = event.stage
+                self.current_status = event.message
+            self.stage_message[event.stage] = event.message
+            self.stage_started_at[event.stage] = event.timestamp
+            self._append_log(event)
+            self._ingest_artifact_payload(event.payload)
+            self._refresh_stage_table()
+            self._refresh_status_bar()
+            self._refresh_summary_cards()
+        except Exception as exc:  # pragma: no cover - interactive path
+            self.post_message(InternalErrorMessage("_on_runtime_event", self._format_exception(exc)))
 
     @on(RunFinishedMessage)
     def _on_finished(self, message: RunFinishedMessage) -> None:
@@ -363,9 +386,15 @@ class ForgeMindTUI(App[None]):
         self.last_error = message.error_text
         self.current_status = "failed"
         self.query_one("#event-log", RichLog).write(f"Run failed: {message.error_text}")
+        self._record_error("workflow_run", message.error_text)
         self._refresh_status_bar()
         self._refresh_summary_cards()
-        self.query_one("#workflow-tabs", TabbedContent).active = "events"
+        self.query_one("#workflow-tabs", TabbedContent).active = "errors"
+
+    @on(InternalErrorMessage)
+    def _on_internal_error(self, message: InternalErrorMessage) -> None:
+        self._record_error(message.context, message.error_text)
+        self.query_one("#workflow-tabs", TabbedContent).active = "errors"
 
     def _append_log(self, event: RuntimeEvent) -> None:
         payload = json.dumps(event.payload, ensure_ascii=False, sort_keys=True) if event.payload else ""
@@ -554,6 +583,41 @@ class ForgeMindTUI(App[None]):
             "Last transport note\n\n" + str(self.transport_state.get("last_message", "")),
         )
 
+    def _format_exception(self, exc: BaseException) -> str:
+        return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+
+    def _refresh_log_path(self) -> None:
+        artifact_dir = Path(self.query_one("#artifact-dir", Input).value or "run-artifacts")
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        self.log_file_path = artifact_dir / "tui-errors.log"
+
+    def _record_error(self, context: str, error_text: str) -> None:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        separator = "=" * 100
+        entry = f"[{timestamp}] {context}\n\n{error_text.strip()}\n\n{separator}\n"
+        self.error_history.append(entry)
+        first_line = error_text.splitlines()[0] if error_text.splitlines() else error_text
+        self.last_error = f"{context}: {first_line}"
+        self.query_one("#error-view", TextArea).text = "\n".join(self.error_history)
+        self.query_one("#event-log", RichLog).write(f"ERROR[{context}] {self.last_error}")
+        try:
+            if self.log_file_path is None:
+                self._refresh_log_path()
+            assert self.log_file_path is not None
+            with self.log_file_path.open("a", encoding="utf-8") as fh:
+                fh.write(entry)
+        except Exception:
+            pass
+
+        try:
+            if self.log_file_path is None:
+                self._refresh_log_path()
+            assert self.log_file_path is not None
+            with self.log_file_path.open("a", encoding="utf-8") as fh:
+                fh.write(entry)
+        except Exception:
+            pass
+
     def _build_config(self) -> dict[str, Any]:
         return {
             "artifact_dir": self.query_one("#artifact-dir", Input).value or "run-artifacts",
@@ -588,7 +652,7 @@ class ForgeMindTUI(App[None]):
         try:
             report = await controller.run(task)
         except Exception as exc:  # pragma: no cover - interactive path
-            self.post_message(RunFailedMessage(str(exc)))
+            self.post_message(RunFailedMessage(self._format_exception(exc)))
             return
         self.post_message(RunFinishedMessage(report))
 
