@@ -14,6 +14,7 @@ from artifact_workflow_runtime.llm_backend.prompts import (
 )
 from artifact_workflow_runtime.models import (
     ApprovalRequest,
+    Capability,
     ContextPacket,
     EvidenceVerification,
     ExecutionPlan,
@@ -106,7 +107,7 @@ def _append_artifact_id(state: WorkflowState, artifact_id: str) -> list[str]:
 
 
 def _publish_required(plan: ExecutionPlan) -> bool:
-    return bool(plan.require_commit or plan.require_push)
+    return bool(plan.require_commit or plan.require_push or Capability.REPO_CREATE_PR in plan.capabilities)
 
 
 def _normalized_completion_status(parsed: EvidenceVerification) -> str:
@@ -483,18 +484,23 @@ def build_workflow_graph(services: WorkflowServices):
         prompt = (
             "You are performing repository completion steps after implementation.\n"
             "You are running inside a Docker container.\n"
-            "Use the existing workspace, credentials, and git remote configuration if available.\n"
-            "Do not re-implement the feature. Focus only on repository completion obligations.\n\n"
+            "Use the existing workspace, credentials, git remote configuration, and GitHub token or CLI authentication if available.\n"
+            "Do not re-implement the feature unless fixing PR/CI failures requires a focused follow-up patch.\n"
+            "Repository completion is not finished until commit/push obligations are satisfied and, if a PR exists or is created, its checks are fully assessed.\n\n"
             f"Task: {task.description}\n\n"
             f"Require commit: {plan.require_commit}\n"
             f"Require push: {plan.require_push}\n"
             f"Execution summary: {execution.summary}\n\n"
             "Do the following as needed:\n"
-            "- inspect git status and current branch\n"
+            "- inspect git status, current branch, remote tracking branch, and whether a PR already exists for the branch\n"
             "- create a commit if required and changes are not committed\n"
             "- push the branch/changes if required and remote credentials allow it\n"
-            "- report exact commands, commit hashes, branch names, push results, and blockers\n"
-            "- if nothing is needed, state that commit/push obligations were already satisfied\n"
+            "- if a PR exists already or is created/updated by this push, identify the PR number/URL\n"
+            "- wait for all PR checks and GitHub Actions/jobs for the current PR head SHA to finish\n"
+            "- if checks fail, inspect the failing jobs/logs, identify the root cause, apply the smallest necessary fix, install any missing build/test/integration dependencies inside Docker, rerun relevant local checks, commit, push, and wait for PR checks again\n"
+            "- perform at most 2 CI-fix iterations in this publish step\n"
+            "- report exact commands, commit hashes, branch names, PR number/URL, check names and statuses, whether checks were waited to completion, fix iterations performed, and any remaining blockers\n"
+            "- if no PR exists and none is needed, state that explicitly\n"
         )
         request = PublishRequest(
             execution_result_id=execution.id,
@@ -568,6 +574,11 @@ def build_workflow_graph(services: WorkflowServices):
                 missing_evidence=["usable execution evidence"],
                 confidence="high" if execution.transport_error else "medium",
                 reasoning="Verification is blocked because execution evidence was empty or transport-corrupted.",
+                pr_detected=False,
+                pr_checks_waited=False,
+                pr_checks_passed=[],
+                pr_checks_failed=[],
+                pr_checks_pending=[],
                 missing_obligations=["usable execution evidence"],
                 completion_status="blocked",
             )
@@ -594,6 +605,11 @@ def build_workflow_graph(services: WorkflowServices):
                 push_required=parsed.push_required,
                 commit_done=parsed.commit_done,
                 push_done=parsed.push_done,
+                pr_detected=parsed.pr_detected,
+                pr_checks_waited=parsed.pr_checks_waited,
+                pr_checks_passed=parsed.pr_checks_passed,
+                pr_checks_failed=parsed.pr_checks_failed,
+                pr_checks_pending=parsed.pr_checks_pending,
                 missing_obligations=parsed.missing_obligations,
                 completion_status=completion_status,
             )
@@ -644,6 +660,11 @@ def build_workflow_graph(services: WorkflowServices):
                 push_required=parsed.push_required,
                 commit_done=parsed.commit_done,
                 push_done=parsed.push_done,
+                pr_detected=parsed.pr_detected,
+                pr_checks_waited=parsed.pr_checks_waited,
+                pr_checks_passed=parsed.pr_checks_passed,
+                pr_checks_failed=parsed.pr_checks_failed,
+                pr_checks_pending=parsed.pr_checks_pending,
                 missing_obligations=parsed.missing_obligations,
                 completion_status=completion_status,
             )
@@ -659,6 +680,10 @@ def build_workflow_graph(services: WorkflowServices):
             missing_evidence=list(result.missing_evidence),
             missing_test_levels=list(result.missing_test_levels),
             missing_obligations=list(result.missing_obligations),
+            pr_detected=result.pr_detected,
+            pr_checks_waited=result.pr_checks_waited,
+            pr_checks_failed=list(result.pr_checks_failed),
+            pr_checks_pending=list(result.pr_checks_pending),
             completion_status=result.completion_status,
         )
         return {

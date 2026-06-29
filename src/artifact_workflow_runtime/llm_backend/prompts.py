@@ -67,6 +67,11 @@ VERIFICATION_SCHEMA_HINT = {
     "push_required": "boolean",
     "commit_done": "boolean",
     "push_done": "boolean",
+    "pr_detected": "boolean",
+    "pr_checks_waited": "boolean",
+    "pr_checks_passed": ["string"],
+    "pr_checks_failed": ["string"],
+    "pr_checks_pending": ["string"],
     "missing_obligations": ["string"],
     "completion_status": "completed|implemented_not_verified|verified_not_published|partially_completed|blocked",
 }
@@ -119,6 +124,7 @@ def build_plan_prompt(task: Task, context_packet: ContextPacket, task_intent: st
         "If the change adds a new client, runtime, integration surface, or compatibility layer, require the necessary integration tests unless evidence proves they do not exist or cannot be run.\n"
         "If tests need extra dependencies inside Docker, include the setup steps explicitly.\n"
         "If the task should leave the repository deliverable-ready, set require_commit and require_push accordingly.\n"
+        "If the task involves opening or updating a pull request, repository publication is not complete until PR checks are awaited and assessed.\n"
         "Return strict JSON matching this shape:\n"
         f"{json.dumps(PLAN_SCHEMA_HINT, ensure_ascii=False, indent=2)}\n\n"
         f"Task intent: {task_intent}\n\n"
@@ -138,6 +144,8 @@ def build_verification_prompt(task: Task, context_packet: ContextPacket, plan: E
         "Check whether required setup/dependency installation happened before running build, unit, and integration tests.\n"
         "Check whether the performed test levels are sufficient for the change. Unit-only evidence is insufficient when the plan required integration tests.\n"
         "Check whether commit/push obligations were fulfilled if they were required by the plan.\n"
+        "If publish evidence indicates that a PR exists, check whether the workflow waited for all PR checks to complete and whether all of them passed.\n"
+        "If any PR checks failed, verify that the agent inspected the failures, fixed the issues, pushed follow-up commits, and re-waited for the checks.\n"
         "Return strict JSON matching this shape:\n"
         f"{json.dumps(VERIFICATION_SCHEMA_HINT, ensure_ascii=False, indent=2)}\n\n"
         f"Task:\n{task.description}\n\n"

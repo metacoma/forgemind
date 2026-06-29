@@ -332,6 +332,11 @@ class EvidenceVerification(RuntimeModel):
     push_required: bool = False
     commit_done: bool = False
     push_done: bool = False
+    pr_detected: bool = False
+    pr_checks_waited: bool = False
+    pr_checks_passed: list[str] = Field(default_factory=list)
+    pr_checks_failed: list[str] = Field(default_factory=list)
+    pr_checks_pending: list[str] = Field(default_factory=list)
     missing_obligations: list[str] = Field(default_factory=list)
     completion_status: str = "partially_completed"
 
@@ -357,6 +362,11 @@ class VerificationResult(RuntimeModel):
     push_required: bool = False
     commit_done: bool = False
     push_done: bool = False
+    pr_detected: bool = False
+    pr_checks_waited: bool = False
+    pr_checks_passed: list[str] = Field(default_factory=list)
+    pr_checks_failed: list[str] = Field(default_factory=list)
+    pr_checks_pending: list[str] = Field(default_factory=list)
     missing_obligations: list[str] = Field(default_factory=list)
     completion_status: str = "partially_completed"
     created_at: str = Field(default_factory=utc_now)

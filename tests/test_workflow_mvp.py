@@ -489,3 +489,93 @@ async def test_repository_change_marks_incomplete_when_integration_and_push_obli
     assert report.verification.push_required is True
     assert report.verification.push_done is False
     assert len(openhands.calls["execute"]) == 2
+
+
+async def test_publish_step_runs_for_pr_capability_and_prompt_requires_waiting_for_pr_checks(tmp_path) -> None:
+    artifact_store = ArtifactStore(tmp_path / "artifacts")
+    llm = ScriptedLLMBackend(
+        {
+            "classification": [
+                {
+                    "normalized_task": "Implement change and open a PR",
+                    "needs_world_facts": True,
+                    "execution_family": ExecutionFamily.REPOSITORY_CHANGE.value,
+                    "task_intent": "implement",
+                    "capabilities": [Capability.REPO_READ.value, Capability.REPO_WRITE.value, Capability.REPO_CREATE_PR.value],
+                    "observation_focus": ["inspect repo"],
+                    "reasoning": "Need repo changes and PR creation.",
+                    "risk_level": "medium",
+                }
+            ],
+            "route_analysis": [
+                {
+                    "needs_repository_observation": True,
+                    "needs_world_observation": False,
+                    "needs_fresh_external_research": False,
+                    "can_plan_immediately": False,
+                    "required_evidence_types": ["repo_structure"],
+                    "research_targets": [],
+                    "observation_focus": ["inspect repo"],
+                    "reasoning": "Need repository evidence before planning.",
+                }
+            ],
+            "planning": [
+                {
+                    "summary": "Implement the change and open/update a PR",
+                    "execution_family": ExecutionFamily.REPOSITORY_CHANGE.value,
+                    "task_intent": "implement",
+                    "deliverable_kind": "repository_changes",
+                    "capabilities": [Capability.REPO_WRITE.value, Capability.REPO_CREATE_PR.value],
+                    "steps": ["inspect repo", "implement", "open pr"],
+                    "success_criteria": ["feature implemented", "PR checks green"],
+                    "verification_checks": ["feature implemented", "PR checks green"],
+                    "requires_mutation": True,
+                    "must_change_world": True,
+                    "expected_repo_changes": ["code changes"],
+                    "require_commit": False,
+                    "require_push": False,
+                    "reasoning": "A PR should still trigger publish completion handling.",
+                }
+            ],
+            "verification": [
+                {
+                    "passed": True,
+                    "summary": "PR checks were awaited and passed.",
+                    "checks_passed": ["feature implemented", "PR checks green"],
+                    "checks_failed": [],
+                    "missing_evidence": [],
+                    "confidence": "high",
+                    "reasoning": "Publish evidence showed PR checks completed successfully.",
+                    "pr_detected": True,
+                    "pr_checks_waited": True,
+                    "pr_checks_passed": ["build", "integration"],
+                    "pr_checks_failed": [],
+                    "pr_checks_pending": [],
+                    "completion_status": "completed",
+                }
+            ],
+        }
+    )
+    openhands = FakeOpenHandsAdapter(
+        artifact_store,
+        scripts={
+            "observe": ["Repository observed."],
+            "execute": [
+                "Implemented the change.",
+                "Created PR #7, waited for checks, fixed a failure if needed, and all PR checks passed.",
+            ],
+        },
+    )
+    controller = WorkflowController(
+        llm_backend=llm,
+        openhands_adapter=openhands,
+        artifact_root=tmp_path / "artifacts",
+        approval_provider=StaticApprovalProvider(approve=True, reviewer="test"),
+    )
+    report = await controller.run(Task(description="Implement the change and open a PR"))
+    assert report.status == "completed"
+    assert report.publish is not None
+    assert len(openhands.calls["execute"]) == 2
+    publish_request = openhands.calls["execute"][1]
+    assert "wait for all PR checks" in publish_request.prompt
+    assert "if checks fail" in publish_request.prompt
