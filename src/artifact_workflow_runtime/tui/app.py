@@ -128,6 +128,12 @@ class ForgeMindTUI(App[None]):
         height: 10;
         margin: 0 0 1 0;
     }
+    #workflow-path-view {
+        height: 12;
+        border: round $panel;
+        padding: 1;
+        margin: 0 0 1 0;
+    }
     #overview-split {
         height: 1fr;
     }
@@ -270,6 +276,7 @@ class ForgeMindTUI(App[None]):
                         yield Static(id="run-summary", classes="overview-card")
                         yield Static(id="transport-compact", classes="overview-card")
                         yield Static(id="final-compact", classes="overview-card")
+                    yield Static(id="workflow-path-view")
                     yield Label("Pipeline stages", classes="section-title")
                     with Horizontal(id="overview-split"):
                         yield DataTable(id="stage-table")
@@ -336,6 +343,7 @@ class ForgeMindTUI(App[None]):
         self._refresh_status_bar()
         self._refresh_summary_cards()
         self._refresh_transport_panels()
+        self._set_static_text("#workflow-path-view", self._workflow_path_text())
         self._set_static_text("#conversation-meta", "No conversation selected")
         self._show_stage_by_name("intake")
         self.query_one("#task-editor", TextArea).focus()
@@ -454,11 +462,30 @@ class ForgeMindTUI(App[None]):
     def _show_artifact_by_index(self, row_index: int) -> None:
         if 0 <= row_index < len(self.artifact_rows):
             row = self.artifact_rows[row_index]
-            path = Path(row["path"])
-            if path.exists():
-                self.query_one("#evidence-view", TextArea).text = path.read_text(encoding="utf-8", errors="replace")
-            else:
-                self.query_one("#evidence-view", TextArea).text = f"Artifact file not found:\n{path}"
+            raw_path = str(row.get("path") or "").strip()
+            preview = str(row.get("preview") or "")
+            header = (
+                f"Artifact ID: {row.get('id', '')}\n"
+                f"Kind: {row.get('kind', '')}\n"
+                f"Path: {raw_path or '<none>'}\n\n"
+            )
+            if raw_path:
+                path = Path(raw_path)
+                if path.exists() and path.is_file():
+                    self.query_one("#evidence-view", TextArea).text = header + path.read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+                    return
+                if path.exists() and path.is_dir():
+                    self.query_one("#evidence-view", TextArea).text = (
+                        header + "Artifact path points to a directory, not a file.\n\n" + preview
+                    )
+                    return
+                self.query_one("#evidence-view", TextArea).text = header + f"Artifact file not found:\n{path}"
+                return
+            self.query_one("#evidence-view", TextArea).text = (
+                header + "No artifact file path was resolved for this item.\n\n" + preview
+            )
 
     def _stage_detail_text(self, stage: str) -> str:
         parts = [
@@ -853,6 +880,67 @@ class ForgeMindTUI(App[None]):
             f"Run: {run_state} | Current stage: {self.current_stage} | Status: {self.current_status}"
         )
 
+    def _workflow_path_text(self) -> str:
+        lines = ["Global path", ""]
+        for stage in STAGES:
+            status = self.stage_status.get(stage, "pending")
+            message = self.stage_message.get(stage, "")
+            marker = {
+                "done": "✓",
+                "running": "→",
+                "failed": "✗",
+                "pending": "·",
+            }.get(status, "·")
+            line = f"{marker} {stage}: {status}"
+            if message:
+                line += f" — {message}"
+            lines.append(line)
+
+        if self.final_report is not None:
+            lines += ["", "Decision summary:"]
+            route = getattr(self.final_report, "route", None)
+            if route is not None:
+                lines.append(
+                    "route -> research={research}, repo_obs={repo}, world_obs={world}, can_plan={plan}".format(
+                        research=getattr(route, "needs_fresh_external_research", None),
+                        repo=getattr(route, "needs_repository_observation", None),
+                        world=getattr(route, "needs_world_observation", None),
+                        plan=getattr(route, "can_plan_immediately", None),
+                    )
+                )
+            plan = getattr(self.final_report, "plan", None)
+            if plan is not None:
+                lines.append(
+                    "plan -> intent={intent}, deliverable={deliverable}, commit={commit}, push={push}".format(
+                        intent=getattr(plan, "task_intent", ""),
+                        deliverable=getattr(plan, "deliverable_kind", ""),
+                        commit=getattr(plan, "require_commit", None),
+                        push=getattr(plan, "require_push", None),
+                    )
+                )
+                required_tests = getattr(plan, "required_test_levels", None) or []
+                if required_tests:
+                    lines.append("required tests -> " + ", ".join(required_tests))
+            verification = getattr(self.final_report, "verification", None)
+            if verification is not None:
+                lines.append(
+                    "verify -> passed={passed}, completion={completion}".format(
+                        passed=getattr(verification, "passed", None),
+                        completion=getattr(verification, "completion_status", ""),
+                    )
+                )
+                performed = getattr(verification, "performed_test_levels", None) or []
+                missing = getattr(verification, "missing_test_levels", None) or []
+                if performed:
+                    lines.append("performed tests -> " + ", ".join(performed))
+                if missing:
+                    lines.append("missing tests -> " + ", ".join(missing))
+                obligations = getattr(verification, "missing_obligations", None) or []
+                if obligations:
+                    lines.append("missing obligations -> " + "; ".join(str(x) for x in obligations))
+            lines.append(f"final -> status={self.final_report.status}")
+        return "\n".join(lines)
+
     def _refresh_summary_cards(self) -> None:
         run_lines = ["Workflow", "", f"current_stage: {self.current_stage}", f"status: {self.current_status}", f"artifacts_seen: {len(self.artifact_rows)}"]
         if self.last_error:
@@ -898,6 +986,7 @@ class ForgeMindTUI(App[None]):
         else:
             final_lines.append("no final report yet")
         self._set_static_text("#final-compact", "\n".join(final_lines))
+        self._set_static_text("#workflow-path-view", self._workflow_path_text())
 
     def _refresh_transport_panels(self) -> None:
         lines = [
