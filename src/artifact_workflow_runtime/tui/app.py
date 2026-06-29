@@ -230,8 +230,7 @@ class ForgeMindTUI(App[None]):
     def on_mount(self) -> None:
         stage_table = self.query_one("#stage-table", DataTable)
         stage_table.add_columns("Stage", "Status", "Last update", "Message")
-        for stage in STAGES:
-            stage_table.add_row(stage, self.stage_status[stage], self.stage_started_at[stage], self.stage_message[stage], key=stage)
+        self._rebuild_stage_table()
 
         artifact_table = self.query_one("#artifacts-table", DataTable)
         artifact_table.add_columns("ID", "Kind", "Path", "Preview")
@@ -467,12 +466,30 @@ class ForgeMindTUI(App[None]):
             key=str(row_index),
         )
 
+    def _rebuild_stage_table(self) -> None:
+        table = self.query_one("#stage-table", DataTable)
+        table.clear(columns=False)
+        for stage in STAGES:
+            table.add_row(
+                stage,
+                self.stage_status.get(stage, "pending"),
+                self.stage_started_at.get(stage, ""),
+                self.stage_message.get(stage, ""),
+                key=stage,
+            )
+
     def _refresh_stage_table(self) -> None:
         table = self.query_one("#stage-table", DataTable)
-        for stage in STAGES:
-            table.update_cell(stage, "Status", self.stage_status.get(stage, "pending"))
-            table.update_cell(stage, "Last update", self.stage_started_at.get(stage, ""))
-            table.update_cell(stage, "Message", self.stage_message.get(stage, ""))
+        needs_rebuild = False
+        try:
+            for stage in STAGES:
+                table.update_cell(stage, "Status", self.stage_status.get(stage, "pending"))
+                table.update_cell(stage, "Last update", self.stage_started_at.get(stage, ""))
+                table.update_cell(stage, "Message", self.stage_message.get(stage, ""))
+        except Exception:
+            needs_rebuild = True
+        if needs_rebuild:
+            self._rebuild_stage_table()
 
     def _refresh_status_bar(self) -> None:
         run_state = "running" if self.running else "idle"
