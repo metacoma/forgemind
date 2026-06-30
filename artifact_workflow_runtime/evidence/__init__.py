@@ -185,21 +185,45 @@ class EvidenceExtractor:
         payload = _extract_json_payload(text)
         if not isinstance(payload, Mapping):
             return None
-        data = payload.get("structured_evidence") if isinstance(payload.get("structured_evidence"), Mapping) else payload
-        if not isinstance(data, Mapping) or not (_EVIDENCE_KEYS & set(data.keys())):
+
+        structured = payload.get("structured_evidence") if isinstance(payload.get("structured_evidence"), Mapping) else None
+        data = structured if structured is not None else payload
+
+        def _section(name: str) -> object:
+            top_value = payload.get(name) if isinstance(payload, Mapping) else None
+            data_value = data.get(name) if isinstance(data, Mapping) else None
+            return top_value if top_value not in (None, [], {}) else data_value
+
+        # Accept both schemas:
+        # 1) canonical evidence where evidence sections live under structured_evidence
+        # 2) OpenHands observe packets where domain facts live under structured_evidence
+        #    and operational sections like commands_run/files_observed/blockers live top-level
+        has_operational_sections = bool(_EVIDENCE_KEYS & set(payload.keys())) or bool(_EVIDENCE_KEYS & set(data.keys()))
+        if not isinstance(data, Mapping) or not has_operational_sections:
             return None
+
         artifact_ids = [artifact_id] if artifact_id else []
         try:
+            extracted_fact_items = _list(_section("extracted_facts") or _section("facts"))
+            if not extracted_fact_items and structured is not None:
+                for key, value in structured.items():
+                    if key in _EVIDENCE_KEYS:
+                        continue
+                    if isinstance(value, (str, int, float, bool)) or value is None:
+                        extracted_fact_items.append({"subject": key, "fact": value})
+                    else:
+                        extracted_fact_items.append({"subject": key, "fact": value})
+
             evidence = StructuredEvidence(
-                commands_run=[self._command(item, artifact_ids) for item in _list(data.get("commands_run"))],
-                files_changed=[self._file(item, "changed", artifact_ids) for item in _list(data.get("files_changed"))],
-                files_observed=[self._file(item, "observed", artifact_ids) for item in _list(data.get("files_observed"))],
-                extracted_facts=[self._fact(item, artifact_ids) for item in _list(data.get("extracted_facts") or data.get("facts"))],
-                diffs=[self._diff(item, artifact_ids) for item in _list(data.get("diffs"))],
-                tests=[self._test(item, artifact_ids) for item in _list(data.get("tests") or data.get("checks"))],
-                blockers=[self._blocker(item, artifact_ids) for item in _list(data.get("blockers"))],
-                mutation_summary=MutationSummary.model_validate(data.get("mutation_summary")) if isinstance(data.get("mutation_summary"), Mapping) else MutationSummary(),
-                postcheck_summary=PostcheckSummary.model_validate(data.get("postcheck_summary")) if isinstance(data.get("postcheck_summary"), Mapping) else PostcheckSummary(),
+                commands_run=[self._command(item, artifact_ids) for item in _list(_section("commands_run"))],
+                files_changed=[self._file(item, "changed", artifact_ids) for item in _list(_section("files_changed"))],
+                files_observed=[self._file(item, "observed", artifact_ids) for item in _list(_section("files_observed"))],
+                extracted_facts=[self._fact(item, artifact_ids) for item in extracted_fact_items],
+                diffs=[self._diff(item, artifact_ids) for item in _list(_section("diffs"))],
+                tests=[self._test(item, artifact_ids) for item in _list(_section("tests") or _section("checks"))],
+                blockers=[self._blocker(item, artifact_ids) for item in _list(_section("blockers"))],
+                mutation_summary=MutationSummary.model_validate(_section("mutation_summary")) if isinstance(_section("mutation_summary"), Mapping) else MutationSummary(),
+                postcheck_summary=PostcheckSummary.model_validate(_section("postcheck_summary")) if isinstance(_section("postcheck_summary"), Mapping) else PostcheckSummary(),
             )
         except Exception:
             return None
