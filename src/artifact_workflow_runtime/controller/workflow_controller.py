@@ -68,7 +68,7 @@ class WorkflowController:
             self.artifact_store.add_json("final_report", report.model_dump(mode="json"), metadata={"task_id": task.id, "status": report.status})
             self.artifact_store.add_json("workflow_state_snapshot", initial_snapshot.model_dump(mode="json"), metadata={"task_id": task.id, "status": "contract_violation"})
             return report
-        final_snapshot = validate_workflow_state(result_state)
+        final_snapshot = validate_workflow_state(result_state, final=True)
         self.artifact_store.add_json("workflow_state_snapshot", final_snapshot.model_dump(mode="json"), metadata={"task_id": task.id})
         if final_snapshot.final_report is None:
             raise RuntimeError("workflow finished without a final_report")

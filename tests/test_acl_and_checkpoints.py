@@ -12,7 +12,7 @@ from artifact_workflow_runtime.policy import (
     RuntimeSubject,
 )
 from artifact_workflow_runtime.state import WorkflowCheckpointRecorder, wrap_stage_node_with_checkpoint
-from artifact_workflow_runtime.models import Task
+from artifact_workflow_runtime.models import Artifact, ExecutionFamily, Task
 
 
 @pytest.mark.asyncio
@@ -21,10 +21,32 @@ async def test_checkpoint_wrapper_persists_stage_state(tmp_path) -> None:
     recorder = WorkflowCheckpointRecorder(store)
 
     async def node(state):
-        return {"status": "classified", "classification": {"ok": True}}
+        return {
+            "status": "classified",
+            "classification": {
+                "normalized_task": "x",
+                "needs_world_facts": False,
+                "execution_family": ExecutionFamily.DOCUMENTATION_ONLY.value,
+                "task_intent": "document",
+                "capabilities": [],
+                "observation_focus": [],
+                "reasoning": "test",
+                "risk_level": "low",
+            },
+            "artifact_ids": ["artifact_classify"],
+            "transitions": [
+                {
+                    "from_status": "created",
+                    "to_status": "classified",
+                    "stage": "classify",
+                    "reason": "classification completed",
+                    "artifact_ids_added": ["artifact_classify"],
+                }
+            ],
+        }
 
     wrapped = wrap_stage_node_with_checkpoint("classify", node, recorder)
-    update = await wrapped({"task": {"id": "task_1", "description": "x"}, "status": "created"})
+    update = await wrapped({"task": {"id": "task_1", "description": "x"}, "status": "created", "artifact_ids": []})
 
     assert update["status"] == "classified"
     checkpoints = [artifact for artifact in store.list() if artifact.kind == "workflow_checkpoint"]

@@ -4,19 +4,23 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Mapping
 
 from artifact_workflow_runtime.artifacts import ArtifactStore
-from artifact_workflow_runtime.models.state import WorkflowState
+from artifact_workflow_runtime.models.state import WorkflowState, validate_workflow_state
 
 StageNode = Callable[[WorkflowState], Awaitable[dict[str, Any]]]
+
+
+class WorkflowCheckpointError(RuntimeError):
+    """Raised when a stage produced an invalid typed workflow snapshot."""
 
 
 @dataclass
 class WorkflowCheckpointRecorder:
     """Persist canonical workflow-state checkpoints after stage nodes.
 
-    This is intentionally independent from the public evidence ArtifactStore
-    contract: checkpoint artifacts are debugging/resume primitives and are not
-    appended to ``artifact_ids``. LangGraph-native checkpointers can replace or
-    complement this recorder later without changing stage code.
+    Checkpoints are intentionally not added to ``artifact_ids`` because they are
+    runtime/debugging state, not operational evidence. They still validate the
+    merged graph update against ``WorkflowStateSnapshot`` so a stage cannot leave
+    behind a half-shaped state that later fails far away from the source node.
     """
 
     artifact_store: ArtifactStore
@@ -27,20 +31,24 @@ class WorkflowCheckpointRecorder:
             return None
         merged: dict[str, Any] = dict(before)
         merged.update(dict(update))
-        task = merged.get("task") if isinstance(merged, dict) else None
-        task_id = task.get("id") if isinstance(task, dict) else None
+        try:
+            snapshot = validate_workflow_state(merged)
+        except Exception as exc:  # noqa: BLE001 - surface exact state boundary error with stage context
+            raise WorkflowCheckpointError(f"Stage {stage!r} produced invalid workflow state: {exc}") from exc
+        task_id = snapshot.task.id
         payload = {
             "stage": stage,
             "task_id": task_id,
-            "status": merged.get("status"),
+            "status": snapshot.status.value,
             "before_status": before.get("status"),
             "update_keys": sorted(str(key) for key in update.keys()),
-            "state": merged,
+            "state": snapshot.model_dump(mode="json"),
+            "validated": True,
         }
         return self.artifact_store.add_json(
             "workflow_checkpoint",
             payload,
-            metadata={"stage": stage, "task_id": task_id, "status": merged.get("status")},
+            metadata={"stage": stage, "task_id": task_id, "status": snapshot.status.value, "validated": True},
         )
 
 

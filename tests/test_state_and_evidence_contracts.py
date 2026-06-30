@@ -8,6 +8,7 @@ from artifact_workflow_runtime.artifacts import ArtifactStore
 from artifact_workflow_runtime.context import ContextBuilder
 from artifact_workflow_runtime.evidence import EvidenceExtractor
 from artifact_workflow_runtime.models import (
+    Artifact,
     BackendKind,
     ExecutionFamily,
     ExecutionRequest,
@@ -43,7 +44,7 @@ class DummyInstance:
 
 def test_workflow_state_snapshot_validates_graph_wire_state() -> None:
     task = Task(description="fix repo")
-    snapshot = WorkflowStateSnapshot(task=task).with_transition(
+    snapshot = WorkflowStateSnapshot(task=task, task_artifact=Artifact(kind="task", path="task.json", media_type="application/json")).with_transition(
         stage="intake",
         to_status=WorkflowStatus.INTAKE_COMPLETED,
         reason="task persisted",

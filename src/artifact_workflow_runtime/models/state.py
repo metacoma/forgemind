@@ -89,6 +89,155 @@ class WorkflowStatus(str, Enum):
         return cls.FAILED
 
 
+
+
+class CoreWorkflowStage(str, Enum):
+    INTAKE = "intake"
+    CLASSIFY = "classify"
+    ROUTE = "route"
+    RESEARCH = "research"
+    OBSERVE = "observe"
+    BUILD_CONTEXT = "build_context"
+    OBLIGATIONS = "obligations"
+    DONE_CONTRACT = "done_contract"
+    PLAN = "plan"
+    POLICY = "policy"
+    APPROVAL = "approval"
+    WORKSPACE_PREPARE = "workspace_prepare"
+    EXECUTE = "execute"
+    REVIEW = "review"
+    QA_PLAN = "qa_plan"
+    QA_EXECUTE = "qa_execute"
+    QA_REVIEW = "qa_review"
+    VERIFY = "verify"
+    ACCEPTANCE = "acceptance"
+    PUBLISH = "publish"
+    POST_PUBLISH_VERIFY = "post_publish_verify"
+    REPAIR = "repair"
+    FINALIZE = "finalize"
+
+    @classmethod
+    def coerce(cls, value: object) -> "CoreWorkflowStage":
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            for item in cls:
+                if item.value == normalized:
+                    return item
+        raise ValueError(f"Unknown workflow stage: {value!r}")
+
+
+class StageStateContract(RuntimeModel):
+    """Typed boundary contract for a graph/controller stage.
+
+    Stage nodes may still exchange LangGraph-compatible dictionaries, but every
+    stage boundary has one canonical list of required input fields and expected
+    output fields. This keeps readiness checks out of free-form prompts and
+    prevents graph/controller/policy layers from silently diverging.
+    """
+
+    stage: CoreWorkflowStage
+    required_fields: tuple[str, ...] = ()
+    produced_fields: tuple[str, ...] = ()
+    status_after: WorkflowStatus | None = None
+
+
+def _stage_contract(stage: CoreWorkflowStage | str, required: tuple[str, ...], produced: tuple[str, ...], status: WorkflowStatus | None) -> StageStateContract:
+    return StageStateContract(stage=CoreWorkflowStage.coerce(stage), required_fields=required, produced_fields=produced, status_after=status)
+
+
+STAGE_STATE_CONTRACTS: dict[CoreWorkflowStage, StageStateContract] = {
+    contract.stage: contract
+    for contract in (
+        _stage_contract(CoreWorkflowStage.INTAKE, ("task",), ("task_artifact",), WorkflowStatus.INTAKE_COMPLETED),
+        _stage_contract(CoreWorkflowStage.CLASSIFY, ("task",), ("classification_request", "classification_result", "classification"), WorkflowStatus.CLASSIFIED),
+        _stage_contract(CoreWorkflowStage.ROUTE, ("task", "classification"), ("route_request", "route_result", "route_decision"), WorkflowStatus.ROUTED),
+        _stage_contract(CoreWorkflowStage.RESEARCH, ("task", "route_decision"), ("research_request", "research_result"), WorkflowStatus.RESEARCHED),
+        _stage_contract(CoreWorkflowStage.OBSERVE, ("task", "route_decision"), ("observation_request", "observation_result"), WorkflowStatus.OBSERVED),
+        _stage_contract(CoreWorkflowStage.BUILD_CONTEXT, ("task",), ("context_packet",), WorkflowStatus.CONTEXT_BUILT),
+        _stage_contract(CoreWorkflowStage.OBLIGATIONS, ("task", "classification", "route_decision", "context_packet"), ("obligation_request", "obligation_result", "obligations"), WorkflowStatus.OBLIGATIONS_SYNTHESIZED),
+        _stage_contract(CoreWorkflowStage.DONE_CONTRACT, ("task", "classification", "obligations"), ("done_contract",), WorkflowStatus.DONE_CONTRACT_BUILT),
+        _stage_contract(CoreWorkflowStage.PLAN, ("task", "classification", "context_packet", "obligations", "done_contract"), ("plan_request", "plan_result", "plan", "acceptance_contract"), WorkflowStatus.PLANNED),
+        _stage_contract(CoreWorkflowStage.POLICY, ("task", "classification", "route_decision", "plan"), ("policy_decision",), WorkflowStatus.POLICY_CHECKED),
+        _stage_contract(CoreWorkflowStage.APPROVAL, ("policy_decision",), ("approval_request",), WorkflowStatus.APPROVAL_RESOLVED),
+        _stage_contract(CoreWorkflowStage.WORKSPACE_PREPARE, ("task", "done_contract"), ("workspace_branch", "environment_plan"), WorkflowStatus.WORKSPACE_PREPARED),
+        _stage_contract(CoreWorkflowStage.EXECUTE, ("task", "plan", "context_packet"), ("execution_request", "execution_result"), WorkflowStatus.EXECUTED),
+        _stage_contract(CoreWorkflowStage.REVIEW, ("task", "plan", "execution_result", "done_contract"), ("review_result", "execution_review_decision"), WorkflowStatus.REVIEWED),
+        _stage_contract(CoreWorkflowStage.QA_PLAN, ("task", "plan", "done_contract"), ("qa_plan",), WorkflowStatus.QA_PLANNED),
+        _stage_contract(CoreWorkflowStage.QA_EXECUTE, ("task", "qa_plan"), ("qa_execution_report",), WorkflowStatus.QA_EXECUTED),
+        _stage_contract(CoreWorkflowStage.QA_REVIEW, ("task", "plan", "execution_result", "context_packet", "qa_execution_report"), ("verification_request", "verification_result", "qa_review_result"), WorkflowStatus.QA_REVIEWED),
+        _stage_contract(CoreWorkflowStage.VERIFY, ("task", "plan", "execution_result", "context_packet"), ("verification_request", "verification_result"), WorkflowStatus.VERIFIED),
+        _stage_contract(CoreWorkflowStage.ACCEPTANCE, ("task", "acceptance_contract"), ("acceptance_decision",), WorkflowStatus.ACCEPTANCE_EVALUATED),
+        _stage_contract(CoreWorkflowStage.PUBLISH, ("task", "plan", "execution_result", "done_contract", "acceptance_decision"), ("publish_request", "publish_result"), WorkflowStatus.PUBLISHED),
+        _stage_contract(CoreWorkflowStage.POST_PUBLISH_VERIFY, ("task", "plan", "publish_result"), ("publish_review_decision",), WorkflowStatus.POST_PUBLISH_VERIFIED),
+        _stage_contract(CoreWorkflowStage.REPAIR, ("task", "plan", "execution_result"), ("repair_requests", "repair_results", "execution_result"), WorkflowStatus.REPAIRED),
+        _stage_contract(CoreWorkflowStage.FINALIZE, ("task",), ("final_report",), None),
+    )
+}
+
+
+STATUS_REQUIRED_FIELDS: dict[WorkflowStatus, tuple[str, ...]] = {
+    WorkflowStatus.CREATED: ("task",),
+    WorkflowStatus.INTAKE_COMPLETED: ("task", "task_artifact"),
+    WorkflowStatus.CLASSIFIED: ("task", "classification"),
+    WorkflowStatus.ROUTED: ("task", "classification", "route_decision"),
+    WorkflowStatus.RESEARCHED: ("task", "research_result"),
+    WorkflowStatus.OBSERVED: ("task", "observation_result"),
+    WorkflowStatus.CONTEXT_BUILT: ("task", "context_packet"),
+    WorkflowStatus.OBLIGATIONS_SYNTHESIZED: ("task", "obligations"),
+    WorkflowStatus.DONE_CONTRACT_BUILT: ("task", "done_contract"),
+    WorkflowStatus.PLANNED: ("task", "plan", "acceptance_contract"),
+    WorkflowStatus.POLICY_CHECKED: ("task", "plan", "policy_decision"),
+    WorkflowStatus.APPROVAL_RESOLVED: ("task", "policy_decision", "approval_request"),
+    WorkflowStatus.WORKSPACE_PREPARED: ("task", "workspace_branch", "environment_plan"),
+    WorkflowStatus.EXECUTED: ("task", "plan", "execution_result"),
+    WorkflowStatus.REVIEWED: ("task", "execution_result", "review_result", "execution_review_decision"),
+    WorkflowStatus.QA_PLANNED: ("task", "qa_plan"),
+    WorkflowStatus.QA_EXECUTED: ("task", "qa_execution_report"),
+    WorkflowStatus.QA_REVIEWED: ("task", "qa_review_result"),
+    WorkflowStatus.EXECUTION_REVIEWED: ("task", "execution_result", "execution_review_decision"),
+    WorkflowStatus.REPAIRED: ("task", "execution_result", "repair_results"),
+    WorkflowStatus.PUBLISH_REVIEWED: ("task", "publish_result", "publish_review_decision"),
+    WorkflowStatus.PUBLISHED: ("task", "publish_result"),
+    WorkflowStatus.POST_PUBLISH_VERIFIED: ("task", "publish_result", "publish_review_decision"),
+    WorkflowStatus.VERIFIED: ("task", "verification_result"),
+    WorkflowStatus.ACCEPTANCE_EVALUATED: ("task", "acceptance_decision"),
+    WorkflowStatus.COMPLETED: ("task", "final_report"),
+    WorkflowStatus.BLOCKED: ("task", "final_report"),
+    WorkflowStatus.PARTIALLY_COMPLETED: ("task", "final_report"),
+    WorkflowStatus.NEEDS_HUMAN_REVIEW: ("task", "final_report"),
+    WorkflowStatus.NEEDS_ENVIRONMENT: ("task", "final_report"),
+    WorkflowStatus.FAILED: ("task", "final_report"),
+}
+
+
+TERMINAL_WORKFLOW_STATUSES: frozenset[WorkflowStatus] = frozenset({
+    WorkflowStatus.COMPLETED,
+    WorkflowStatus.BLOCKED,
+    WorkflowStatus.PARTIALLY_COMPLETED,
+    WorkflowStatus.NEEDS_HUMAN_REVIEW,
+    WorkflowStatus.NEEDS_ENVIRONMENT,
+    WorkflowStatus.FAILED,
+})
+
+
+def stage_state_contract(stage: CoreWorkflowStage | str) -> StageStateContract:
+    stage_name = CoreWorkflowStage.coerce(stage)
+    try:
+        return STAGE_STATE_CONTRACTS[stage_name]
+    except KeyError as exc:  # pragma: no cover - enum coverage should prevent this
+        raise ValueError(f"No state contract registered for stage {stage_name.value!r}") from exc
+
+
+def required_fields_for_stage(stage: CoreWorkflowStage | str) -> tuple[str, ...]:
+    return stage_state_contract(stage).required_fields
+
+
+def produced_fields_for_stage(stage: CoreWorkflowStage | str) -> tuple[str, ...]:
+    return stage_state_contract(stage).produced_fields
+
+
 class StageTransition(RuntimeModel):
     from_status: WorkflowStatus | None = None
     to_status: WorkflowStatus
@@ -186,16 +335,69 @@ class WorkflowStateSnapshot(RuntimeModel):
                 missing.append(field)
         return missing
 
+    def missing_for_stage(self, stage: CoreWorkflowStage | str, *additional_fields: str) -> list[str]:
+        fields = [*required_fields_for_stage(stage), *additional_fields]
+        return self.require(*_unique_field_names(fields))
+
+    def assert_ready_for_stage(self, stage: CoreWorkflowStage | str, *additional_fields: str) -> None:
+        missing = self.missing_for_stage(stage, *additional_fields)
+        if missing:
+            raise ValueError(f"Stage {CoreWorkflowStage.coerce(stage).value!r} is not ready; missing state fields: {missing}")
+
+    def core_invariant_errors(self, *, final: bool = False) -> list[str]:
+        """Return deterministic typed-state invariant violations.
+
+        This is deliberately conservative: it checks the current status, final
+        report alignment, transition/artifact bookkeeping, and the stage output
+        fields that are explicitly claimed by transitions. It does not try to
+        infer business success from prose.
+        """
+
+        errors: list[str] = []
+        required = STATUS_REQUIRED_FIELDS.get(self.status, ("task",))
+        missing = self.require(*required)
+        if missing:
+            errors.append(f"status {self.status.value!r} requires fields {missing}")
+
+        if self.transitions:
+            last = self.transitions[-1]
+            if last.to_status != self.status:
+                errors.append(f"last transition to_status {last.to_status.value!r} does not match state status {self.status.value!r}")
+            for transition in self.transitions:
+                for artifact_id in transition.artifact_ids_added:
+                    if artifact_id not in self.artifact_ids:
+                        errors.append(f"transition {transition.stage!r} references artifact {artifact_id!r} missing from artifact_ids")
+        elif self.status != WorkflowStatus.CREATED:
+            errors.append(f"non-created status {self.status.value!r} has no transition history")
+
+        if self.final_report is not None and WorkflowStatus.coerce(self.final_report.status) != self.status:
+            errors.append(f"final_report.status {self.final_report.status!r} does not coerce to workflow status {self.status.value!r}")
+
+        if final and self.status in TERMINAL_WORKFLOW_STATUSES and self.final_report is None:
+            errors.append(f"terminal status {self.status.value!r} requires final_report")
+
+        return _unique_field_names(errors)
+
+    def assert_core_invariants(self, *, final: bool = False) -> None:
+        errors = self.core_invariant_errors(final=final)
+        if errors:
+            raise ValueError("WorkflowStateSnapshot invariant violation: " + "; ".join(errors))
+
     def with_transition(self, *, stage: str, to_status: WorkflowStatus | str, reason: str, artifact_ids_added: list[str] | None = None) -> "WorkflowStateSnapshot":
         target = WorkflowStatus.coerce(to_status)
+        added = list(artifact_ids_added or [])
         transition = StageTransition(
             from_status=self.status,
             to_status=target,
             stage=stage,
             reason=reason,
-            artifact_ids_added=artifact_ids_added or [],
+            artifact_ids_added=added,
         )
-        return self.model_copy(update={"status": target, "transitions": [*self.transitions, transition]})
+        artifact_ids = [*self.artifact_ids]
+        for artifact_id in added:
+            if artifact_id not in artifact_ids:
+                artifact_ids.append(artifact_id)
+        return self.model_copy(update={"status": target, "artifact_ids": artifact_ids, "transitions": [*self.transitions, transition]})
 
 
 class WorkflowState(TypedDict, total=False):
@@ -253,5 +455,16 @@ class WorkflowState(TypedDict, total=False):
     errors: list[str]
 
 
-def validate_workflow_state(state: Mapping[str, Any]) -> WorkflowStateSnapshot:
-    return WorkflowStateSnapshot.from_graph_state(state)
+def _unique_field_names(items: list[str] | tuple[str, ...]) -> list[str]:
+    out: list[str] = []
+    for item in items:
+        text = str(item).strip()
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
+def validate_workflow_state(state: Mapping[str, Any], *, final: bool = False) -> WorkflowStateSnapshot:
+    snapshot = WorkflowStateSnapshot.from_graph_state(state)
+    snapshot.assert_core_invariants(final=final)
+    return snapshot
