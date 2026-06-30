@@ -242,3 +242,18 @@ Re-entry is bounded by `PipelineLoopBudget` with global, per-trigger, and per-so
 `ObligationAnalysis` now models the broader work surface of engineering tasks. In addition to tests, setup, environment conditions, blockers, and completion requirements, it carries required documentation updates, examples/snippet updates, CI/build updates, codegen/tooling updates, affected surfaces, adjacent components, discovered impacts, and an optional `DiscoveredWorkSurface`.
 
 `RuntimeKernel.build_acceptance_contract()` translates these discovered impacts into blocking acceptance obligations such as `documentation_updated`, `examples_updated`, `ci_or_build_updated`, `codegen_or_tooling_updated`, and `work_surface_complete`. `merge_plan_with_obligations()` feeds the same information into the execution plan, expected repo changes, success criteria, and verification checks.
+
+## LLM Contract Gateway
+
+Direct LLM output crosses a dedicated contract boundary before it can affect engine state:
+
+```text
+Direct LLM raw JSON
+  -> ContractGateway
+  -> JSON schema validation
+  -> ContractViolation records on schema drift
+  -> bounded schema-only repair retry
+  -> canonical Pydantic model or controlled contract_violation
+```
+
+This keeps domain models strict. Schema drift such as non-canonical enum values or wrong nested shapes is not normalized inside business models. It is treated as an explicit contract violation and either repaired by a bounded retry or surfaced as a non-success workflow result.

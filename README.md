@@ -166,3 +166,7 @@ The runtime now supports controlled re-entry across the whole pipeline, not only
 Each decision records the source stage, target stage, trigger kind, reason, missing evidence/obligations, policy decision, and loop counters. `PipelineLoopBudget` limits global, per-trigger, and per-source-stage re-entry so rediscovery cannot become an infinite loop. If the budget is exhausted, the workflow finalizes with a hard non-success path instead of silently continuing.
 
 Obligation discovery now covers the full work surface for feature/API/client/integration changes. `ObligationAnalysis` can declare required documentation updates, examples/snippets, CI/build updates, codegen/tooling updates, affected surfaces, adjacent components, discovered impacts, and completion requirements. These fields are folded into planning, verification, and acceptance obligations, so “feature implemented” no longer automatically means “task complete.”
+
+### Contract Gateway
+
+The Direct LLM backend now validates every JSON response through `artifact_workflow_runtime.contracts.ContractGateway` before engine state is updated. The gateway appends the target JSON schema to the text-only request, records typed contract violations, performs at most one schema-only repair attempt, and only returns canonical Pydantic models after validation succeeds. Raw Pydantic validation errors are converted into controlled `contract_violation` workflow results.

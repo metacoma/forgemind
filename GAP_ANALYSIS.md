@@ -173,3 +173,19 @@ Remaining debt:
 1. Re-entry trigger detection is typed at the decision layer but still partially uses conservative text normalization from verification/publish summaries; strict structured trigger output from verification would reduce heuristics further.
 2. Durable resume/replay should restore `PipelineLoopDecision` history and continue from the safe re-entry target.
 3. Policy fixtures should grow from hard invariants into scenario-specific bundles for repo, infra, k8s, and network task families.
+
+## Contract Gateway hardening pass
+
+Closed the ad-hoc LLM schema-drift workaround that normalized `ObligationAnalysis` aliases inside domain models.
+
+New invariant:
+
+- Pydantic domain models remain canonical and strict.
+- Direct LLM JSON never goes directly into `model_validate()` as an uncontrolled runtime boundary.
+- `contracts.ContractGateway` validates raw JSON against the target schema, records typed `ContractViolation` entries, performs a bounded schema-only repair attempt, and returns a canonical typed model only after validation succeeds.
+- If repair fails, workflow returns a controlled `contract_violation` final report and stores the contract result as an artifact instead of surfacing a raw Pydantic traceback.
+
+Remaining work:
+
+- OpenHands structured evidence still uses extractor fallback. It should be moved to the same gateway pattern with an evidence-specific contract repair/re-render packet that cannot execute commands.
+- More LLM stages now use the backend gateway path, but per-stage `ContractSpec` policies could become explicit named contracts rather than inferred from response model names.

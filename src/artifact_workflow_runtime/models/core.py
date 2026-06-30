@@ -787,6 +787,7 @@ class LLMResult(RuntimeModel):
     backend: str | None = None
     raw_text: str
     parsed: JsonDict = Field(default_factory=dict)
+    contract_result: JsonDict = Field(default_factory=dict)
     created_at: str = Field(default_factory=utc_now)
 
 
