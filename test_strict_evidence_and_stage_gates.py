@@ -37,6 +37,30 @@ class ProseThenJsonInstance(ProseOnlyInstance):
             start=conversation,
         )
 
+
+
+class JsonThenJsonInstance(ProseOnlyInstance):
+    def __init__(self) -> None:
+        self.followup_prompts: list[str] = []
+
+    async def run(self, *, prompt: str, model: str | None = None, title: str | None = None) -> OpenHandsRunResult:
+        start = AppConversationStart(conversation_id="conv", sandbox_id="sandbox")
+        return OpenHandsRunResult(
+            text='{"summary":"initial summary","structured_evidence":{"commands_run":[{"command":"pytest","cwd":null,"exit_code":0,"output_excerpt":"passed"}],"files_changed":["src/app.py"],"tests":[{"name":"pytest","status":"passed","output_excerpt":"1 passed"}],"mutation_summary":{"changed":true,"files_changed":["src/app.py"],"summary":"modified src/app.py"},"postcheck_summary":{"attempted":true,"checks":[],"summary":"pytest passed"},"blockers":[]}}',
+            status="finished",
+            conversation_id="conv",
+            start=start,
+        )
+
+    async def followup(self, *, conversation, prompt: str) -> OpenHandsRunResult:
+        self.followup_prompts.append(prompt)
+        return OpenHandsRunResult(
+            text='{"summary":"execute summary","structured_evidence":{"commands_run":[{"command":"pytest","cwd":null,"exit_code":0,"output_excerpt":"passed"}],"files_changed":["src/app.py"],"tests":[{"name":"pytest","status":"passed","output_excerpt":"1 passed"}],"mutation_summary":{"changed":true,"files_changed":["src/app.py"],"summary":"modified src/app.py"},"postcheck_summary":{"attempted":true,"checks":[],"summary":"pytest passed"},"blockers":[]}}',
+            status="finished",
+            conversation_id=conversation.conversation_id,
+            start=conversation,
+        )
+
 class ProseThenFencedJsonInstance(ProseOnlyInstance):
     def __init__(self) -> None:
         self.followup_prompts: list[str] = []
@@ -147,3 +171,22 @@ def test_openhands_adapter_accepts_fenced_json_on_contract_repair_followup(tmp_p
     assert result.stage_failure is None
     assert result.structured_evidence.commands_run[0].command == "pytest"
     assert instance.followup_prompts
+
+
+def test_openhands_adapter_always_requests_json_handoff_when_followup_is_available(tmp_path) -> None:
+    instance = JsonThenJsonInstance()
+    adapter = OpenHandsAdapter(instance, ArtifactStore(tmp_path))
+    request = ExecutionRequest(
+        task_id="task",
+        execution_family=ExecutionFamily.REPOSITORY_CHANGE,
+        prompt="execute bounded packet",
+        expected_outputs=["changed_files", "commands_run", "test_results"],
+    )
+
+    result = asyncio.run(adapter.execute(request))
+
+    assert result.ok is True
+    assert instance.followup_prompts
+    assert "Return JSON only." in instance.followup_prompts[0]
+    assert "Return exactly one JSON object" not in request.compiled_prompt()
+    assert "response_format: json" not in request.compiled_prompt()

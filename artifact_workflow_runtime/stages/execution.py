@@ -31,9 +31,8 @@ class ExecutionStageMixin:
                 + "\n\nThe environment is a Docker container. Install any dependencies required to run the required test levels inside the container.\n"
                 + f"Required setup steps: {plan.required_setup_steps}\n"
                 + f"Required test levels: {plan.required_test_levels}\n"
-                + f"Require commit: {plan.require_commit}\n"
-                + f"Require push: {plan.require_push}\n"
-                + "\nWhen finished, report concrete evidence: changed files, commands run, outputs, setup/install steps, test/build results, blockers."
+                + "\nPublication is handled by a later publish stage. Do not commit, push, create a PR, or wait for CI from this stage.\n"
+                + "\nWhen finished, summarize what changed, what commands/checks you ran, and any blockers."
             )
             request = ExecutionRequest(
                 task_id=task.id,
@@ -44,7 +43,7 @@ class ExecutionStageMixin:
                 plan_steps=list(plan.steps),
                 expected_changes=list(plan.expected_repo_changes),
                 verification_commands=list(plan.verification_checks),
-                scope_constraints=["do not choose next workflow step", "do not expand task scope", "collect structured evidence"],
+                scope_constraints=["do not choose next workflow step", "do not expand task scope"],
                 plan_summary=plan.summary,
                 context_packet_id=context_packet.id if context_packet else None,
                 artifact_ids=list(state.get("artifact_ids") or []),
@@ -73,7 +72,7 @@ class ExecutionStageMixin:
                 "artifact_ids": artifact_ids,
                 "status": "executed",
                 "transitions": _append_transition(state, "execute", "executed", "Bounded OpenHands execution packet finished", [artifact.id for artifact in result.artifacts]),
-                "controller_decisions": _append_controller_decision(state, (services.runtime_kernel or RuntimeKernel()).controller_decision(stage="execute", selected_next_stage="review", reason="Execution completed; review gate must evaluate the candidate revision before QA.")),
+                "controller_decisions": _append_controller_decision(state, (services.runtime_kernel or RuntimeKernel()).controller_decision(stage="execute", selected_next_stage="execution_review", reason="Execution completed; lifecycle machine must review transition before publish/verify.")),
             }
 
     def execute_next(self, state: WorkflowState) -> str:
@@ -82,7 +81,7 @@ class ExecutionStageMixin:
             plan = ExecutionPlan.model_validate(state["plan"])
             execution = ExecutionResult.model_validate(state["execution_result"])
             kernel = services.runtime_kernel or RuntimeKernel()
-            return "review"
+            return kernel.next_after_execution(plan, execution)
 
     async def execution_review_node(self, state: WorkflowState) -> dict[str, Any]:
             services = self.services
@@ -126,19 +125,11 @@ class ExecutionStageMixin:
             task = Task.model_validate(state["task"])
             plan = ExecutionPlan.model_validate(state["plan"])
             execution = ExecutionResult.model_validate(state["execution_result"])
-            publish = PublishResult.model_validate(state["publish_result"]) if state.get("publish_result") else None
+            publish = PublishResult.model_validate(state["publish_result"])
             context_packet = ContextPacket.model_validate(state["context_packet"]) if state.get("context_packet") else None
             attempt = len(state.get("repair_results") or []) + 1
-            if publish is not None:
-                failed_checks = _publish_failed_check_names(publish)
-                blocker_summaries = _publish_blocker_summaries(publish)
-                publish_summary = publish.summary
-            else:
-                qa_review = state.get("qa_review_result") or {}
-                verification = state.get("verification_result") or {}
-                failed_checks = list(qa_review.get("failing_checks") or verification.get("checks_failed") or [])
-                blocker_summaries = list(qa_review.get("environment_blockers") or verification.get("missing_evidence") or [])
-                publish_summary = "No publish result; repairing after review/QA failure."
+            failed_checks = _publish_failed_check_names(publish)
+            blocker_summaries = _publish_blocker_summaries(publish)
             await _emit(services, "stage_started", "repair", "Running bounded repair packet after failed publish/check evidence", task_id=task.id, attempt=attempt, failed_checks=failed_checks)
             prompt = (
                 "You are performing a bounded repair packet after publish/PR checks reported failures.\n"
@@ -148,7 +139,7 @@ class ExecutionStageMixin:
                 f"Failed checks: {failed_checks}\n"
                 f"Publish blockers: {blocker_summaries}\n"
                 f"Previous execution summary: {execution.summary}\n"
-                f"Publish summary: {publish_summary}\n\n"
+                f"Publish summary: {publish.summary}\n\n"
                 f"Plan summary: {plan.summary}\n"
                 "Plan steps:\n" + "\n".join(f"- {step}" for step in plan.steps) + "\n\n"
                 "Return changed files, commands run, test results, blockers, and repair summary as structured evidence."
@@ -156,7 +147,7 @@ class ExecutionStageMixin:
             request = RepairRequest(
                 task_id=task.id,
                 execution_result_id=execution.id,
-                publish_result_id=publish.id if publish is not None else None,
+                publish_result_id=publish.id,
                 attempt=attempt,
                 max_attempts=2,
                 execution_family=plan.execution_family,
@@ -191,5 +182,5 @@ class ExecutionStageMixin:
                 "artifact_ids": artifact_ids,
                 "status": "repaired",
                 "transitions": _append_transition(state, "repair", "repaired", "Bounded repair packet finished; lifecycle requires review before continuing", [artifact.id for artifact in result.execution_result.artifacts]),
-                "controller_decisions": _append_controller_decision(state, (services.runtime_kernel or RuntimeKernel()).controller_decision(stage="repair", selected_next_stage="review", reason="Repair completed; review must re-evaluate the candidate revision before QA.")),
+                "controller_decisions": _append_controller_decision(state, (services.runtime_kernel or RuntimeKernel()).controller_decision(stage="repair", selected_next_stage="execution_review", reason="Repair completed; execution review must re-evaluate before verification/publish.")),
             }
