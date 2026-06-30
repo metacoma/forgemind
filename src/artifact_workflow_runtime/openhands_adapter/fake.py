@@ -3,12 +3,14 @@ from __future__ import annotations
 from collections import defaultdict
 
 from artifact_workflow_runtime.artifacts import ArtifactStore
-from artifact_workflow_runtime.evidence import EvidenceExtractor
+from artifact_workflow_runtime.evidence import EvidenceExtractor, render_structured_evidence_summary
 from artifact_workflow_runtime.models import (
     BackendKind,
     EvidenceBundle,
+    BlockerKind,
     ExecutionRequest,
     ExecutionResult,
+    ExecutionStatus,
     ObservationRequest,
     ObservationResult,
     VerificationMode,
@@ -17,7 +19,7 @@ from artifact_workflow_runtime.models import (
     WorkPacketKind,
 )
 
-from .adapter import _classify_run_text
+from .adapter import _classify_run_text, _execution_status_from_bundle
 
 
 class FakeOpenHandsAdapter:
@@ -34,7 +36,7 @@ class FakeOpenHandsAdapter:
         return queue.pop(0)
 
     def _bundle(self, *, text: str, raw_artifact_id: str, request_id: str, ok: bool, summary: str, evidence_kind: str, work_packet_kind: WorkPacketKind, changed_default: bool = False) -> tuple[EvidenceBundle, object]:
-        structured = self.evidence_extractor.from_text(text, artifact_id=raw_artifact_id, changed_default=changed_default)
+        structured = self.evidence_extractor.from_agent_output(text, artifact_id=raw_artifact_id, changed_default=changed_default)
         bundle = EvidenceBundle(
             source_backend=BackendKind.OPENHANDS,
             work_packet_kind=work_packet_kind,
@@ -43,6 +45,7 @@ class FakeOpenHandsAdapter:
             artifact_ids=[raw_artifact_id],
             structured=structured,
             evidence_kind=evidence_kind,
+            raw_text_artifact_id=raw_artifact_id,
             blockers=[item.summary for item in structured.blockers],
         )
         artifact = self.artifact_store.add_json(
@@ -51,6 +54,8 @@ class FakeOpenHandsAdapter:
             metadata={"request_id": request_id, "work_packet_kind": work_packet_kind.value, "backend": BackendKind.OPENHANDS.value},
         )
         bundle.artifact_ids.append(artifact.id)
+        bundle.structured_artifact_id = artifact.id
+        bundle.summary = render_structured_evidence_summary(bundle.structured) or bundle.summary
         return bundle, artifact
 
     async def observe(self, request: ObservationRequest) -> ObservationResult:
@@ -77,6 +82,8 @@ class FakeOpenHandsAdapter:
             artifacts=[artifact, bundle_artifact],
             structured_evidence=bundle.structured,
             evidence_bundle=bundle,
+            primary_evidence_artifact_ids=[bundle_artifact.id],
+            raw_evidence_artifact_id=artifact.id,
             conversation_id="fake-observe",
             transport_error=transport_error,
             evidence_kind=evidence_kind,
@@ -102,11 +109,14 @@ class FakeOpenHandsAdapter:
         return ExecutionResult(
             request_id=request.id,
             ok=ok,
+            execution_status=_execution_status_from_bundle(ok=ok, transport_error=transport_error, bundle=bundle),
             summary=summary,
             evidence_text=text,
             artifacts=[artifact, bundle_artifact],
             structured_evidence=bundle.structured,
             evidence_bundle=bundle,
+            primary_evidence_artifact_ids=[bundle_artifact.id],
+            raw_evidence_artifact_id=artifact.id,
             conversation_id="fake-execute",
             transport_error=transport_error,
             evidence_kind=evidence_kind,
@@ -137,6 +147,8 @@ class FakeOpenHandsAdapter:
             artifacts=[artifact, bundle_artifact],
             structured_evidence=bundle.structured,
             evidence_bundle=bundle,
+            primary_evidence_artifact_ids=[bundle_artifact.id],
+            raw_evidence_artifact_id=artifact.id,
             conversation_id="fake-verify",
             checks_passed=request.checks if passed else [],
             checks_failed=[] if passed else list(request.checks),

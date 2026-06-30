@@ -62,3 +62,39 @@ Remaining gaps after this pass:
 2. Repair loops are still not first-class typed state transitions.
 3. Resume/replay from `workflow_state_snapshot` + `ArtifactStore.index.json` is documented but not yet implemented.
 4. The structured evidence extractor is conservative and heuristic; OpenHands should eventually be instructed/validated to emit a strict JSON evidence schema directly.
+
+## Contract/state hardening pass
+
+Closed in this pass:
+
+- `context_packet` in `WorkflowStateSnapshot` is now a typed `ContextPacket`, not a `JsonDict`.
+- Request contracts now include `EvidenceRequirements` and `StructuredResponseContract` and render through `compiled_prompt()`.
+- Direct LLM and OpenHands backends now send compiled typed contracts instead of raw prompt strings.
+- OpenHands output normalization prefers structured JSON evidence sections and uses heuristic extraction only as fallback.
+- `EvidenceBundle` now separates raw text artifact ids from structured artifact ids and exposes an operational summary.
+- `ContextBuilder` renders structured evidence bundles as typed summaries for Direct LLM reasoning.
+- Graph nodes now record typed `StageTransition` and `ControllerDecision` items into workflow state.
+- `RuntimeKernel` now exposes fact/planning/execution/verification readiness checks.
+
+Remaining debt:
+
+1. The execution and publish narrative bodies still live in `graph/workflow.py`; they are now compiled inside typed packets, but should later move into dedicated work-packet builder modules.
+2. Repair loops still finalize after failed verification; a future pass should add typed `RepairRequest` / `RepairResult` and bounded re-execution edges.
+3. Durable resume/replay from `workflow_state_snapshot` and `ArtifactStore.index.json` is still not implemented.
+
+## Acceptance / verification finalization hardening update
+
+Closed in this pass:
+
+- Added typed acceptance models: `TaskAcceptanceContract`, `AcceptanceObligation`, `VerificationObligationResult`, `AcceptanceDecision`, `ExecutionStatus`, `AcceptanceStatus`, and typed environment blockers.
+- Added an explicit graph `acceptance` stage between `verify` and `finalize`.
+- Final reports now follow `AcceptanceDecision.final_workflow_status` when available.
+- Mutation tasks cannot finalize as `completed` when required obligations are `failed`, `blocked`, or `not_run`.
+- Missing Freeplane/integration/runtime prerequisites are classified as `missing_environment_dependency`, `missing_runtime_prerequisite`, or `integration_environment_unavailable` and produce `needs_environment`.
+- Added regression coverage for the C++ gRPC client / Freeplane integration blocker scenario.
+
+Remaining debt:
+
+1. Acceptance obligation derivation is deterministic and typed, but still heuristic. Future iterations can make obligations first-class planner output validated by policy.
+2. Repair loops are still not first-class: failed/blocked acceptance stops safely, but does not yet create a typed repair request.
+3. OpenHands should eventually emit strict JSON evidence with blocker kinds directly instead of relying on fallback blocker normalization.

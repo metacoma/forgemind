@@ -30,6 +30,7 @@ class WorkflowController:
             final_report_builder=FinalReportBuilder(),
             event_sink=event_sink,
             model_routing=model_routing,
+            runtime_kernel=RuntimeKernel(),
         )
         if self.services.approval_provider is None:
             from artifact_workflow_runtime.policy import StaticApprovalProvider

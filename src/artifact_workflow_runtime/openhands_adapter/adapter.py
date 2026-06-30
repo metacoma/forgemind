@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from artifact_workflow_runtime.artifacts import ArtifactStore
-from artifact_workflow_runtime.evidence import EvidenceExtractor
+from artifact_workflow_runtime.evidence import EvidenceExtractor, render_structured_evidence_summary
 from artifact_workflow_runtime.model_routing import ModelRoutingConfig
 from artifact_workflow_runtime.models import (
     BackendKind,
     EvidenceBundle,
+    BlockerKind,
     ExecutionRequest,
     ExecutionResult,
+    ExecutionStatus,
     ObservationRequest,
     ObservationResult,
     VerificationMode,
@@ -32,6 +34,19 @@ def _classify_run_text(text: str) -> tuple[bool, str]:
     if any(marker in lowered for marker in HTML_MARKERS):
         return True, "html_transport_error"
     return False, "agent_text"
+
+
+def _execution_status_from_bundle(*, ok: bool, transport_error: bool, bundle: EvidenceBundle) -> ExecutionStatus:
+    if not ok:
+        return ExecutionStatus.FAILED if transport_error else ExecutionStatus.BLOCKED
+    has_mutation = bool(bundle.structured.mutation_summary.changed or bundle.structured.files_changed)
+    env_blocked = any(
+        item.blocker_kind in {BlockerKind.MISSING_ENVIRONMENT_DEPENDENCY, BlockerKind.MISSING_RUNTIME_PREREQUISITE, BlockerKind.INTEGRATION_ENVIRONMENT_UNAVAILABLE}
+        for item in bundle.structured.blockers
+    )
+    if env_blocked or bundle.structured.blockers:
+        return ExecutionStatus.PARTIAL if has_mutation else ExecutionStatus.BLOCKED
+    return ExecutionStatus.SUCCEEDED
 
 
 class OpenHandsAdapter:
@@ -62,6 +77,8 @@ class OpenHandsAdapter:
         missing_guards = {"edit_files", "commit", "push"} - forbidden
         if missing_guards:
             raise ValueError(f"Observation packets must explicitly forbid mutation guards: {sorted(missing_guards)}")
+        if request.evidence_requirements.require_structured is not True:
+            raise ValueError("Observation packets must require structured evidence as the operational output")
 
     @staticmethod
     def _validate_execution_contract(request: ExecutionRequest) -> None:
@@ -71,6 +88,8 @@ class OpenHandsAdapter:
             raise ValueError("Execution packets must declare expected_outputs")
         if "change_workflow_decision" not in {item.strip().lower() for item in request.forbidden_actions}:
             raise ValueError("Execution packets must forbid changing workflow decisions")
+        if request.evidence_requirements.require_structured is not True:
+            raise ValueError("Execution packets must require structured evidence as the operational output")
 
     @staticmethod
     def _validate_world_verification_contract(request: VerificationRequest) -> None:
@@ -82,9 +101,11 @@ class OpenHandsAdapter:
         # World checks may inspect filesystem/shell/git, so they must not inherit the Direct LLM forbidden-input contract.
         if forbidden & _DIRECT_VERIFY_FORBIDDEN_ACTIONS == _DIRECT_VERIFY_FORBIDDEN_ACTIONS:
             raise ValueError("World verification packets must declare world-check inputs/actions explicitly, not Direct LLM forbidden inputs")
+        if request.evidence_requirements.require_structured is not True:
+            raise ValueError("World verification packets must require structured evidence as the operational output")
 
     def _evidence_bundle(self, *, text: str, raw_artifact_id: str, request_id: str, ok: bool, summary: str, evidence_kind: str, work_packet_kind: WorkPacketKind, changed_default: bool = False) -> tuple[EvidenceBundle, object]:
-        structured = self.evidence_extractor.from_text(text, artifact_id=raw_artifact_id, changed_default=changed_default)
+        structured = self.evidence_extractor.from_agent_output(text, artifact_id=raw_artifact_id, changed_default=changed_default)
         bundle = EvidenceBundle(
             source_backend=BackendKind.OPENHANDS,
             work_packet_kind=work_packet_kind,
@@ -93,6 +114,7 @@ class OpenHandsAdapter:
             artifact_ids=[raw_artifact_id],
             structured=structured,
             evidence_kind=evidence_kind,
+            raw_text_artifact_id=raw_artifact_id,
             blockers=[item.summary for item in structured.blockers],
         )
         artifact = self.artifact_store.add_json(
@@ -101,13 +123,15 @@ class OpenHandsAdapter:
             metadata={"request_id": request_id, "work_packet_kind": work_packet_kind.value, "backend": BackendKind.OPENHANDS.value},
         )
         bundle.artifact_ids.append(artifact.id)
+        bundle.structured_artifact_id = artifact.id
+        bundle.summary = render_structured_evidence_summary(bundle.structured) or bundle.summary
         return bundle, artifact
 
     async def observe(self, request: ObservationRequest) -> ObservationResult:
         self._validate_observation_contract(request)
         slot = "research" if request.work_packet_kind == WorkPacketKind.RESEARCH or request.metadata.get("source") == "fresh_external_research" else "observe"
         run = await self.instance.run(
-            prompt=request.prompt,
+            prompt=request.compiled_prompt(),
             model=self._resolve_stage_model(request.metadata, slot),
             title=f"observe:{request.task_id}",
         )
@@ -136,6 +160,8 @@ class OpenHandsAdapter:
             artifacts=[artifact, bundle_artifact],
             structured_evidence=bundle.structured,
             evidence_bundle=bundle,
+            primary_evidence_artifact_ids=[bundle_artifact.id],
+            raw_evidence_artifact_id=artifact.id,
             conversation_id=run.conversation_id,
             transport_error=transport_error,
             evidence_kind=evidence_kind,
@@ -145,7 +171,7 @@ class OpenHandsAdapter:
         self._validate_execution_contract(request)
         slot = "publish" if request.work_packet_kind == WorkPacketKind.PUBLISH or request.metadata.get("mode") == "publish" else "execute"
         run = await self.instance.run(
-            prompt=request.prompt,
+            prompt=request.compiled_prompt(),
             model=self._resolve_stage_model(request.metadata, slot),
             title=f"execute:{request.task_id}",
         )
@@ -170,11 +196,14 @@ class OpenHandsAdapter:
         return ExecutionResult(
             request_id=request.id,
             ok=ok,
+            execution_status=_execution_status_from_bundle(ok=ok, transport_error=transport_error, bundle=bundle),
             summary=summary,
             evidence_text=run.text,
             artifacts=[artifact, bundle_artifact],
             structured_evidence=bundle.structured,
             evidence_bundle=bundle,
+            primary_evidence_artifact_ids=[bundle_artifact.id],
+            raw_evidence_artifact_id=artifact.id,
             conversation_id=run.conversation_id,
             transport_error=transport_error,
             evidence_kind=evidence_kind,
@@ -183,7 +212,7 @@ class OpenHandsAdapter:
     async def verify(self, request: VerificationRequest) -> VerificationResult:
         self._validate_world_verification_contract(request)
         run = await self.instance.run(
-            prompt=request.prompt,
+            prompt=request.compiled_prompt(),
             model=self._resolve_stage_model(request.metadata, "verify"),
             title="verify",
         )
@@ -217,6 +246,8 @@ class OpenHandsAdapter:
             artifacts=[artifact, bundle_artifact],
             structured_evidence=bundle.structured,
             evidence_bundle=bundle,
+            primary_evidence_artifact_ids=[bundle_artifact.id],
+            raw_evidence_artifact_id=artifact.id,
             conversation_id=run.conversation_id,
             checks_passed=checks_passed,
             checks_failed=checks_failed,

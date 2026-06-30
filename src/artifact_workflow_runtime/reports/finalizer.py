@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from artifact_workflow_runtime.models import (
+    AcceptanceDecision,
     ApprovalRequest,
     ExecutionPlan,
     ExecutionResult,
@@ -11,6 +12,7 @@ from artifact_workflow_runtime.models import (
     RoutingDecision,
     ObligationAnalysis,
     Task,
+    TaskAcceptanceContract,
     TaskClassification,
     VerificationResult,
 )
@@ -32,6 +34,8 @@ class FinalReportBuilder:
         execution: ExecutionResult | None,
         publish: PublishResult | None,
         verification: VerificationResult | None,
+        acceptance_contract: TaskAcceptanceContract | None,
+        acceptance_decision: AcceptanceDecision | None,
         artifact_ids: list[str],
     ) -> FinalReport:
         if approval and approval.required and approval.approved is False:
@@ -52,9 +56,12 @@ class FinalReportBuilder:
         elif publish and not publish.ok:
             status = "publish_failed"
             summary = publish.summary or "Publish step did not produce usable evidence."
+        elif acceptance_decision:
+            status = acceptance_decision.final_workflow_status
+            summary = acceptance_decision.summary
         elif verification:
-            status = verification.completion_status if verification.completion_status else ("completed" if verification.passed else "executed_unverified")
-            summary = verification.summary or "Verification completed."
+            status = "needs_human_review" if plan and (plan.requires_mutation or plan.must_change_world) else (verification.completion_status if verification.completion_status else ("completed" if verification.passed else "executed_unverified"))
+            summary = verification.summary or "Verification completed, but no acceptance decision was recorded."
         elif execution and execution.ok:
             status = "implemented_only"
             summary = execution.summary or "Execution completed but verification did not run."
@@ -65,6 +72,8 @@ class FinalReportBuilder:
             task_id=task.id,
             status=status,
             summary=summary,
+            acceptance_contract=acceptance_contract,
+            acceptance_decision=acceptance_decision,
             classification=classification,
             route=route,
             obligations=obligations,

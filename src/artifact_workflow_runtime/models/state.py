@@ -7,7 +7,9 @@ from pydantic import Field
 
 from artifact_workflow_runtime.models.core import (
     ApprovalRequest,
+    AcceptanceDecision,
     Artifact,
+    ContextPacket,
     ExecutionPlan,
     ExecutionRequest,
     ExecutionResult,
@@ -23,6 +25,7 @@ from artifact_workflow_runtime.models.core import (
     RoutingDecision,
     RuntimeModel,
     Task,
+    TaskAcceptanceContract,
     TaskClassification,
     VerificationCheckRequest,
     VerificationCheckResult,
@@ -49,10 +52,12 @@ class WorkflowStatus(str, Enum):
     EXECUTED = "executed"
     PUBLISHED = "published"
     VERIFIED = "verified"
+    ACCEPTANCE_EVALUATED = "acceptance_evaluated"
     COMPLETED = "completed"
     BLOCKED = "blocked"
     PARTIALLY_COMPLETED = "partially_completed"
     NEEDS_HUMAN_REVIEW = "needs_human_review"
+    NEEDS_ENVIRONMENT = "needs_environment"
     FAILED = "failed"
 
     @classmethod
@@ -106,13 +111,14 @@ class WorkflowStateSnapshot(RuntimeModel):
     research_result: ObservationResult | None = None
     observation_request: ObservationRequest | None = None
     observation_result: ObservationResult | None = None
-    context_packet: JsonDict | None = None
+    context_packet: ContextPacket | None = None
     obligation_request: LLMRequest | None = None
     obligation_result: LLMResult | None = None
     obligations: ObligationAnalysis | None = None
     plan_request: LLMRequest | None = None
     plan_result: LLMResult | None = None
     plan: ExecutionPlan | None = None
+    acceptance_contract: TaskAcceptanceContract | None = None
     policy_decision: PolicyDecision | None = None
     approval_request: ApprovalRequest | None = None
     execution_request: ExecutionRequest | None = None
@@ -123,6 +129,7 @@ class WorkflowStateSnapshot(RuntimeModel):
     verification_check_requests: list[VerificationCheckRequest] = Field(default_factory=list)
     verification_check_results: list[VerificationCheckResult] = Field(default_factory=list)
     verification_result: VerificationResult | None = None
+    acceptance_decision: AcceptanceDecision | None = None
     final_report: FinalReport | None = None
     controller_decisions: list[ControllerDecision] = Field(default_factory=list)
     transitions: list[StageTransition] = Field(default_factory=list)
@@ -183,6 +190,7 @@ class WorkflowState(TypedDict, total=False):
     plan_request: JsonDict | None
     plan_result: JsonDict | None
     plan: JsonDict | None
+    acceptance_contract: JsonDict | None
     policy_decision: JsonDict | None
     approval_request: JsonDict | None
     execution_request: JsonDict | None
@@ -193,6 +201,7 @@ class WorkflowState(TypedDict, total=False):
     verification_check_requests: list[JsonDict]
     verification_check_results: list[JsonDict]
     verification_result: JsonDict | None
+    acceptance_decision: JsonDict | None
     final_report: JsonDict | None
     controller_decisions: list[JsonDict]
     transitions: list[JsonDict]

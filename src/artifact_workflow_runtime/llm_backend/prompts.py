@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from artifact_workflow_runtime.evidence import render_structured_evidence_summary
 from artifact_workflow_runtime.models import Capability, ContextPacket, ExecutionPlan, ExecutionResult, ObligationAnalysis, PublishResult, RoutingDecision, Task, TaskClassification
 
 
@@ -90,6 +91,22 @@ VERIFICATION_SCHEMA_HINT = {
 }
 
 
+
+def _operational_evidence_text(result: ExecutionResult | PublishResult | None, *, fallback: str) -> str:
+    if result is None:
+        return fallback
+    parts: list[str] = []
+    if result.evidence_bundle is not None:
+        parts.append("Structured EvidenceBundle operational summary:")
+        parts.append(result.evidence_bundle.operational_summary())
+    parts.append("StructuredEvidence:")
+    parts.append(render_structured_evidence_summary(result.structured_evidence))
+    if result.raw_evidence_artifact_id:
+        parts.append(f"Raw evidence artifact: {result.raw_evidence_artifact_id} (raw text is supplement, not source of truth)")
+    if not parts:
+        parts.append(result.evidence_text)
+    return "\n".join(part for part in parts if part).strip()
+
 def build_classification_prompt(task: Task) -> str:
     return (
         "Classify the task for a controller-driven workflow.\n"
@@ -171,7 +188,7 @@ def build_obligation_analysis_prompt(task: Task, classification: TaskClassificat
     )
 
 def build_verification_prompt(task: Task, context_packet: ContextPacket, plan: ExecutionPlan, execution: ExecutionResult, publish: PublishResult | None = None) -> str:
-    publish_text = publish.evidence_text if publish else "No separate publish step evidence was captured."
+    publish_text = _operational_evidence_text(publish, fallback="No separate publish step evidence was captured.")
     return (
         "Verify the result using evidence only.\n"
         "You do not have live access to the world.\n"
@@ -197,7 +214,7 @@ def build_verification_prompt(task: Task, context_packet: ContextPacket, plan: E
         + "\n".join(f"- {item}" for item in plan.success_criteria)
         + "\n\nVerification checks:\n"
         + "\n".join(f"- {item}" for item in plan.verification_checks)
-        + f"\n\nExecution evidence:\n{execution.evidence_text}\n\nPublish evidence:\n{publish_text}\n"
+        + f"\n\nExecution structured evidence:\n{_operational_evidence_text(execution, fallback='No execution evidence.')}\n\nPublish structured evidence:\n{publish_text}\n"
     )
 
 
@@ -209,7 +226,7 @@ def build_verification_check_prompt(
     check_name: str,
     publish: PublishResult | None = None,
 ) -> str:
-    publish_text = publish.evidence_text if publish else "No separate publish step evidence was captured."
+    publish_text = _operational_evidence_text(publish, fallback="No separate publish step evidence was captured.")
     return (
         "Verify exactly one verification check using evidence only.\n"
         "You do not have live access to the world.\n"
@@ -230,5 +247,5 @@ def build_verification_check_prompt(
         + "\n".join(f"- {item}" for item in plan.success_criteria)
         + "\n\nAll verification checks from plan:\n"
         + "\n".join(f"- {item}" for item in plan.verification_checks)
-        + f"\n\nExecution evidence:\n{execution.evidence_text}\n\nPublish evidence:\n{publish_text}\n"
+        + f"\n\nExecution structured evidence:\n{_operational_evidence_text(execution, fallback='No execution evidence.')}\n\nPublish structured evidence:\n{publish_text}\n"
     )

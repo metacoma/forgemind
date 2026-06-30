@@ -150,3 +150,27 @@ The current implementation is now structurally runnable and closer to the target
 Verification is no longer limited to one monolithic `verify` model when check-level routing is configured. The plan keeps human-readable `verification_checks`; the runtime normalizes each check into a stable slot such as `unit_tests`, `integration_tests`, `pr_checks`, `security`, `docs`, or `default`. Each check becomes a typed `VerificationCheckRequest`, is evaluated by the Direct LLM with a check-specific `model_override`, and is persisted as `verification_check_assessment` / `verification_check_llm_raw` artifacts. The aggregate `VerificationResult` is derived from those typed check results, not from hidden prompt decisions.
 
 OpenHands still does not own verification routing. It may provide execution/publish evidence, but check selection and model routing remain controller-side concerns.
+
+## Contract hardening update
+
+The runtime now treats prompt text as a compiled rendering of typed request contracts rather than the source of truth. `LLMRequest`, `ObservationRequest`, `ExecutionRequest`, `PublishRequest`, `VerificationRequest`, and `VerificationCheckRequest` expose `compiled_prompt()` methods that render typed fields such as purpose/objective, scope constraints, allowed/forbidden actions, artifact ids, context packet ids, evidence requirements, and structured response expectations. Backends send these compiled contracts to models; raw narrative prompt text is only the final human-readable instruction block.
+
+Structured evidence is also now the primary operational output. OpenHands adapters normalize preferred JSON evidence contracts first and fall back to conservative text extraction only when structured JSON is absent. `EvidenceBundle` tracks raw and structured artifact ids separately, and `ContextBuilder` renders `structured_evidence_bundle` artifacts as compact typed summaries before any raw supplement text reaches Direct LLM reasoning.
+
+`WorkflowStateSnapshot.context_packet` is now typed as `ContextPacket`, and LangGraph nodes record `StageTransition` and `ControllerDecision` entries as they run. `RuntimeKernel` includes explicit readiness checks for fact collection, planning, execution, and verification, keeping control-plane decisions outside OpenHands packets.
+
+## Acceptance as a hard control-plane gate
+
+The runtime now separates execution, verification, acceptance, and final workflow status.
+
+`RuntimeKernel.build_acceptance_contract()` derives mandatory obligations from `TaskClassification`, `ObligationAnalysis`, and `ExecutionPlan`. Examples include mutation evidence, build/compile success, relevant tests run/passed, integration tests run/passed, environment prerequisites, and publish obligations.
+
+`RuntimeKernel.evaluate_acceptance()` evaluates those obligations against structured execution/publish/verification evidence. Environment failures are not treated as notes. A missing required dependency, runtime prerequisite, or unavailable integration environment becomes a typed `EnvironmentBlocker` and prevents `completed` finalization.
+
+The graph flow is now:
+
+```text
+execute -> publish? -> verify -> acceptance -> finalize
+```
+
+For mutation tasks, verification is mandatory and finalization depends on `AcceptanceDecision`, not on raw OpenHands prose or a permissive verification summary.

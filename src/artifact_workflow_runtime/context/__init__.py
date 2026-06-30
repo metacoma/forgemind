@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import json
 from typing import Mapping
 
-from artifact_workflow_runtime.models import Artifact, ContextPacket, ContextSection, Task
+from artifact_workflow_runtime.evidence import render_structured_evidence_summary
+from artifact_workflow_runtime.models import Artifact, ContextPacket, ContextSection, EvidenceBundle, StructuredEvidence, Task
 
 
 class ContextBuilder:
-    """Build the only text bridge from world artifacts to Direct LLM reasoning."""
+    """Build the only text bridge from world artifacts to Direct LLM reasoning.
+
+    Structured evidence artifacts are rendered as compact typed evidence summaries
+    first. Raw text remains available only as clipped supplement.
+    """
 
     def __init__(self, *, max_chars_per_artifact: int = 8000) -> None:
         self.max_chars_per_artifact = max_chars_per_artifact
@@ -30,7 +36,7 @@ class ContextBuilder:
             body = artifact_texts.get(artifact.id)
             if body is None:
                 body = artifact.text_preview or ""
-            body = self._clip(body)
+            body = self._render_body(artifact, body)
             metadata_lines = []
             if artifact.metadata:
                 metadata_lines = [f"{key}: {value}" for key, value in sorted(artifact.metadata.items())]
@@ -46,6 +52,30 @@ class ContextBuilder:
             )
         text = self._render(sections)
         return ContextPacket(task_id=task.id, artifact_ids=artifact_ids, sections=sections, text=text)
+
+    def _render_body(self, artifact: Artifact, body: str) -> str:
+        if artifact.kind == "structured_evidence_bundle":
+            rendered = self._render_structured_evidence(body)
+            if rendered:
+                return self._clip(rendered)
+        return self._clip(body)
+
+    @staticmethod
+    def _render_structured_evidence(body: str) -> str | None:
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            return None
+        try:
+            if isinstance(payload, dict) and "structured" in payload:
+                bundle = EvidenceBundle.model_validate(payload)
+                return "## Structured evidence bundle\n" + bundle.operational_summary() + "\n\n" + render_structured_evidence_summary(bundle.structured)
+            if isinstance(payload, dict):
+                evidence = StructuredEvidence.model_validate(payload.get("structured_evidence", payload))
+                return "## Structured evidence\n" + render_structured_evidence_summary(evidence)
+        except Exception:
+            return None
+        return None
 
     def _clip(self, text: str) -> str:
         if len(text) <= self.max_chars_per_artifact:

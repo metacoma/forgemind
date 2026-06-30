@@ -6,7 +6,7 @@ from artifact_workflow_runtime.artifacts import ArtifactStore
 from artifact_workflow_runtime.controller import WorkflowController
 from artifact_workflow_runtime.llm_backend import ScriptedLLMBackend
 from artifact_workflow_runtime.model_routing import ModelRoutingConfig
-from artifact_workflow_runtime.models import Capability, ExecutionFamily, Task
+from artifact_workflow_runtime.models import AcceptanceStatus, BlockerKind, Capability, ExecutionFamily, ExecutionStatus, Task
 from artifact_workflow_runtime.openhands_adapter import FakeOpenHandsAdapter
 from artifact_workflow_runtime.policy import StaticApprovalProvider
 
@@ -111,6 +111,111 @@ async def test_workflow_mvp_runs_end_to_end(tmp_path) -> None:
     assert len(openhands.calls["verify"]) == 0
 
 
+async def test_missing_environment_dependency_blocks_acceptance_for_required_integration_verification(tmp_path) -> None:
+    artifact_store = ArtifactStore(tmp_path / "artifacts")
+    llm = ScriptedLLMBackend(
+        {
+            "classification": [
+                {
+                    "normalized_task": "Add C++ gRPC client",
+                    "needs_world_facts": True,
+                    "execution_family": ExecutionFamily.REPOSITORY_CHANGE.value,
+                    "task_intent": "implement",
+                    "capabilities": [Capability.REPO_READ.value, Capability.REPO_WRITE.value],
+                    "observation_focus": ["inspect existing clients", "inspect integration harness"],
+                    "reasoning": "Repository facts are needed before implementation.",
+                    "risk_level": "medium",
+                }
+            ],
+            "route_analysis": [
+                {
+                    "needs_repository_observation": True,
+                    "needs_world_observation": False,
+                    "needs_fresh_external_research": False,
+                    "can_plan_immediately": False,
+                    "required_evidence_types": ["repo_patterns", "integration_harness"],
+                    "research_targets": [],
+                    "observation_focus": ["inspect existing clients", "inspect Freeplane integration test path"],
+                    "reasoning": "Need repository and integration evidence before planning.",
+                }
+            ],
+            "obligation_analysis": [
+                {
+                    "required_test_levels": ["build", "integration"],
+                    "required_setup_steps": ["Freeplane must be available for integration tests"],
+                    "required_environment_conditions": ["docker_container", "Freeplane runtime available"],
+                    "required_publish_actions": [],
+                    "completion_requirements": ["integration tests with Freeplane must run and pass"],
+                    "blocker_conditions": ["missing Freeplane runtime blocks acceptance"],
+                    "reasoning_summary": "A new C++ gRPC client touches the integration path; Freeplane-backed integration verification is mandatory.",
+                }
+            ],
+            "planning": [
+                {
+                    "summary": "Implement C++ gRPC client and validate through Freeplane integration tests",
+                    "execution_family": ExecutionFamily.REPOSITORY_CHANGE.value,
+                    "task_intent": "implement",
+                    "deliverable_kind": "repository_changes",
+                    "capabilities": [Capability.REPO_WRITE.value],
+                    "steps": ["implement client", "run build", "run Freeplane integration tests"],
+                    "success_criteria": ["client code exists", "build passes", "Freeplane integration tests pass"],
+                    "verification_checks": ["build succeeds", "Freeplane integration tests pass"],
+                    "requires_mutation": True,
+                    "must_change_world": True,
+                    "expected_repo_changes": ["src/cpp/client.cc", "CMakeLists.txt"],
+                    "required_test_levels": ["build", "integration"],
+                    "required_setup_steps": ["Freeplane must be available for integration tests"],
+                    "execution_environment": "docker_container",
+                    "environment_notes": ["Freeplane runtime is required for integration acceptance"],
+                    "reasoning": "Integration verification is mandatory for this repo path.",
+                }
+            ],
+            "verification": [
+                {
+                    "passed": True,
+                    "summary": "The implementation and build evidence look useful, but integration could not actually run.",
+                    "checks_passed": ["build succeeds"],
+                    "checks_failed": [],
+                    "missing_evidence": [],
+                    "confidence": "medium",
+                    "reasoning": "This intentionally simulates a too-soft evidence review; acceptance must still be hard-blocked by structured environment evidence.",
+                    "performed_test_levels": ["build"],
+                    "missing_test_levels": [],
+                    "completion_status": "completed",
+                }
+            ],
+        }
+    )
+    openhands = FakeOpenHandsAdapter(
+        artifact_store,
+        scripts={
+            "observe": ["Observed existing clients and a Freeplane-backed integration harness."],
+            "execute": [
+                "Added src/cpp/client.cc and updated CMakeLists.txt. cmake build succeeded. "
+                "Blocker: integration tests not run because Freeplane runtime is not installed / not found in the Docker environment."
+            ],
+        },
+    )
+    controller = WorkflowController(
+        llm_backend=llm,
+        openhands_adapter=openhands,
+        artifact_root=tmp_path / "artifacts",
+        approval_provider=StaticApprovalProvider(approve=True, reviewer="test"),
+    )
+    report = await controller.run(Task(description="Add a C++ gRPC client and validate it with Freeplane integration tests"))
+
+    assert report.status == "needs_environment"
+    assert report.execution is not None
+    assert report.execution.execution_status == ExecutionStatus.PARTIAL
+    assert report.verification is not None
+    assert report.verification.acceptance_status == AcceptanceStatus.NEEDS_ENVIRONMENT
+    assert report.acceptance_decision is not None
+    assert report.acceptance_decision.accepted is False
+    assert report.acceptance_decision.status == AcceptanceStatus.NEEDS_ENVIRONMENT
+    assert any(blocker.kind == BlockerKind.INTEGRATION_ENVIRONMENT_UNAVAILABLE for blocker in report.acceptance_decision.blockers)
+    assert any(result.status.value == "blocked" for result in report.acceptance_decision.obligation_results)
+
+
 async def test_route_analysis_can_require_repo_observation_even_if_classifier_says_no_world_facts(tmp_path) -> None:
     artifact_store = ArtifactStore(tmp_path / "artifacts")
     llm = ScriptedLLMBackend(
@@ -183,7 +288,7 @@ async def test_route_analysis_can_require_repo_observation_even_if_classifier_sa
         artifact_store,
         scripts={
             "observe": ["Found existing ruby/rust/python/nodejs clients and proto definitions in repo."],
-            "execute": ["Added cpp client and build changes; cmake build succeeded."],
+            "execute": ["Added cpp client files src/cpp/client.cc and build changes CMakeLists.txt; cmake build succeeded; pytest unit tests passed; integration tests passed."],
         },
     )
     controller = WorkflowController(
@@ -273,7 +378,7 @@ async def test_route_analysis_can_require_fresh_external_research_before_plannin
                 "Research evidence: official gRPC C++ docs and protobuf generation docs located with current version references.",
                 "Repository evidence: found existing ruby/rust/python/nodejs clients and build files.",
             ],
-            "execute": ["Implemented cpp client and build integration; build passed."],
+            "execute": ["Implemented cpp client files src/cpp/client.cc and build integration CMakeLists.txt; build passed; pytest unit tests passed; integration tests passed."],
         },
     )
     controller = WorkflowController(

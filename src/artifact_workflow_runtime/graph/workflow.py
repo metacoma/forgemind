@@ -7,6 +7,7 @@ import json
 from artifact_workflow_runtime.artifacts import ArtifactStore
 from artifact_workflow_runtime.context import ContextBuilder
 from artifact_workflow_runtime.control_plane import RuntimeKernel
+from artifact_workflow_runtime.evidence import render_structured_evidence_summary
 from artifact_workflow_runtime.llm_backend.prompts import (
     build_classification_prompt,
     build_obligation_analysis_prompt,
@@ -16,6 +17,7 @@ from artifact_workflow_runtime.llm_backend.prompts import (
     build_verification_prompt,
 )
 from artifact_workflow_runtime.models import (
+    AcceptanceDecision,
     ApprovalRequest,
     BackendKind,
     Capability,
@@ -32,6 +34,7 @@ from artifact_workflow_runtime.models import (
     PublishResult,
     RoutingDecision,
     Task,
+    TaskAcceptanceContract,
     TaskClassification,
     VerificationCheckRequest,
     VerificationCheckResult,
@@ -40,7 +43,7 @@ from artifact_workflow_runtime.models import (
     VerificationResult,
     WorkPacketKind,
 )
-from artifact_workflow_runtime.models.state import WorkflowState
+from artifact_workflow_runtime.models.state import ControllerDecision, StageTransition, WorkflowState, WorkflowStatus
 from artifact_workflow_runtime.observation import ObservationService
 from artifact_workflow_runtime.policy import ApprovalProvider, PolicyEngine
 from artifact_workflow_runtime.reports import FinalReportBuilder
@@ -100,6 +103,22 @@ def _llm_model_for_verification_check(services: WorkflowServices, check_name: ob
     default_model = getattr(services.llm_backend, "default_model", None)
     return routing.resolve_verification_check(check_name, default_model) if routing else _llm_model_for(services, "verify")
 
+
+
+
+def _append_transition(state: WorkflowState, stage: str, to_status: str, reason: str, artifact_ids_added: list[str] | None = None) -> list[dict[str, Any]]:
+    transition = StageTransition(
+        from_status=WorkflowStatus.coerce(state.get("status")),
+        to_status=WorkflowStatus.coerce(to_status),
+        stage=stage,
+        reason=reason,
+        artifact_ids_added=artifact_ids_added or [],
+    )
+    return [*(state.get("transitions") or []), transition.model_dump(mode="json")]
+
+
+def _append_controller_decision(state: WorkflowState, decision: ControllerDecision) -> list[dict[str, Any]]:
+    return [*(state.get("controller_decisions") or []), decision.model_dump(mode="json")]
 
 def _unique(items: list[str]) -> list[str]:
     seen: set[str] = set()
@@ -163,7 +182,7 @@ async def _run_check_routed_verification(
         )
         llm_request = LLMRequest(
             kind="verification_check",
-            prompt=check_request.prompt,
+            prompt=check_request.compiled_prompt(),
             task_id=task.id,
             task_text=task.description,
             context_packet_id=context_packet.id,
@@ -322,6 +341,7 @@ def build_workflow_graph(services: WorkflowServices):
             "task_artifact": artifact.model_dump(mode="json"),
             "artifact_ids": _append_artifact_id(state.get("artifact_ids"), artifact.id),
             "status": "intake_completed",
+            "transitions": _append_transition(state, "intake", "intake_completed", "Task persisted as artifact", [artifact.id]),
         }
 
     async def classify_node(state: WorkflowState) -> dict[str, Any]:
@@ -353,6 +373,7 @@ def build_workflow_graph(services: WorkflowServices):
             "classification": parsed.model_dump(mode="json"),
             "artifact_ids": _append_artifact_id(state.get("artifact_ids"), artifact.id),
             "status": "classified",
+            "transitions": _append_transition(state, "classify", "classified", "Task classified by Direct LLM", [artifact.id]),
         }
 
     async def route_node(state: WorkflowState) -> dict[str, Any]:
@@ -386,6 +407,8 @@ def build_workflow_graph(services: WorkflowServices):
             "route_decision": parsed.model_dump(mode="json"),
             "artifact_ids": _append_artifact_id(state.get("artifact_ids"), artifact.id),
             "status": "routed",
+            "transitions": _append_transition(state, "route", "routed", "Controller route evidence requirements recorded", [artifact.id]),
+            "controller_decisions": _append_controller_decision(state, (services.runtime_kernel or RuntimeKernel()).controller_decision(stage="route", selected_next_stage=(services.runtime_kernel or RuntimeKernel()).next_after_route(parsed), reason=parsed.reasoning)),
         }
 
     def route_next(state: WorkflowState) -> str:
@@ -417,6 +440,8 @@ def build_workflow_graph(services: WorkflowServices):
             "research_result": result.model_dump(mode="json"),
             "artifact_ids": artifact_ids,
             "status": "researched",
+            "transitions": _append_transition(state, "research", "researched", "Fresh external research evidence collected", [artifact.id for artifact in result.artifacts]),
+            "controller_decisions": _append_controller_decision(state, (services.runtime_kernel or RuntimeKernel()).controller_decision(stage="research", selected_next_stage=(services.runtime_kernel or RuntimeKernel()).next_after_research(route), reason="Research complete; controller selected next stage from route requirements.")),
         }
 
     def research_next(state: WorkflowState) -> str:
@@ -448,6 +473,7 @@ def build_workflow_graph(services: WorkflowServices):
             "observation_result": result.model_dump(mode="json"),
             "artifact_ids": artifact_ids,
             "status": "observed",
+            "transitions": _append_transition(state, "observe", "observed", "World/repository observation evidence collected", [artifact.id for artifact in result.artifacts]),
         }
 
     async def build_context_node(state: WorkflowState) -> dict[str, Any]:
@@ -480,6 +506,7 @@ def build_workflow_graph(services: WorkflowServices):
             "context_packet": context_packet.model_dump(mode="json"),
             "artifact_ids": _append_artifact_id(state.get("artifact_ids"), artifact.id),
             "status": "context_built",
+            "transitions": _append_transition(state, "build_context", "context_built", "ContextPacket built from artifacts", [artifact.id]),
         }
 
     async def obligation_analysis_node(state: WorkflowState) -> dict[str, Any]:
@@ -519,6 +546,7 @@ def build_workflow_graph(services: WorkflowServices):
             "obligations": parsed.model_dump(mode="json"),
             "artifact_ids": _append_artifact_id(state.get("artifact_ids"), artifact.id),
             "status": "obligations_synthesized",
+            "transitions": _append_transition(state, "obligations", "obligations_synthesized", "Evidence-backed obligations synthesized", [artifact.id]),
         }
 
     async def plan_node(state: WorkflowState) -> dict[str, Any]:
@@ -545,24 +573,36 @@ def build_workflow_graph(services: WorkflowServices):
         )
         result, parsed = await services.llm_backend.complete_json(request, ExecutionPlan)
         parsed = _merge_plan_with_obligations(parsed, obligations)
+        kernel = services.runtime_kernel or RuntimeKernel()
+        acceptance_contract = kernel.build_acceptance_contract(
+            task=task,
+            classification=classification,
+            plan=parsed,
+            obligations=obligations,
+        )
         artifact = services.artifact_store.add_json("execution_plan", parsed.model_dump(mode="json"))
+        acceptance_artifact = services.artifact_store.add_json("task_acceptance_contract", acceptance_contract.model_dump(mode="json"), metadata={"task_id": task.id, "plan_id": parsed.id})
         await _emit(
             services,
             "stage_completed",
             "plan",
-            "Execution plan generated",
+            "Execution plan and acceptance contract generated",
             execution_family=parsed.execution_family.value,
             task_intent=parsed.task_intent,
             deliverable_kind=parsed.deliverable_kind,
             requires_mutation=parsed.requires_mutation,
+            acceptance_obligations=len(acceptance_contract.obligations),
             artifact_id=artifact.id,
+            acceptance_artifact_id=acceptance_artifact.id,
         )
         return {
             "plan_request": request.model_dump(mode="json"),
             "plan_result": result.model_dump(mode="json"),
             "plan": parsed.model_dump(mode="json"),
-            "artifact_ids": _append_artifact_id(state.get("artifact_ids"), artifact.id),
+            "acceptance_contract": acceptance_contract.model_dump(mode="json"),
+            "artifact_ids": [*_append_artifact_id(state.get("artifact_ids"), artifact.id), acceptance_artifact.id],
             "status": "planned",
+            "transitions": _append_transition(state, "plan", "planned", "Execution plan and acceptance contract generated from ContextPacket and obligations", [artifact.id, acceptance_artifact.id]),
         }
 
     async def policy_node(state: WorkflowState) -> dict[str, Any]:
@@ -598,6 +638,8 @@ def build_workflow_graph(services: WorkflowServices):
             "policy_decision": decision.model_dump(mode="json"),
             "artifact_ids": _append_artifact_id(state.get("artifact_ids"), artifact.id),
             "status": "policy_checked",
+            "transitions": _append_transition(state, "policy", "policy_checked", "Policy and evidence gates evaluated", [artifact.id]),
+            "controller_decisions": _append_controller_decision(state, (services.runtime_kernel or RuntimeKernel()).controller_decision(stage="policy", selected_next_stage=(services.runtime_kernel or RuntimeKernel()).next_after_policy(decision), reason="Policy decision controls whether execution, approval, or finalize is next.")),
         }
 
     def policy_next(state: WorkflowState) -> str:
@@ -619,6 +661,8 @@ def build_workflow_graph(services: WorkflowServices):
             "approval_request": reviewed.model_dump(mode="json"),
             "artifact_ids": _append_artifact_id(state.get("artifact_ids"), artifact.id),
             "status": "approval_resolved",
+            "transitions": _append_transition(state, "approval", "approval_resolved", "Approval provider resolved policy request", [artifact.id]),
+            "controller_decisions": _append_controller_decision(state, (services.runtime_kernel or RuntimeKernel()).controller_decision(stage="approval", selected_next_stage=(services.runtime_kernel or RuntimeKernel()).next_after_approval(reviewed), reason="Approval result controls execution eligibility.")),
         }
 
     def approval_next(state: WorkflowState) -> str:
@@ -631,7 +675,7 @@ def build_workflow_graph(services: WorkflowServices):
         plan = ExecutionPlan.model_validate(state["plan"])
         observation_result = ObservationResult.model_validate(state["observation_result"]) if state.get("observation_result") else None
         context_packet = ContextPacket.model_validate(state["context_packet"]) if state.get("context_packet") else None
-        observation_text = observation_result.evidence_text if observation_result else "No observation evidence was collected."
+        observation_text = (render_structured_evidence_summary(observation_result.structured_evidence) if observation_result else "No observation evidence was collected.")
         context_text = context_packet.text if context_packet else ""
         prompt = (
             "You are executing an approved controller plan.\n"
@@ -690,6 +734,8 @@ def build_workflow_graph(services: WorkflowServices):
             "execution_result": result.model_dump(mode="json"),
             "artifact_ids": artifact_ids,
             "status": "executed",
+            "transitions": _append_transition(state, "execute", "executed", "Bounded OpenHands execution packet finished", [artifact.id for artifact in result.artifacts]),
+            "controller_decisions": _append_controller_decision(state, (services.runtime_kernel or RuntimeKernel()).controller_decision(stage="execute", selected_next_stage=(services.runtime_kernel or RuntimeKernel()).next_after_execution(plan, result), reason="Execution result controls publish-vs-verify routing.")),
         }
 
     def execute_next(state: WorkflowState) -> str:
@@ -760,6 +806,10 @@ def build_workflow_graph(services: WorkflowServices):
             summary=run.summary,
             evidence_text=run.evidence_text,
             artifacts=run.artifacts,
+            structured_evidence=run.structured_evidence,
+            evidence_bundle=run.evidence_bundle,
+            primary_evidence_artifact_ids=list(run.primary_evidence_artifact_ids),
+            raw_evidence_artifact_id=run.raw_evidence_artifact_id,
             conversation_id=run.conversation_id,
             transport_error=run.transport_error,
             evidence_kind=run.evidence_kind,
@@ -780,6 +830,7 @@ def build_workflow_graph(services: WorkflowServices):
             "publish_result": result.model_dump(mode="json"),
             "artifact_ids": artifact_ids,
             "status": "published",
+            "transitions": _append_transition(state, "publish", "published", "Repository publication obligations attempted", [artifact.id for artifact in result.artifacts]),
         }
 
     async def verify_node(state: WorkflowState) -> dict[str, Any]:
@@ -1005,6 +1056,43 @@ def build_workflow_graph(services: WorkflowServices):
             "verification_result": result.model_dump(mode="json"),
             "artifact_ids": artifact_ids,
             "status": "verified",
+            "transitions": _append_transition(state, "verify", "verified", f"Verification completed with status {result.completion_status}", [artifact.id for artifact in result.artifacts]),
+            "controller_decisions": _append_controller_decision(state, (services.runtime_kernel or RuntimeKernel()).controller_decision(stage="verify", selected_next_stage="acceptance", reason="Verification result recorded; acceptance gate must decide final completion.")),
+        }
+
+    async def acceptance_node(state: WorkflowState) -> dict[str, Any]:
+        task = Task.model_validate(state["task"])
+        await _emit(services, "stage_started", "acceptance", "Evaluating acceptance obligations", task_id=task.id)
+        contract = TaskAcceptanceContract.model_validate(state["acceptance_contract"])
+        execution = ExecutionResult.model_validate(state["execution_result"]) if state.get("execution_result") else None
+        verification = VerificationResult.model_validate(state["verification_result"]) if state.get("verification_result") else None
+        publish = PublishResult.model_validate(state["publish_result"]) if state.get("publish_result") else None
+        decision = (services.runtime_kernel or RuntimeKernel()).evaluate_acceptance(
+            contract=contract,
+            execution=execution,
+            verification=verification,
+            publish=publish,
+        )
+        artifact = services.artifact_store.add_json("acceptance_decision", decision.model_dump(mode="json"), metadata={"task_id": task.id, "contract_id": contract.id})
+        updated_verification = verification.model_copy(update={"acceptance_status": decision.status, "obligation_results": decision.obligation_results}) if verification is not None else None
+        await _emit(
+            services,
+            "stage_completed",
+            "acceptance",
+            "Acceptance gate evaluated",
+            accepted=decision.accepted,
+            acceptance_status=decision.status.value,
+            final_workflow_status=decision.final_workflow_status,
+            blocking_results=[item.model_dump(mode="json") for item in decision.obligation_results if item.status.value != "passed"],
+            artifact_id=artifact.id,
+        )
+        return {
+            "acceptance_decision": decision.model_dump(mode="json"),
+            **({"verification_result": updated_verification.model_dump(mode="json")} if updated_verification is not None else {}),
+            "artifact_ids": _append_artifact_id(state.get("artifact_ids"), artifact.id),
+            "status": "acceptance_evaluated",
+            "transitions": _append_transition(state, "acceptance", "acceptance_evaluated", f"Acceptance gate resolved as {decision.status.value}", [artifact.id]),
+            "controller_decisions": _append_controller_decision(state, (services.runtime_kernel or RuntimeKernel()).controller_decision(stage="acceptance", selected_next_stage="finalize", reason=decision.summary)),
         }
 
     async def finalize_node(state: WorkflowState) -> dict[str, Any]:
@@ -1023,6 +1111,8 @@ def build_workflow_graph(services: WorkflowServices):
             execution=ExecutionResult.model_validate(state["execution_result"]) if state.get("execution_result") else None,
             publish=PublishResult.model_validate(state["publish_result"]) if state.get("publish_result") else None,
             verification=VerificationResult.model_validate(state["verification_result"]) if state.get("verification_result") else None,
+            acceptance_contract=TaskAcceptanceContract.model_validate(state["acceptance_contract"]) if state.get("acceptance_contract") else None,
+            acceptance_decision=AcceptanceDecision.model_validate(state["acceptance_decision"]) if state.get("acceptance_decision") else None,
             artifact_ids=list(state.get("artifact_ids") or []),
         )
         artifact = services.artifact_store.add_json("final_report", report.model_dump(mode="json"))
@@ -1031,6 +1121,7 @@ def build_workflow_graph(services: WorkflowServices):
             "final_report": report.model_dump(mode="json"),
             "artifact_ids": _append_artifact_id(state.get("artifact_ids"), artifact.id),
             "status": report.status,
+            "transitions": _append_transition(state, "finalize", report.status, "Final report assembled", [artifact.id]),
         }
 
     graph = StateGraph(WorkflowState)
@@ -1047,6 +1138,7 @@ def build_workflow_graph(services: WorkflowServices):
     graph.add_node("execute", execute_node)
     graph.add_node("publish", publish_node)
     graph.add_node("verify", verify_node)
+    graph.add_node("acceptance", acceptance_node)
     graph.add_node("finalize", finalize_node)
 
     graph.set_entry_point("intake")
@@ -1062,6 +1154,7 @@ def build_workflow_graph(services: WorkflowServices):
     graph.add_conditional_edges("approval", approval_next, {"execute": "execute", "finalize": "finalize"})
     graph.add_conditional_edges("execute", execute_next, {"publish": "publish", "verify": "verify"})
     graph.add_edge("publish", "verify")
-    graph.add_edge("verify", "finalize")
+    graph.add_edge("verify", "acceptance")
+    graph.add_edge("acceptance", "finalize")
     graph.add_edge("finalize", END)
     return graph.compile()

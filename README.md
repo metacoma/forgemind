@@ -124,3 +124,16 @@ python -m pytest -q
 ```
 
 The current test suite covers capability normalization, typed state validation, structured evidence extraction, per-stage and per-verification-check model routing, OpenHands transport fallback, sandbox reuse, runtime events, policy gating, research/observation routing, publish obligations, and verification behavior.
+
+## Acceptance gate hardening
+
+Mutation workflows now have an explicit acceptance layer between verification and finalization. The controller derives a typed `TaskAcceptanceContract` from the task classification, obligations, and execution plan. Verification and finalization no longer treat useful execution evidence as sufficient completion.
+
+The acceptance contract is evaluated into an `AcceptanceDecision` with per-obligation `VerificationObligationResult` records. If any required blocking obligation is `failed`, `blocked`, or `not_run`, the final workflow status cannot be `completed`. Missing runtime prerequisites such as a required Freeplane integration environment are classified as structured environment blockers and produce `needs_environment` rather than soft success.
+
+The key distinction is now explicit:
+
+- `ExecutionResult.execution_status` describes what OpenHands actually managed to do.
+- `VerificationResult` describes evidence/world verification results.
+- `AcceptanceDecision` decides whether the task is accepted for completion.
+- `FinalReport.status` follows the acceptance decision for mutation tasks.

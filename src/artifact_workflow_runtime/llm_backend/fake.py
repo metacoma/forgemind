@@ -6,7 +6,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
-from artifact_workflow_runtime.models import ExecutionFamily, LLMRequest, LLMResult
+from artifact_workflow_runtime.models import BackendKind, LLMRequest, LLMResult
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -24,6 +24,8 @@ class ScriptedLLMBackend:
         self.calls: dict[str, list[LLMRequest]] = defaultdict(list)
 
     async def complete_json(self, request: LLMRequest, response_model: type[T]) -> tuple[LLMResult, T]:
+        if request.backend != BackendKind.DIRECT_LLM:
+            raise ValueError(f"Scripted Direct LLM only accepts backend=direct_llm requests, got {request.backend}")
         self.calls[request.kind].append(request)
         queue = self.scripts.get(request.kind)
         if not queue:

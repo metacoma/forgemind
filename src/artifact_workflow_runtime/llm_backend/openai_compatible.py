@@ -6,7 +6,7 @@ from typing import Any, TypeVar
 import httpx
 from pydantic import BaseModel
 
-from artifact_workflow_runtime.models import LLMRequest, LLMResult
+from artifact_workflow_runtime.models import BackendKind, LLMRequest, LLMResult
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -19,7 +19,14 @@ class OpenAICompatibleLLMBackend:
         self.timeout = timeout
 
     async def complete_json(self, request: LLMRequest, response_model: type[T]) -> tuple[LLMResult, T]:
+        if request.backend != BackendKind.DIRECT_LLM:
+            raise ValueError(f"Direct LLM backend only accepts backend=direct_llm requests, got {request.backend}")
+        forbidden = {item.strip().lower() for item in request.forbidden_inputs}
+        missing_world_guards = {"filesystem", "shell", "git", "hosts", "kubernetes", "network_runtime_state"} - forbidden
+        if missing_world_guards:
+            raise ValueError(f"Direct LLM request is missing world-access guards: {sorted(missing_world_guards)}")
         model_name = str(request.metadata.get("model_override") or self.default_model)
+        user_prompt = request.compiled_prompt()
         payload = {
             "model": model_name,
             "messages": [
@@ -30,7 +37,7 @@ class OpenAICompatibleLLMBackend:
                         "Do not wrap the JSON in markdown fences."
                     ),
                 },
-                {"role": "user", "content": request.prompt},
+                {"role": "user", "content": user_prompt},
             ],
             "temperature": 0,
         }
