@@ -37,14 +37,18 @@ class StrategySelectionMode(str, Enum):
 
     @classmethod
     def coerce(cls, value: object) -> "StrategySelectionMode":
+        if value is None:
+            return cls.RULE_BASED
         if isinstance(value, cls):
             return value
         if isinstance(value, str):
             normalized = value.strip().lower().replace("-", "_")
+            if not normalized:
+                return cls.RULE_BASED
             for item in cls:
                 if item.value == normalized:
                     return item
-        return cls.RULE_BASED
+        raise ValueError(f"Unknown strategy selection mode: {value!r}")
 
 
 class StrategyAdvisorStatus(str, Enum):
@@ -124,6 +128,7 @@ class StrategyCheckpointSignals(RuntimeModel):
 class StrategyAdvisorContext(RuntimeModel):
     task_summary: str
     current_stage: str
+    allowed_signal_names: list[str] = Field(default_factory=list)
     active_strategy: StrategyId | None = None
     previous_strategy_decisions: list[JsonDict] = Field(default_factory=list)
     available_strategies: list[StrategyDefinition] = Field(default_factory=list)

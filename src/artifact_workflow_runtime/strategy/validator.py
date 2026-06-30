@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Iterable
 
 from .catalog import DEFAULT_STRATEGY_CATALOG, StrategyCatalog
+from .signals import ALLOWED_STRATEGY_SIGNAL_NAMES
+
 from .models import (
     LLMStrategyRecommendation,
     StrategyAdvisorStatus,
@@ -13,24 +15,8 @@ from .models import (
 
 _FAILURE_STATUSES = {"failed", "error", "blocked", "needs_repair", "policy_violation", "fail_code"}
 _UNKNOWN_BLOCKER_TERMS = ("unknown", "environment", "runtime", "dependency", "api", "toolchain", "sdk", "install", "blocked")
-_ALLOWED_SIGNAL_PREFIXES = {
-    "current_stage",
-    "execution_status",
-    "verification_status",
-    "acceptance_status",
-    "missing_evidence",
-    "blockers",
-    "repair_count",
-    "task_complexity_hint",
-    "mutation_heavy",
-    "has_tests_obligations",
-    "has_docs_obligations",
-    "has_ci_obligations",
-    "failed_checks",
-    "changed_files_summary",
-    "default",
-    "task_description",
-}
+_ALLOWED_SIGNAL_NAMES = frozenset(ALLOWED_STRATEGY_SIGNAL_NAMES)
+
 
 
 class StrategyDecisionValidator:
@@ -70,13 +56,13 @@ class StrategyDecisionValidator:
             return _reject("confidence must be between 0.0 and 1.0", fallback)
         if not str(recommendation.reason or "").strip():
             return _reject("reason is required", fallback)
-        unknown_signals = _unknown_critical_signals(recommendation.signals_used)
+        unknown_signals = _unknown_signals(recommendation.signals_used)
         if unknown_signals:
             return StrategyValidationResult(
                 accepted=False,
                 final_strategy=fallback,
                 fallback_strategy=fallback,
-                rejection_reason=f"unknown critical signals: {unknown_signals}",
+                rejection_reason=f"unknown signal names: {unknown_signals}",
                 policy_notes=["recommendation_must_use_typed_checkpoint_signals", "fallback_to_rule_based"],
             )
 
@@ -133,13 +119,13 @@ def _contains_any(values: Iterable[str], terms: Iterable[str]) -> bool:
     return any(any(term in str(value).lower() for term in lowered_terms) for value in values)
 
 
-def _unknown_critical_signals(signals_used: Iterable[str]) -> list[str]:
+def _unknown_signals(signals_used: Iterable[str]) -> list[str]:
     unknown: list[str] = []
     for raw in signals_used:
         signal = str(raw or "").strip()
         if not signal:
             continue
-        normalized = signal.split(":", 1)[0].strip().lower()
-        if normalized not in _ALLOWED_SIGNAL_PREFIXES:
+        normalized = signal.lower()
+        if normalized not in _ALLOWED_SIGNAL_NAMES:
             unknown.append(signal)
     return unknown

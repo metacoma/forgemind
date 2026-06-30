@@ -6,6 +6,7 @@ import json
 
 from artifact_workflow_runtime.models import Task
 from artifact_workflow_runtime.runtime_factory import build_controller
+from artifact_workflow_runtime.strategy import StrategySelectionMode
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -14,6 +15,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--title", default=None)
     parser.add_argument("--artifact-dir", default="run-artifacts")
     parser.add_argument("--config", default=None, help="YAML model routing config with stage-based direct_llm/openhands mappings")
+
+    parser.add_argument(
+        "--strategy-selection-mode",
+        choices=[item.value for item in StrategySelectionMode],
+        default=StrategySelectionMode.RULE_BASED.value,
+        help="Strategy selection mode: rule_based, llm_assisted, or hybrid",
+    )
 
     parser.add_argument("--direct-llm-endpoint", required=True)
     parser.add_argument("--direct-llm-model", required=True)
@@ -44,6 +52,7 @@ async def _run(args: argparse.Namespace) -> int:
         conversation_id=args.conversation_id,
         auto_approve=args.auto_approve,
         config_path=args.config,
+        strategy_selection_mode=args.strategy_selection_mode,
     )
     task = Task(title=args.title, description=args.task)
     report = await controller.run(task)

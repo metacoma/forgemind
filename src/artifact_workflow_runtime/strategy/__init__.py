@@ -16,7 +16,7 @@ from .models import (
     StrategyValidationResult,
 )
 from .runtime import active_strategy_prompt_block, merge_strategy_update, record_strategy_checkpoint, record_strategy_checkpoint_async, strategy_metadata
-from .signals import signals_from_snapshot
+from .signals import ALLOWED_STRATEGY_SIGNAL_NAMES, signals_from_snapshot
 from .validator import StrategyDecisionValidator
 
 __all__ = [
@@ -36,6 +36,7 @@ __all__ = [
     "StrategyAdvisorContext",
     "LLMStrategyRecommendation",
     "StrategyValidationResult",
+    "ALLOWED_STRATEGY_SIGNAL_NAMES",
     "signals_from_snapshot",
     "record_strategy_checkpoint",
     "record_strategy_checkpoint_async",

@@ -50,4 +50,5 @@ def build_controller(
         approval_provider=StaticApprovalProvider(approve=auto_approve, reviewer="cli"),
         event_sink=event_sink,
         model_routing=model_routing,
+        strategy_selection_mode=strategy_selection_mode,
     )

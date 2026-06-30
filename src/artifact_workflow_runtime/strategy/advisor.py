@@ -9,6 +9,8 @@ from artifact_workflow_runtime.models.base import RuntimeModel
 from artifact_workflow_runtime.models.state import WorkflowStateSnapshot
 
 from .catalog import DEFAULT_STRATEGY_CATALOG, StrategyCatalog
+from .signals import ALLOWED_STRATEGY_SIGNAL_NAMES
+
 from .models import (
     LLMStrategyRecommendation,
     StrategyAdvisorContext,
@@ -43,6 +45,7 @@ class StrategyContextBuilder:
         return StrategyAdvisorContext(
             task_summary=_task_summary(snapshot),
             current_stage=signals.current_stage,
+            allowed_signal_names=list(ALLOWED_STRATEGY_SIGNAL_NAMES),
             active_strategy=snapshot.active_strategy,
             previous_strategy_decisions=previous,
             available_strategies=self.catalog.list(),
@@ -145,13 +148,16 @@ def _build_strategy_advisor_prompt(context: StrategyAdvisorContext) -> str:
         "selected_strategy": "one exact id from available_strategies",
         "reason": "non-empty string grounded only in checkpoint context",
         "confidence": "number between 0.0 and 1.0",
-        "signals_used": ["signal names from checkpoint_signals / missing_evidence / blockers"],
+        "signals_used": ["exact names from allowed_signal_names only"],
         "constraints": ["constraints preserved by the recommendation"],
     }
     payload = {
         "available_strategies": [item.model_dump(mode="json") for item in context.available_strategies],
+        "allowed_signal_names": list(context.allowed_signal_names),
+        "active_strategy": context.active_strategy.value if isinstance(context.active_strategy, StrategyId) else context.active_strategy,
         "current_active_strategy": context.active_strategy.value if isinstance(context.active_strategy, StrategyId) else context.active_strategy,
         "current_stage": context.current_stage,
+        "task_description": context.task_summary,
         "task_summary": context.task_summary,
         "checkpoint_signals": context.checkpoint_signals.model_dump(mode="json"),
         "missing_evidence": context.missing_evidence,
@@ -174,8 +180,11 @@ def _build_strategy_advisor_prompt(context: StrategyAdvisorContext) -> str:
         "You only recommend which available strategy should guide the next workflow segment.\n"
         "Choose exactly one strategy from the provided StrategyCatalog.\n"
         "Base the recommendation only on the provided checkpoint context and signals.\n"
+        "Use only these exact names in signals_used. Do not invent new signal names.\n"
         "You cannot change lifecycle transitions, verifier requirements, publish/push/merge permissions, or create new strategies.\n"
         "Return strict JSON only. Do not include markdown fences or prose around JSON.\n\n"
+        "Allowed signal names:\n"
+        f"{_format_allowed_signal_names(context.allowed_signal_names)}\n\n"
         "Expected JSON shape:\n"
         f"{json.dumps(schema, ensure_ascii=False, indent=2)}\n\n"
         "Checkpoint context:\n"
@@ -221,3 +230,7 @@ def _unique(items: list[str]) -> list[str]:
         if text and text not in out:
             out.append(text)
     return out
+
+
+def _format_allowed_signal_names(signal_names: list[str]) -> str:
+    return "\n".join(f"- {name}" for name in signal_names)

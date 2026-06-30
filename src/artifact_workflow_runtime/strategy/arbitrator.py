@@ -46,7 +46,7 @@ class StrategyArbitrator:
                     "selected_strategy": selected,
                     "reason": reason,
                     "confidence": _confidence_from_float(recommendation.confidence) if selected != baseline.selected_strategy else baseline.confidence,
-                    "signals_used": _unique([*baseline.signals_used, *recommendation.signals_used]),
+                    "signals_used": _unique([*baseline.signals_used, "llm_recommendation_rejected"]),
                     "constraints": _unique([*baseline.constraints, *recommendation.constraints, *validation.policy_notes, f"strategy_mode={mode.value}", "deterministic_fallback_available"]),
                 }
             ), validation

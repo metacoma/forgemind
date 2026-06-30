@@ -11,7 +11,7 @@ from artifact_workflow_runtime.models import Capability, ExecutionFamily, Execut
 from artifact_workflow_runtime.models.state import WorkflowStateSnapshot
 from artifact_workflow_runtime.openhands_adapter import FakeOpenHandsAdapter
 from artifact_workflow_runtime.stages import WorkflowStageNodes
-from artifact_workflow_runtime.strategy import StrategyArbitrator, StrategyGovernor, StrategyId, StrategySelectionMode
+from artifact_workflow_runtime.strategy import ALLOWED_STRATEGY_SIGNAL_NAMES, StrategyArbitrator, StrategyGovernor, StrategyId, StrategySelectionMode
 from artifact_workflow_runtime.strategy.runtime import record_strategy_checkpoint_async
 
 pytestmark = pytest.mark.asyncio
@@ -95,18 +95,51 @@ async def test_rule_based_mode_skips_llm_advisor_and_uses_baseline(tmp_path) -> 
 
 
 async def test_hybrid_accepts_valid_llm_recommendation(tmp_path) -> None:
-    llm = ScriptedLLMBackend({"strategy_advisor": [{"selected_strategy": "safe_refactor", "reason": "Task text is stabilization/refactor-like.", "confidence": 0.84, "signals_used": ["task_description"], "constraints": ["preserve_existing_runtime_invariants"]}]})
+    llm = ScriptedLLMBackend({"strategy_advisor": [{"selected_strategy": "bdd_incremental", "reason": "Missing behavior and test evidence.", "confidence": 0.8, "signals_used": ["missing_evidence", "has_tests_obligations"], "constraints": ["do_not_expand_scope"]}]})
+    services = _services(tmp_path, llm=llm, mode=StrategySelectionMode.HYBRID)
+    execution = _failed_execution()
+    execution.execution_status = ExecutionStatus.SUCCEEDED
+    execution.ok = True
+    state = WorkflowStateSnapshot(task=Task(description="add parser behavior"), plan=_plan(), execution_result=execution).to_graph_state()
+
+    update = await record_strategy_checkpoint_async(services, state, checkpoint_stage="verify")
+
+    assert update["active_strategy"] == StrategyId.BDD_INCREMENTAL.value
+    payload = services.artifact_store.read_json(update["artifact_ids"][-1])
+    assert payload["llm_recommendation"]["selected_strategy"] == StrategyId.BDD_INCREMENTAL.value
+    assert payload["validation_result"]["accepted"] is True
+    assert payload["decision"]["selected_strategy"] == StrategyId.BDD_INCREMENTAL.value
+    assert any(services.artifact_store.get(artifact_id).kind == "strategy_llm_recommendation_raw" for artifact_id in update["artifact_ids"])
+
+
+
+
+async def test_hybrid_falls_back_on_unknown_llm_signal(tmp_path) -> None:
+    llm = ScriptedLLMBackend({"strategy_advisor": [{"selected_strategy": "bdd_incremental", "reason": "Missing tests.", "confidence": 0.8, "signals_used": ["missing_test_evidence"], "constraints": []}]})
+    services = _services(tmp_path, llm=llm, mode=StrategySelectionMode.HYBRID)
+    state = WorkflowStateSnapshot(task=Task(description="add parser behavior"), plan=_plan()).to_graph_state()
+
+    update = await record_strategy_checkpoint_async(services, state, checkpoint_stage="verify")
+
+    assert update["active_strategy"] == StrategyId.MVP_FIRST.value
+    payload = services.artifact_store.read_json(update["artifact_ids"][-1])
+    assert payload["validation_result"]["accepted"] is False
+    assert "unknown signal" in payload["validation_result"]["rejection_reason"]
+    assert "missing_test_evidence" in payload["validation_result"]["rejection_reason"]
+
+
+async def test_strategy_advisor_prompt_contains_allowed_signal_names(tmp_path) -> None:
+    llm = ScriptedLLMBackend({"strategy_advisor": [{"selected_strategy": "safe_refactor", "reason": "Task text is stabilization-like.", "confidence": 0.8, "signals_used": ["task_description"], "constraints": []}]})
     services = _services(tmp_path, llm=llm, mode=StrategySelectionMode.HYBRID)
     state = WorkflowStateSnapshot(task=Task(description="stabilize runtime internals"), plan=_plan()).to_graph_state()
 
-    update = await record_strategy_checkpoint_async(services, state, checkpoint_stage="plan")
+    await record_strategy_checkpoint_async(services, state, checkpoint_stage="plan")
 
-    assert update["active_strategy"] == StrategyId.SAFE_REFACTOR.value
-    payload = services.artifact_store.read_json(update["artifact_ids"][-1])
-    assert payload["llm_recommendation"]["selected_strategy"] == StrategyId.SAFE_REFACTOR.value
-    assert payload["validation_result"]["accepted"] is True
-    assert payload["decision"]["selected_strategy"] == StrategyId.SAFE_REFACTOR.value
-    assert any(services.artifact_store.get(artifact_id).kind == "strategy_llm_recommendation_raw" for artifact_id in update["artifact_ids"])
+    prompt = llm.calls["strategy_advisor"][0].prompt
+    assert "Allowed signal names:" in prompt
+    assert "Use only these exact names in signals_used" in prompt
+    for signal_name in ALLOWED_STRATEGY_SIGNAL_NAMES:
+        assert f"- {signal_name}" in prompt
 
 
 async def test_hybrid_falls_back_on_unknown_llm_strategy(tmp_path) -> None:

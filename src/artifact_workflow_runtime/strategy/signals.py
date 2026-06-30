@@ -12,6 +12,26 @@ _TEST_TERMS = ("test", "unit", "integration", "smoke", "lint", "build", "compile
 _DOC_TERMS = ("doc", "readme", "example", "snippet", "guide")
 _CI_TERMS = ("ci", "workflow", "github actions", "pipeline", "build script", "job")
 
+ALLOWED_STRATEGY_SIGNAL_NAMES: tuple[str, ...] = (
+    "current_stage",
+    "execution_status",
+    "verification_status",
+    "acceptance_status",
+    "missing_evidence",
+    "blockers",
+    "repair_count",
+    "task_complexity_hint",
+    "mutation_heavy",
+    "has_tests_obligations",
+    "has_docs_obligations",
+    "has_ci_obligations",
+    "failed_checks",
+    "changed_files_summary",
+    "task_description",
+    "active_strategy",
+    "previous_strategy_decisions",
+)
+
 
 def signals_from_snapshot(snapshot: WorkflowStateSnapshot, *, current_stage: str) -> StrategyCheckpointSignals:
     plan = snapshot.plan
