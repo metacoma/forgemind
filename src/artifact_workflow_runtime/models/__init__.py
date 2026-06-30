@@ -42,6 +42,10 @@ from .evidence import (
     EvidenceBundle,
     EvidenceRequirements,
     EvidenceVerification,
+    OpenHandsMachineHandoff,
+)
+from .core import (
+    render_openhands_machine_handoff_schema_block,
 )
 from .contracts import (
     ResponseFieldExpectation,
@@ -133,6 +137,8 @@ __all__ = [
     "EvidenceBundle",
     "EvidenceRequirements",
     "EvidenceVerification",
+    "OpenHandsMachineHandoff",
+    "render_openhands_machine_handoff_schema_block",
     "ResponseFieldExpectation",
     "StructuredResponseContract",
     "OpenHandsStageContract",

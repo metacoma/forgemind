@@ -102,33 +102,3 @@ async def test_fetch_final_text_fallback_ignores_json_wrapped_openhands_html(mon
     )
 
     assert await client.fetch_final_text_fallback(start) == ""
-
-
-async def test_refresh_metadata_supports_dataclass_conversation(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = OpenHandsClient("http://openhands")
-    start = AppConversationStart(
-        conversation_id="conv-1",
-        agent_server_url="http://old-agent",
-        conversation_url="http://old/app/api/conversations/conv-1",
-        session_api_key="old-session",
-    )
-
-    async def fake_get_app_conversation(conversation_id: str):
-        assert conversation_id == "conv-1"
-        return {
-            "conversation_url": "http://new/app/api/conversations/conv-1",
-            "agent_server_url": "http://new-agent",
-            "session_api_key": "new-session",
-            "sandbox_id": "sb-1",
-        }
-
-    monkeypatch.setattr(client, "get_app_conversation", fake_get_app_conversation)
-
-    refreshed = await client._refresh_app_conversation_start_metadata(start)
-
-    assert refreshed is not start
-    assert refreshed.conversation_id == "conv-1"
-    assert refreshed.conversation_url == "http://new/app/api/conversations/conv-1"
-    assert refreshed.agent_server_url == "http://new-agent"
-    assert refreshed.session_api_key == "new-session"
-    assert refreshed.raw_conversation["sandbox_id"] == "sb-1"

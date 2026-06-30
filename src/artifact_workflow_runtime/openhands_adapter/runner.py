@@ -413,8 +413,19 @@ async def run_followup_message_and_collect(
 
     if verbose:
         print(f"[followup] sending message to existing conversation {conversation.conversation_id}", file=sys.stderr)
-    await client.send_message_to_existing_conversation(conversation, prompt, run=True)
-    await emit_event(event_sink, "followup_sent", "transport", "Sent follow-up message to existing conversation", {"conversation_id": conversation.conversation_id, "mode": "followup", "followup": True})
+    send_result = await client.send_message_to_existing_conversation(conversation, prompt, run=True)
+    await emit_event(
+        event_sink,
+        "followup_sent",
+        "transport",
+        "Sent follow-up message to existing conversation",
+        {
+            "conversation_id": conversation.conversation_id,
+            "mode": "followup",
+            "followup": True,
+            "send_result": send_result,
+        },
+    )
 
     final_text: str | None = None
     final_status: str | None = None
