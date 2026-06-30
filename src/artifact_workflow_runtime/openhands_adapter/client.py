@@ -18,6 +18,12 @@ from .models import AppConversationStart, JsonDict, OpenHandsRunResult
 EventCallback = Callable[[JsonDict], None]
 
 SECRET_FIELD_NAMES = {"secrets", "secret", "api_key", "token", "password", "key"}
+OPENHANDS_HTML_MARKERS = ("<!doctype html", "<html", "reactrouter", "window.__reactroutercontext", "let&#x27;s start building", "<title>openhands</title>")
+
+
+def looks_like_openhands_html(text: str) -> bool:
+    lowered = text.strip().lower()
+    return bool(lowered) and any(marker in lowered for marker in OPENHANDS_HTML_MARKERS)
 
 
 def _transport_note(event_sink: EventSink | None, kind: str, message: str, payload: JsonDict | None = None) -> None:
@@ -953,7 +959,7 @@ class OpenHandsClient:
                     data = response.json()
                 except ValueError:
                     continue
-                texts = _recursive_assistant_texts(data)
+                texts = [text for text in _recursive_assistant_texts(data) if not looks_like_openhands_html(text)]
                 if texts:
                     return texts[-1]
         return ""
@@ -1601,9 +1607,18 @@ async def run_conversation_and_collect(
 
             result_text = extract_assistant_result_text(event)
             if result_text.strip():
-                final_text = result_text
-                if terminal_seen and exit_when_terminal:
-                    break
+                if looks_like_openhands_html(result_text):
+                    await emit_event(
+                        event_sink,
+                        "agent_result_html_suppressed",
+                        "transport",
+                        "Suppressed OpenHands web UI HTML returned where agent result text was expected",
+                        {"conversation_id": started.conversation_id},
+                    )
+                else:
+                    final_text = result_text
+                    if terminal_seen and exit_when_terminal:
+                        break
 
             if show_events or raw_events or debug_events:
                 line = format_event(event, raw=raw_events, debug=debug_events)
@@ -1734,9 +1749,18 @@ async def collect_started_conversation(
 
             result_text = extract_assistant_result_text(event)
             if result_text.strip():
-                final_text = result_text
-                if terminal_seen and exit_when_terminal:
-                    break
+                if looks_like_openhands_html(result_text):
+                    await emit_event(
+                        event_sink,
+                        "agent_result_html_suppressed",
+                        "transport",
+                        "Suppressed OpenHands web UI HTML returned where agent result text was expected",
+                        {"conversation_id": conversation.conversation_id},
+                    )
+                else:
+                    final_text = result_text
+                    if terminal_seen and exit_when_terminal:
+                        break
 
             if show_events or raw_events or debug_events:
                 line = format_event(event, raw=raw_events, debug=debug_events)
@@ -1858,9 +1882,18 @@ async def run_followup_message_and_collect(
 
             result_text = extract_assistant_result_text(event)
             if result_text.strip():
-                final_text = result_text
-                if terminal_seen and exit_when_terminal:
-                    break
+                if looks_like_openhands_html(result_text):
+                    await emit_event(
+                        event_sink,
+                        "agent_result_html_suppressed",
+                        "transport",
+                        "Suppressed OpenHands web UI HTML returned where agent result text was expected",
+                        {"conversation_id": conversation.conversation_id},
+                    )
+                else:
+                    final_text = result_text
+                    if terminal_seen and exit_when_terminal:
+                        break
 
             if show_events or raw_events or debug_events:
                 line = format_event(event, raw=raw_events, debug=debug_events)

@@ -1184,6 +1184,8 @@ class VerificationResult(RuntimeModel):
     primary_evidence_artifact_ids: list[str] = Field(default_factory=list)
     raw_evidence_artifact_id: str | None = None
     conversation_id: str | None = None
+    transport_error: bool = False
+    evidence_kind: str = "agent_text"
     mode: VerificationMode = VerificationMode.EVIDENCE_REVIEW
     checks_passed: list[str] = Field(default_factory=list)
     checks_failed: list[str] = Field(default_factory=list)

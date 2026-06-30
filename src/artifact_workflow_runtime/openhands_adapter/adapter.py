@@ -6,6 +6,7 @@ from artifact_workflow_runtime.model_routing import ModelRoutingConfig
 from artifact_workflow_runtime.models import (
     BackendKind,
     EvidenceBundle,
+    BlockerEvidence,
     BlockerKind,
     ExecutionRequest,
     ExecutionResult,
@@ -19,6 +20,7 @@ from artifact_workflow_runtime.models import (
     VerificationMode,
     VerificationRequest,
     VerificationResult,
+    StructuredEvidence,
     WorkPacketKind,
 )
 
@@ -41,6 +43,56 @@ def _classify_run_text(text: str) -> tuple[bool, str]:
     if any(marker in lowered for marker in HTML_MARKERS):
         return True, "html_transport_error"
     return False, "agent_text"
+
+
+def _stage_transport_error_text(*, stage: str, evidence_kind: str, conversation_id: str | None, status: str | None) -> str:
+    conversation = conversation_id or "unknown"
+    last_status = status or "unknown"
+    if evidence_kind == "html_transport_error":
+        cause = (
+            "OpenHands returned the web UI HTML/SPA shell instead of agent result text. "
+            "This usually means the runtime used a UI route or stale/wrong agent-server URL/session key "
+            "instead of the agent conversation/event API. The HTML body was intentionally suppressed and "
+            "must not be treated as verification evidence."
+        )
+    elif evidence_kind == "empty_response":
+        cause = "OpenHands returned no usable agent result text."
+    else:
+        cause = f"OpenHands returned unusable agent result text ({evidence_kind})."
+    return (
+        f"OpenHands transport error during {stage}.\n"
+        f"evidence_kind: {evidence_kind}\n"
+        f"conversation_id: {conversation}\n"
+        f"last_status: {last_status}\n"
+        f"cause: {cause}\n"
+        "raw_response_persisted: false\n"
+    )
+
+
+def _stage_evidence_payload(*, stage: str, run_text: str, transport_error: bool, evidence_kind: str, conversation_id: str | None, status: str | None) -> tuple[str, str, str]:
+    """Return (artifact_kind, evidence_text, summary) for an OpenHands stage.
+
+    UI HTML/SPA fallbacks are transport failures, not operational evidence. Keep
+    them out of evidence artifacts so later context/verification cannot treat a
+    React shell as proof that a check ran.
+    """
+    if not transport_error:
+        return f"{stage}_evidence", run_text, run_text.strip()[:400]
+    text = _stage_transport_error_text(stage=stage, evidence_kind=evidence_kind, conversation_id=conversation_id, status=status)
+    return "openhands_transport_error", text, f"OpenHands did not return usable {stage} evidence."
+
+
+def _add_transport_error_blocker(structured: StructuredEvidence, *, evidence_kind: str) -> StructuredEvidence:
+    if evidence_kind == "agent_text":
+        return structured
+    structured.blockers.append(
+        BlockerEvidence(
+            summary=f"OpenHands transport did not return usable agent evidence: {evidence_kind}",
+            severity="high",
+            blocker_kind=BlockerKind.EXECUTION_FAILURE,
+        )
+    )
+    return structured
 
 
 def _execution_status_from_bundle(*, ok: bool, transport_error: bool, bundle: EvidenceBundle) -> ExecutionStatus:
@@ -195,6 +247,7 @@ class OpenHandsAdapter:
 
     def _evidence_bundle(self, *, text: str, raw_artifact_id: str, request_id: str, ok: bool, summary: str, evidence_kind: str, work_packet_kind: WorkPacketKind, changed_default: bool = False) -> tuple[EvidenceBundle, object]:
         structured = self.evidence_extractor.from_agent_output(text, artifact_id=raw_artifact_id, changed_default=changed_default)
+        structured = _add_transport_error_blocker(structured, evidence_kind=evidence_kind)
         bundle = EvidenceBundle(
             source_backend=BackendKind.OPENHANDS,
             work_packet_kind=work_packet_kind,
@@ -226,14 +279,21 @@ class OpenHandsAdapter:
         )
         transport_error, evidence_kind = _classify_run_text(run.text)
         ok = bool(run.text.strip()) and not transport_error
-        artifact = self.artifact_store.add_text(
-            "observation_evidence",
-            run.text,
-            metadata={"conversation_id": run.conversation_id, "request_id": request.id, "evidence_kind": evidence_kind},
+        artifact_kind, evidence_text, summary = _stage_evidence_payload(
+            stage="observation",
+            run_text=run.text,
+            transport_error=transport_error,
+            evidence_kind=evidence_kind,
+            conversation_id=run.conversation_id,
+            status=run.status,
         )
-        summary = run.text.strip()[:400] if not transport_error else "OpenHands did not return usable observation evidence."
+        artifact = self.artifact_store.add_text(
+            artifact_kind,
+            evidence_text,
+            metadata={"conversation_id": run.conversation_id, "request_id": request.id, "evidence_kind": evidence_kind, "raw_response_persisted": not transport_error},
+        )
         bundle, bundle_artifact = self._evidence_bundle(
-            text=run.text,
+            text=evidence_text,
             raw_artifact_id=artifact.id,
             request_id=request.id,
             ok=ok,
@@ -245,7 +305,7 @@ class OpenHandsAdapter:
             request_id=request.id,
             ok=ok,
             summary=summary,
-            evidence_text=run.text,
+            evidence_text=evidence_text,
             artifacts=[artifact, bundle_artifact],
             structured_evidence=bundle.structured,
             evidence_bundle=bundle,
@@ -266,14 +326,21 @@ class OpenHandsAdapter:
         )
         transport_error, evidence_kind = _classify_run_text(run.text)
         ok = bool(run.text.strip()) and not transport_error
-        artifact = self.artifact_store.add_text(
-            "execution_evidence",
-            run.text,
-            metadata={"conversation_id": run.conversation_id, "request_id": request.id, "evidence_kind": evidence_kind},
+        artifact_kind, evidence_text, summary = _stage_evidence_payload(
+            stage="execution",
+            run_text=run.text,
+            transport_error=transport_error,
+            evidence_kind=evidence_kind,
+            conversation_id=run.conversation_id,
+            status=run.status,
         )
-        summary = run.text.strip()[:400] if not transport_error else "OpenHands did not return usable execution evidence."
+        artifact = self.artifact_store.add_text(
+            artifact_kind,
+            evidence_text,
+            metadata={"conversation_id": run.conversation_id, "request_id": request.id, "evidence_kind": evidence_kind, "raw_response_persisted": not transport_error},
+        )
         bundle, bundle_artifact = self._evidence_bundle(
-            text=run.text,
+            text=evidence_text,
             raw_artifact_id=artifact.id,
             request_id=request.id,
             ok=ok,
@@ -287,7 +354,7 @@ class OpenHandsAdapter:
             ok=ok,
             execution_status=_execution_status_from_bundle(ok=ok, transport_error=transport_error, bundle=bundle),
             summary=summary,
-            evidence_text=run.text,
+            evidence_text=evidence_text,
             artifacts=[artifact, bundle_artifact],
             structured_evidence=bundle.structured,
             evidence_bundle=bundle,
@@ -307,14 +374,21 @@ class OpenHandsAdapter:
         )
         transport_error, evidence_kind = _classify_run_text(run.text)
         ok = bool(run.text.strip()) and not transport_error
-        artifact = self.artifact_store.add_text(
-            "publish_evidence",
-            run.text,
-            metadata={"conversation_id": run.conversation_id, "request_id": request.id, "evidence_kind": evidence_kind},
+        artifact_kind, evidence_text, summary = _stage_evidence_payload(
+            stage="publish",
+            run_text=run.text,
+            transport_error=transport_error,
+            evidence_kind=evidence_kind,
+            conversation_id=run.conversation_id,
+            status=run.status,
         )
-        summary = run.text.strip()[:400] if not transport_error else "OpenHands did not return usable publish evidence."
+        artifact = self.artifact_store.add_text(
+            artifact_kind,
+            evidence_text,
+            metadata={"conversation_id": run.conversation_id, "request_id": request.id, "evidence_kind": evidence_kind, "raw_response_persisted": not transport_error},
+        )
         bundle, bundle_artifact = self._evidence_bundle(
-            text=run.text,
+            text=evidence_text,
             raw_artifact_id=artifact.id,
             request_id=request.id,
             ok=ok,
@@ -326,7 +400,7 @@ class OpenHandsAdapter:
             request_id=request.id,
             ok=ok,
             summary=summary,
-            evidence_text=run.text,
+            evidence_text=evidence_text,
             artifacts=[artifact, bundle_artifact],
             structured_evidence=bundle.structured,
             evidence_bundle=bundle,
@@ -347,14 +421,21 @@ class OpenHandsAdapter:
         )
         transport_error, evidence_kind = _classify_run_text(run.text)
         ok = bool(run.text.strip()) and not transport_error
-        artifact = self.artifact_store.add_text(
-            "repair_evidence",
-            run.text,
-            metadata={"conversation_id": run.conversation_id, "request_id": request.id, "evidence_kind": evidence_kind, "attempt": request.attempt},
+        artifact_kind, evidence_text, summary = _stage_evidence_payload(
+            stage="repair",
+            run_text=run.text,
+            transport_error=transport_error,
+            evidence_kind=evidence_kind,
+            conversation_id=run.conversation_id,
+            status=run.status,
         )
-        summary = run.text.strip()[:400] if not transport_error else "OpenHands did not return usable repair evidence."
+        artifact = self.artifact_store.add_text(
+            artifact_kind,
+            evidence_text,
+            metadata={"conversation_id": run.conversation_id, "request_id": request.id, "evidence_kind": evidence_kind, "attempt": request.attempt, "raw_response_persisted": not transport_error},
+        )
         bundle, bundle_artifact = self._evidence_bundle(
-            text=run.text,
+            text=evidence_text,
             raw_artifact_id=artifact.id,
             request_id=request.id,
             ok=ok,
@@ -368,7 +449,7 @@ class OpenHandsAdapter:
             ok=ok,
             execution_status=_execution_status_from_bundle(ok=ok, transport_error=transport_error, bundle=bundle),
             summary=summary,
-            evidence_text=run.text,
+            evidence_text=evidence_text,
             artifacts=[artifact, bundle_artifact],
             structured_evidence=bundle.structured,
             evidence_bundle=bundle,
@@ -389,14 +470,21 @@ class OpenHandsAdapter:
         )
         transport_error, evidence_kind = _classify_run_text(run.text)
         ok = bool(run.text.strip()) and not transport_error
-        artifact = self.artifact_store.add_text(
-            "world_verification_evidence",
-            run.text,
-            metadata={"conversation_id": run.conversation_id, "request_id": request.id, "evidence_kind": evidence_kind},
+        artifact_kind, evidence_text, summary = _stage_evidence_payload(
+            stage="verification",
+            run_text=run.text,
+            transport_error=transport_error,
+            evidence_kind=evidence_kind,
+            conversation_id=run.conversation_id,
+            status=run.status,
         )
-        summary = run.text.strip()[:400] if not transport_error else "OpenHands did not return usable verification evidence."
+        artifact = self.artifact_store.add_text(
+            artifact_kind,
+            evidence_text,
+            metadata={"conversation_id": run.conversation_id, "request_id": request.id, "evidence_kind": evidence_kind, "raw_response_persisted": not transport_error},
+        )
         bundle, bundle_artifact = self._evidence_bundle(
-            text=run.text,
+            text=evidence_text,
             raw_artifact_id=artifact.id,
             request_id=request.id,
             ok=ok,
@@ -404,7 +492,7 @@ class OpenHandsAdapter:
             evidence_kind=evidence_kind,
             work_packet_kind=WorkPacketKind.VERIFY,
         )
-        passed = _verification_passed_from_bundle(text=run.text, ok=ok, transport_error=transport_error, bundle=bundle)
+        passed = _verification_passed_from_bundle(text=evidence_text, ok=ok, transport_error=transport_error, bundle=bundle)
         checks_passed = request.checks if passed else []
         checks_failed = [] if passed else list(request.checks)
         missing_evidence = ["usable verification evidence"] if transport_error or not run.text.strip() else []
@@ -412,13 +500,15 @@ class OpenHandsAdapter:
             request_id=request.id,
             passed=passed,
             summary=summary,
-            evidence_text=run.text,
+            evidence_text=evidence_text,
             artifacts=[artifact, bundle_artifact],
             structured_evidence=bundle.structured,
             evidence_bundle=bundle,
             primary_evidence_artifact_ids=[bundle_artifact.id],
             raw_evidence_artifact_id=artifact.id,
             conversation_id=run.conversation_id,
+            transport_error=transport_error,
+            evidence_kind=evidence_kind,
             checks_passed=checks_passed,
             checks_failed=checks_failed,
             missing_evidence=missing_evidence,
