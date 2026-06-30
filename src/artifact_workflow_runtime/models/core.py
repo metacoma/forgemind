@@ -154,6 +154,19 @@ class RoutingDecision(RuntimeModel):
     reasoning: str
 
 
+
+
+class ObligationAnalysis(RuntimeModel):
+    id: str = Field(default_factory=lambda: new_id("obligations"))
+    required_test_levels: list[str] = Field(default_factory=list)
+    required_setup_steps: list[str] = Field(default_factory=list)
+    required_environment_conditions: list[str] = Field(default_factory=list)
+    required_publish_actions: list[str] = Field(default_factory=list)
+    completion_requirements: list[str] = Field(default_factory=list)
+    blocker_conditions: list[str] = Field(default_factory=list)
+    reasoning_summary: str
+
+
 class ObservationRequest(RuntimeModel):
     id: str = Field(default_factory=lambda: new_id("observe_req"))
     task_id: str
@@ -380,6 +393,7 @@ class FinalReport(RuntimeModel):
     summary: str
     classification: TaskClassification | None = None
     route: RoutingDecision | None = None
+    obligations: ObligationAnalysis | None = None
     plan: ExecutionPlan | None = None
     policy: PolicyDecision | None = None
     approval: ApprovalRequest | None = None

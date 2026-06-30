@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from artifact_workflow_runtime.models import Capability, ContextPacket, ExecutionPlan, ExecutionResult, PublishResult, Task, TaskClassification
+from artifact_workflow_runtime.models import Capability, ContextPacket, ExecutionPlan, ExecutionResult, ObligationAnalysis, PublishResult, RoutingDecision, Task, TaskClassification
 
 
 ALLOWED_CAPABILITY_VALUES = [cap.value for cap in Capability]
@@ -50,6 +50,18 @@ PLAN_SCHEMA_HINT = {
     "execution_environment": "docker_container|host|cluster",
     "environment_notes": ["string"],
     "reasoning": "string",
+}
+
+
+
+OBLIGATION_SCHEMA_HINT = {
+    "required_test_levels": ["build|unit|integration|smoke|lint"],
+    "required_setup_steps": ["string"],
+    "required_environment_conditions": ["string"],
+    "required_publish_actions": ["commit|push|create_pr|wait_pr_checks|fix_failing_pr_checks"],
+    "completion_requirements": ["string"],
+    "blocker_conditions": ["string"],
+    "reasoning_summary": "string",
 }
 
 VERIFICATION_SCHEMA_HINT = {
@@ -113,7 +125,7 @@ def build_route_prompt(task: Task, classification: TaskClassification) -> str:
     )
 
 
-def build_plan_prompt(task: Task, context_packet: ContextPacket, task_intent: str) -> str:
+def build_plan_prompt(task: Task, context_packet: ContextPacket, task_intent: str, obligations: ObligationAnalysis) -> str:
     return (
         "Produce an execution plan for a controller-driven workflow.\n"
         "You only see text from a ContextPacket.\n"
@@ -133,6 +145,30 @@ def build_plan_prompt(task: Task, context_packet: ContextPacket, task_intent: st
         f"ContextPacket:\n{context_packet.text}\n"
     )
 
+
+
+
+def build_obligation_analysis_prompt(task: Task, classification: TaskClassification, route: RoutingDecision, context_packet: ContextPacket) -> str:
+    return (
+        "Synthesize execution obligations from observed evidence before planning.\n"
+        "You are not producing an execution plan. You are extracting mandatory obligations from the task plus evidence.\n"
+        "Do not weaken or skip evidence-backed requirements.\n"
+        "If the repository evidence shows an integration harness, integration scripts, or setup scripts for runtime dependencies such as Freeplane inside Docker, require them when the change touches the same functional surface.\n"
+        "Prefer semantic reasoning over surface wording.\n"
+        "Return strict JSON matching this shape:\n"
+        f"{json.dumps(OBLIGATION_SCHEMA_HINT, ensure_ascii=False, indent=2)}\n\n"
+        f"Task:\n{task.description}\n\n"
+        "Classification:\n"
+        f"execution_family={classification.execution_family.value}\n"
+        f"task_intent={classification.task_intent}\n"
+        f"capabilities={[cap.value for cap in classification.capabilities]}\n\n"
+        "Route decision:\n"
+        f"needs_repository_observation={route.needs_repository_observation}\n"
+        f"needs_world_observation={route.needs_world_observation}\n"
+        f"needs_fresh_external_research={route.needs_fresh_external_research}\n"
+        f"required_evidence_types={route.required_evidence_types}\n\n"
+        f"ContextPacket:\n{context_packet.text}\n"
+    )
 
 def build_verification_prompt(task: Task, context_packet: ContextPacket, plan: ExecutionPlan, execution: ExecutionResult, publish: PublishResult | None = None) -> str:
     publish_text = publish.evidence_text if publish else "No separate publish step evidence was captured."

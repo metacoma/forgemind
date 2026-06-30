@@ -39,6 +39,17 @@ async def test_controller_emits_stage_events(tmp_path):
                     "reasoning": "Need fresh docs and repo facts before planning.",
                 }
             ],
+            "obligation_analysis": [
+                {
+                    "required_test_levels": ["build", "unit", "integration"],
+                    "required_setup_steps": ["install dependencies inside docker"],
+                    "required_environment_conditions": ["docker_container"],
+                    "required_publish_actions": [],
+                    "completion_requirements": ["evidence-backed integration validation"],
+                    "blocker_conditions": [],
+                    "reasoning_summary": "Observed repo topology implies obligations before planning."
+                }
+            ],
             "planning": [
                 {
                     "summary": "Implement the requested repository change.",
@@ -97,5 +108,6 @@ async def test_controller_emits_stage_events(tmp_path):
     assert ("route", "stage_completed") in stage_kinds
     assert ("research", "stage_completed") in stage_kinds
     assert ("observe", "stage_completed") in stage_kinds
+    assert ("obligations", "stage_completed") in stage_kinds
     assert ("execute", "stage_completed") in stage_kinds
     assert ("finalize", "stage_completed") in stage_kinds

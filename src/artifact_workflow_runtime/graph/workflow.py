@@ -8,6 +8,7 @@ from artifact_workflow_runtime.context import ContextBuilder
 from artifact_workflow_runtime.families import family_requires_evidence_gate
 from artifact_workflow_runtime.llm_backend.prompts import (
     build_classification_prompt,
+    build_obligation_analysis_prompt,
     build_plan_prompt,
     build_route_prompt,
     build_verification_prompt,
@@ -18,6 +19,7 @@ from artifact_workflow_runtime.models import (
     ContextPacket,
     EvidenceVerification,
     ExecutionPlan,
+    ObligationAnalysis,
     ExecutionRequest,
     ExecutionResult,
     LLMRequest,
@@ -36,6 +38,17 @@ from artifact_workflow_runtime.observation import ObservationService
 from artifact_workflow_runtime.policy import ApprovalProvider, PolicyEngine
 from artifact_workflow_runtime.reports import FinalReportBuilder
 from artifact_workflow_runtime.runtime_events import EventSink, emit_event
+from .contracts import (
+    append_artifact_id as _append_artifact_id,
+    effective_task_intent as _effective_task_intent,
+    execution_capabilities as _execution_capabilities,
+    merge_plan_with_obligations as _merge_plan_with_obligations,
+    normalized_completion_status as _normalized_completion_status,
+    plan_intent_mismatch as _plan_intent_mismatch,
+    publish_capabilities as _publish_capabilities,
+    publish_required as _publish_required,
+    render_steps as _render_steps,
+)
 
 try:
     from langgraph.graph import END, StateGraph  # type: ignore
@@ -56,91 +69,6 @@ class WorkflowServices:
     event_sink: EventSink | None = None
 
 
-_ALLOWED_INTENTS = {"implement", "modify", "investigate", "document", "verify"}
-
-
-def _effective_task_intent(classification: TaskClassification) -> str:
-    intent = (classification.task_intent or "").strip().lower()
-    return intent if intent in _ALLOWED_INTENTS else "investigate"
-
-
-def _plan_is_analysis_only(plan: ExecutionPlan) -> bool:
-    text = " ".join([plan.summary, *plan.steps, *plan.success_criteria]).lower()
-    analysis_markers = ("analyze", "design", "document", "outline", "instructions", "review", "draft plan")
-    implementation_markers = ("implement", "add", "modify", "edit", "write code", "create file", "update build", "run test", "compile")
-    has_analysis = any(marker in text for marker in analysis_markers)
-    has_implementation = any(marker in text for marker in implementation_markers)
-    return has_analysis and not has_implementation
-
-
-def _plan_intent_mismatch(classification: TaskClassification, plan: ExecutionPlan) -> str | None:
-    expected = _effective_task_intent(classification)
-    raw_actual = (plan.task_intent or "").strip().lower()
-    raw_deliverable = (plan.deliverable_kind or "").strip().lower()
-    text = " ".join([plan.summary, *plan.steps, *plan.success_criteria]).lower()
-    has_implementation_markers = any(
-        marker in text
-        for marker in ("implement", "add", "modify", "edit", "write code", "create", "update build", "run test", "compile", "fix")
-    )
-    actual = raw_actual if raw_actual in _ALLOWED_INTENTS else ""
-    if actual in {"", "investigate"} and (plan.requires_mutation or plan.must_change_world or has_implementation_markers):
-        actual = "implement"
-    deliverable = raw_deliverable
-    if deliverable in {"", "analysis"} and (plan.requires_mutation or plan.must_change_world or has_implementation_markers):
-        deliverable = "repository_changes" if classification.execution_family.value == "repository_change" else "changes"
-    if expected in {"implement", "modify"}:
-        if actual not in {"implement", "modify"}:
-            return f"Planner degraded a {expected} task into {actual or 'unknown'} intent."
-        if deliverable in {"analysis", "documentation"}:
-            return f"Planner produced {deliverable} deliverable for a {expected} task instead of real changes."
-        if not plan.requires_mutation and not plan.must_change_world and not has_implementation_markers:
-            return f"Planner marked a {expected} task as non-mutating, which conflicts with the requested outcome."
-        if classification.execution_family.value == "repository_change" and not plan.expected_repo_changes and raw_deliverable == "documentation":
-            return "Repository implementation plan does not declare expected repository changes."
-        if _plan_is_analysis_only(plan):
-            return "Planner produced an analysis-only plan for an implementation task."
-    return None
-
-
-def _append_artifact_id(state: WorkflowState, artifact_id: str) -> list[str]:
-    return [*(state.get("artifact_ids") or []), artifact_id]
-
-
-def _publish_required(plan: ExecutionPlan) -> bool:
-    return bool(plan.require_commit or plan.require_push or Capability.REPO_CREATE_PR in plan.capabilities or plan.publication_steps)
-
-
-def _execution_capabilities(plan: ExecutionPlan) -> list[Capability]:
-    return [cap for cap in plan.capabilities if cap is not Capability.REPO_CREATE_PR]
-
-
-def _publish_capabilities(plan: ExecutionPlan) -> list[Capability]:
-    caps = list(_execution_capabilities(plan))
-    if (plan.require_commit or plan.require_push or plan.publication_steps or Capability.REPO_CREATE_PR in plan.capabilities) and Capability.GIT_WRITE not in caps:
-        caps.append(Capability.GIT_WRITE)
-    if (plan.publication_steps or Capability.REPO_CREATE_PR in plan.capabilities) and Capability.REPO_CREATE_PR not in caps:
-        caps.append(Capability.REPO_CREATE_PR)
-    return caps
-
-
-def _render_steps(title: str, steps: list[str]) -> str:
-    if not steps:
-        return f"{title}: none specified\n"
-    return title + ":\n" + "\n".join(f"- {step}" for step in steps) + "\n"
-
-
-def _normalized_completion_status(parsed: EvidenceVerification) -> str:
-    if parsed.completion_status and parsed.completion_status != "partially_completed":
-        return parsed.completion_status
-    if parsed.passed and not parsed.missing_test_levels and not parsed.missing_setup_steps and not parsed.missing_obligations:
-        return "completed"
-    if parsed.passed and (parsed.push_required or parsed.commit_required) and (not parsed.push_done or not parsed.commit_done):
-        return "verified_not_published"
-    if not parsed.passed and (parsed.checks_passed or parsed.checks_failed or parsed.missing_test_levels or parsed.missing_obligations):
-        return "partially_completed"
-    return "blocked" if parsed.missing_evidence and not parsed.checks_passed else ("completed" if parsed.passed else "partially_completed")
-
-
 async def _emit(services: WorkflowServices, kind: str, stage: str, message: str, **payload: Any) -> None:
     await emit_event(services.event_sink, kind, stage, message, payload)
 
@@ -153,7 +81,7 @@ def build_workflow_graph(services: WorkflowServices):
         await _emit(services, "stage_completed", "intake", "Task stored as artifact", artifact_id=artifact.id)
         return {
             "task_artifact": artifact.model_dump(mode="json"),
-            "artifact_ids": _append_artifact_id(state, artifact.id),
+            "artifact_ids": _append_artifact_id(state.get("artifact_ids"), artifact.id),
             "status": "intake_completed",
         }
 
@@ -177,7 +105,7 @@ def build_workflow_graph(services: WorkflowServices):
             "classification_request": request.model_dump(mode="json"),
             "classification_result": result.model_dump(mode="json"),
             "classification": parsed.model_dump(mode="json"),
-            "artifact_ids": _append_artifact_id(state, artifact.id),
+            "artifact_ids": _append_artifact_id(state.get("artifact_ids"), artifact.id),
             "status": "classified",
         }
 
@@ -203,7 +131,7 @@ def build_workflow_graph(services: WorkflowServices):
             "route_request": request.model_dump(mode="json"),
             "route_result": result.model_dump(mode="json"),
             "route_decision": parsed.model_dump(mode="json"),
-            "artifact_ids": _append_artifact_id(state, artifact.id),
+            "artifact_ids": _append_artifact_id(state.get("artifact_ids"), artifact.id),
             "status": "routed",
         }
 
@@ -301,8 +229,43 @@ def build_workflow_graph(services: WorkflowServices):
         )
         return {
             "context_packet": context_packet.model_dump(mode="json"),
-            "artifact_ids": _append_artifact_id(state, artifact.id),
+            "artifact_ids": _append_artifact_id(state.get("artifact_ids"), artifact.id),
             "status": "context_built",
+        }
+
+    async def obligation_analysis_node(state: WorkflowState) -> dict[str, Any]:
+        task = Task.model_validate(state["task"])
+        classification = TaskClassification.model_validate(state["classification"])
+        route = RoutingDecision.model_validate(state["route_decision"])
+        context_packet_raw = state.get("context_packet")
+        if context_packet_raw is None:
+            raise RuntimeError("context_packet missing")
+        context_packet = ContextPacket.model_validate(context_packet_raw)
+        await _emit(services, "stage_started", "obligations", "Synthesizing obligations from evidence before planning", task_id=task.id)
+        request = LLMRequest(
+            kind="obligation_analysis",
+            prompt=build_obligation_analysis_prompt(task, classification, route, context_packet),
+            task_id=task.id,
+            context_packet_id=context_packet.id,
+        )
+        result, parsed = await services.llm_backend.complete_json(request, ObligationAnalysis)
+        artifact = services.artifact_store.add_json("obligation_analysis", parsed.model_dump(mode="json"))
+        await _emit(
+            services,
+            "stage_completed",
+            "obligations",
+            "Obligations synthesized from evidence",
+            required_test_levels=list(parsed.required_test_levels),
+            required_setup_steps=list(parsed.required_setup_steps),
+            required_publish_actions=list(parsed.required_publish_actions),
+            artifact_id=artifact.id,
+        )
+        return {
+            "obligation_request": request.model_dump(mode="json"),
+            "obligation_result": result.model_dump(mode="json"),
+            "obligations": parsed.model_dump(mode="json"),
+            "artifact_ids": _append_artifact_id(state.get("artifact_ids"), artifact.id),
+            "status": "obligations_synthesized",
         }
 
     async def plan_node(state: WorkflowState) -> dict[str, Any]:
@@ -313,13 +276,18 @@ def build_workflow_graph(services: WorkflowServices):
         if context_packet_raw is None:
             raise RuntimeError("context_packet missing")
         context_packet = ContextPacket.model_validate(context_packet_raw)
+        obligations_raw = state.get("obligations")
+        if obligations_raw is None:
+            raise RuntimeError("obligations missing")
+        obligations = ObligationAnalysis.model_validate(obligations_raw)
         request = LLMRequest(
             kind="planning",
-            prompt=build_plan_prompt(task, context_packet, _effective_task_intent(classification)),
+            prompt=build_plan_prompt(task, context_packet, _effective_task_intent(classification), obligations),
             task_id=task.id,
             context_packet_id=context_packet.id,
         )
         result, parsed = await services.llm_backend.complete_json(request, ExecutionPlan)
+        parsed = _merge_plan_with_obligations(parsed, obligations)
         artifact = services.artifact_store.add_json("execution_plan", parsed.model_dump(mode="json"))
         await _emit(
             services,
@@ -336,7 +304,7 @@ def build_workflow_graph(services: WorkflowServices):
             "plan_request": request.model_dump(mode="json"),
             "plan_result": result.model_dump(mode="json"),
             "plan": parsed.model_dump(mode="json"),
-            "artifact_ids": _append_artifact_id(state, artifact.id),
+            "artifact_ids": _append_artifact_id(state.get("artifact_ids"), artifact.id),
             "status": "planned",
         }
 
@@ -397,7 +365,7 @@ def build_workflow_graph(services: WorkflowServices):
         )
         return {
             "policy_decision": decision.model_dump(mode="json"),
-            "artifact_ids": _append_artifact_id(state, artifact.id),
+            "artifact_ids": _append_artifact_id(state.get("artifact_ids"), artifact.id),
             "status": "policy_checked",
         }
 
@@ -422,7 +390,7 @@ def build_workflow_graph(services: WorkflowServices):
         await _emit(services, "stage_completed", "approval", "Approval resolved", approved=reviewed.approved, reviewer=reviewed.reviewer, artifact_id=artifact.id)
         return {
             "approval_request": reviewed.model_dump(mode="json"),
-            "artifact_ids": _append_artifact_id(state, artifact.id),
+            "artifact_ids": _append_artifact_id(state.get("artifact_ids"), artifact.id),
             "status": "approval_resolved",
         }
 
@@ -604,7 +572,20 @@ def build_workflow_graph(services: WorkflowServices):
             raw_text = parsed.model_dump_json(indent=2)
             verification_artifact = services.artifact_store.add_json("verification_assessment", parsed.model_dump(mode="json"))
             artifact_ids.append(verification_artifact.id)
-            completion_status = _normalized_completion_status(parsed)
+            completion_status = _normalized_completion_status(
+                parsed.passed,
+                parsed.missing_evidence,
+                parsed.checks_passed,
+                parsed.checks_failed,
+                parsed.missing_test_levels,
+                parsed.missing_setup_steps,
+                parsed.missing_obligations,
+                parsed.commit_required,
+                parsed.push_required,
+                parsed.commit_done,
+                parsed.push_done,
+                parsed.completion_status,
+            )
             result = VerificationResult(
                 request_id=request.id,
                 passed=parsed.passed,
@@ -651,7 +632,20 @@ def build_workflow_graph(services: WorkflowServices):
                 metadata={"request_id": llm_request.id, "backend": llm_result.backend, "model": llm_result.model},
             )
             artifact_ids.extend([verification_artifact.id, llm_artifact.id])
-            completion_status = _normalized_completion_status(parsed)
+            completion_status = _normalized_completion_status(
+                parsed.passed,
+                parsed.missing_evidence,
+                parsed.checks_passed,
+                parsed.checks_failed,
+                parsed.missing_test_levels,
+                parsed.missing_setup_steps,
+                parsed.missing_obligations,
+                parsed.commit_required,
+                parsed.push_required,
+                parsed.commit_done,
+                parsed.push_done,
+                parsed.completion_status,
+            )
             request = VerificationRequest(
                 execution_result_id=execution.id,
                 execution_family=plan.execution_family,
@@ -719,6 +713,7 @@ def build_workflow_graph(services: WorkflowServices):
             task=task,
             classification=TaskClassification.model_validate(state["classification"]) if state.get("classification") else None,
             route=RoutingDecision.model_validate(state["route_decision"]) if state.get("route_decision") else None,
+            obligations=ObligationAnalysis.model_validate(state["obligations"]) if state.get("obligations") else None,
             plan=ExecutionPlan.model_validate(state["plan"]) if state.get("plan") else None,
             policy=PolicyDecision.model_validate(state["policy_decision"]) if state.get("policy_decision") else None,
             approval=ApprovalRequest.model_validate(state["approval_request"]) if state.get("approval_request") else None,
@@ -733,7 +728,7 @@ def build_workflow_graph(services: WorkflowServices):
         await _emit(services, "stage_completed", "finalize", "Final report ready", status=report.status, artifact_id=artifact.id)
         return {
             "final_report": report.model_dump(mode="json"),
-            "artifact_ids": _append_artifact_id(state, artifact.id),
+            "artifact_ids": _append_artifact_id(state.get("artifact_ids"), artifact.id),
             "status": report.status,
         }
 
@@ -744,6 +739,7 @@ def build_workflow_graph(services: WorkflowServices):
     graph.add_node("research", research_node)
     graph.add_node("observe", observe_node)
     graph.add_node("build_context", build_context_node)
+    graph.add_node("obligations", obligation_analysis_node)
     graph.add_node("plan", plan_node)
     graph.add_node("policy", policy_node)
     graph.add_node("approval", approval_node)
@@ -758,7 +754,8 @@ def build_workflow_graph(services: WorkflowServices):
     graph.add_conditional_edges("route", route_next, {"research": "research", "observe": "observe", "build_context": "build_context"})
     graph.add_conditional_edges("research", research_next, {"observe": "observe", "build_context": "build_context"})
     graph.add_edge("observe", "build_context")
-    graph.add_edge("build_context", "plan")
+    graph.add_edge("build_context", "obligations")
+    graph.add_edge("obligations", "plan")
     graph.add_edge("plan", "policy")
     graph.add_conditional_edges("policy", policy_next, {"approval": "approval", "execute": "execute", "finalize": "finalize"})
     graph.add_conditional_edges("approval", approval_next, {"execute": "execute", "finalize": "finalize"})

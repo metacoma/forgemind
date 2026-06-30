@@ -19,6 +19,9 @@ class WorkflowState(TypedDict, total=False):
     observation_request: JsonDict | None
     observation_result: JsonDict | None
     context_packet: JsonDict | None
+    obligation_request: JsonDict | None
+    obligation_result: JsonDict | None
+    obligations: JsonDict | None
     plan_request: JsonDict | None
     plan_result: JsonDict | None
     plan: JsonDict | None

@@ -20,7 +20,7 @@ DEFAULT_TASK = (
     "Сначала собери факты через observation, затем спланируй и только потом меняй мир.\n"
     "Всегда оставляй evidence, changed files, commands и verification summary."
 )
-STAGES = ["intake", "classify", "route", "research", "observe", "build_context", "plan", "policy", "approval", "execute", "publish", "verify", "finalize"]
+STAGES = ["intake", "classify", "route", "research", "observe", "build_context", "obligations", "plan", "policy", "approval", "execute", "publish", "verify", "finalize"]
 class RuntimeEventMessage(Message):
     def __init__(self, event: RuntimeEvent) -> None:
         self.event = event
@@ -727,6 +727,12 @@ class ForgeMindTUI(App[None]):
                     "",
                     "Observation result:",
                     json.dumps(self.final_report.observation.model_dump(mode="json"), ensure_ascii=False, indent=2),
+                ]
+            elif stage == "obligations" and getattr(self.final_report, "obligations", None) is not None:
+                parts += [
+                    "",
+                    "Obligation analysis:",
+                    json.dumps(self.final_report.obligations.model_dump(mode="json"), ensure_ascii=False, indent=2),
                 ]
             elif stage == "plan" and self.final_report.plan is not None:
                 parts += [

@@ -40,6 +40,17 @@ async def test_workflow_mvp_runs_end_to_end(tmp_path) -> None:
                     "reasoning": "Need repository evidence before planning.",
                 }
             ],
+            "obligation_analysis": [
+                {
+                    "required_test_levels": ["unit"],
+                    "required_setup_steps": [],
+                    "required_environment_conditions": ["docker_container"],
+                    "required_publish_actions": [],
+                    "completion_requirements": ["run pytest target"],
+                    "blocker_conditions": [],
+                    "reasoning_summary": "Observation evidence implies unit validation only for this narrow fix."
+                }
+            ],
             "planning": [
                 {
                     "summary": "Edit failing code path and validate",
@@ -127,6 +138,17 @@ async def test_route_analysis_can_require_repo_observation_even_if_classifier_sa
                     "reasoning": "Need repository observation before planning.",
                 }
             ],
+            "obligation_analysis": [
+                {
+                    "required_test_levels": ["build", "unit", "integration"],
+                    "required_setup_steps": ["install dependencies inside docker"],
+                    "required_environment_conditions": ["docker_container"],
+                    "required_publish_actions": [],
+                    "completion_requirements": ["integration validation for new client"],
+                    "blocker_conditions": [],
+                    "reasoning_summary": "Evidence shows a new client should respect existing validation topology."
+                }
+            ],
             "planning": [
                 {
                     "summary": "Implement the new client after inspecting existing clients",
@@ -201,6 +223,17 @@ async def test_route_analysis_can_require_fresh_external_research_before_plannin
                     "research_targets": ["gRPC C++ official docs", "protobuf C++ generation docs"],
                     "observation_focus": ["inspect existing clients", "inspect build files"],
                     "reasoning": "Need both fresh docs and repo evidence before planning.",
+                }
+            ],
+            "obligation_analysis": [
+                {
+                    "required_test_levels": ["build", "unit", "integration"],
+                    "required_setup_steps": ["install Freeplane inside docker if integration harness requires it"],
+                    "required_environment_conditions": ["docker_container"],
+                    "required_publish_actions": [],
+                    "completion_requirements": ["integration validation using current repo harness"],
+                    "blocker_conditions": [],
+                    "reasoning_summary": "Research plus repo evidence imply integration validation before completion."
                 }
             ],
             "planning": [
