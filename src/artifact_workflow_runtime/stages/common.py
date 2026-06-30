@@ -19,6 +19,7 @@ from artifact_workflow_runtime.models import (
     AcceptanceDecision,
     ApprovalRequest,
     BackendKind,
+    BlockerKind,
     Capability,
     ContextPacket,
     EvidenceVerification,
@@ -45,7 +46,7 @@ from artifact_workflow_runtime.models import (
     WorkPacketKind,
 )
 from artifact_workflow_runtime.models.state import ControllerDecision, StageTransition, WorkflowState, WorkflowStateSnapshot, WorkflowStatus
-from artifact_workflow_runtime.lifecycle import PipelineLoopDecision, PipelineReentryTarget
+from artifact_workflow_runtime.lifecycle import PipelineLoopDecision, PipelineReentryTarget, PipelineLoopTriggerKind
 from artifact_workflow_runtime.strategy import (
     active_strategy_prompt_block as _active_strategy_prompt_block,
     merge_strategy_update as _merge_strategy_update,
@@ -157,6 +158,102 @@ def _unique(items: list[str]) -> list[str]:
         out.append(text)
     return out
 
+
+
+_REPAIRABLE_FAILURE_TERMS = (
+    "build failure",
+    "build failed",
+    "compile failed",
+    "compiler",
+    "error cs",
+    "cs0",
+    "test failed",
+    "tests failed",
+    "unit test",
+    "execution failure",
+    "namespace",
+    "does not exist",
+    "dotnet build",
+    "dotnet test",
+)
+
+_ENVIRONMENT_BLOCKER_KINDS = {
+    BlockerKind.MISSING_ENVIRONMENT_DEPENDENCY,
+    BlockerKind.MISSING_RUNTIME_PREREQUISITE,
+    BlockerKind.INTEGRATION_ENVIRONMENT_UNAVAILABLE,
+}
+
+
+def _execution_repair_failure_summaries(execution: ExecutionResult | None) -> list[str]:
+    """Return concrete execution/build/test failures that should route to repair.
+
+    This intentionally ignores deferred publish blockers and pure environment
+    blockers. A broken build, compiler error, failed unit check, or
+    execution_failure blocker is repairable work and must not be sent through
+    pipeline re-entry/finalize before bounded repair attempts are exhausted.
+    """
+
+    if execution is None:
+        return []
+    failures: list[str] = []
+    if execution.stage_failure is not None:
+        failures.append(execution.stage_failure.summary)
+    if not execution.ok:
+        failures.append(execution.summary or "Execution result did not complete successfully.")
+
+    status = str(getattr(execution.execution_status, "value", execution.execution_status) or "").lower()
+    if status in {"failed", "blocked"}:
+        failures.append(execution.summary or f"Execution status is {status}.")
+
+    evidence = execution.structured_evidence
+    for item in evidence.tests:
+        item_status = str(getattr(item, "status", "") or "").lower()
+        if item.passed is False or item_status in {"failed", "error"}:
+            name = str(item.name or item.command or "failed execution check")
+            excerpt = str(item.output_excerpt or "").strip()
+            failures.append(f"{name}: {excerpt}" if excerpt else name)
+
+    for item in evidence.commands_run:
+        if item.exit_code is not None and item.exit_code != 0:
+            command_text = str(item.command or "command").strip()
+            output = str(item.output_excerpt or "").strip()
+            combined = f"{command_text} {output}".lower()
+            if any(term in combined for term in _REPAIRABLE_FAILURE_TERMS):
+                failures.append(f"{command_text}: {output}" if output else command_text)
+
+    for blocker in evidence.blockers:
+        summary = str(blocker.summary or "").strip()
+        kind = _blocker_kind_value(getattr(blocker, "blocker_kind", BlockerKind.GENERIC))
+        if _deferred_publish_summary(summary):
+            continue
+        if kind in {_blocker_kind_value(item) for item in _ENVIRONMENT_BLOCKER_KINDS}:
+            continue
+        lowered = summary.lower()
+        if kind in {BlockerKind.EXECUTION_FAILURE.value, BlockerKind.TEST_FAILURE.value} or any(term in lowered for term in _REPAIRABLE_FAILURE_TERMS):
+            failures.append(summary)
+    return _unique(failures)
+
+
+def _blocker_kind_value(value: object) -> str:
+    return str(getattr(value, "value", value) or "").lower()
+
+
+def _deferred_publish_summary(summary: str) -> bool:
+    text = str(summary or "").lower()
+    publish_terms = ("commit", "committed", "push", "pushed", "pull request", " pr", "pr ", "create_pr", "open_pull_request", "wait_pr_checks")
+    deferral_terms = ("forbidden", "deferred", "publish", "publisher", "not been", "not run yet", "has not", "missing evidence")
+    return any(term in text for term in publish_terms) and any(term in text for term in deferral_terms)
+
+
+def _pipeline_continue_decision(source_stage: str, reason: str) -> PipelineLoopDecision:
+    return PipelineLoopDecision(
+        source_stage=source_stage,
+        target_stage=PipelineReentryTarget.CONTINUE,
+        trigger_kind=PipelineLoopTriggerKind.NONE,
+        reason=reason,
+        automatic=False,
+        allowed=True,
+    )
 
 def _publish_failed_check_names(publish: PublishResult) -> list[str]:
     names: list[str] = []

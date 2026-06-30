@@ -144,29 +144,35 @@ class ExecutionStageMixin:
             strategy_update = await _record_strategy_checkpoint(services, state, checkpoint_stage="repair")
             strategy_state = dict(state)
             strategy_state.update(strategy_update)
-            strategy_block = _active_strategy_prompt_block(services, strategy_state)
             attempt = len(state.get("repair_results") or []) + 1
+            execution_failures = _execution_repair_failure_summaries(execution)
             if publish is not None:
                 failed_checks = _publish_failed_check_names(publish)
                 blocker_summaries = _publish_blocker_summaries(publish)
                 publish_summary = publish.summary
+                failure_source = "publish/PR checks"
             else:
                 qa_review = state.get("qa_review_result") or {}
                 verification = state.get("verification_result") or {}
-                failed_checks = list(qa_review.get("failing_checks") or verification.get("checks_failed") or [])
-                blocker_summaries = list(qa_review.get("environment_blockers") or verification.get("missing_evidence") or [])
+                failed_checks = [*execution_failures, *list(qa_review.get("failing_checks") or verification.get("checks_failed") or [])]
+                blocker_summaries = [*execution_failures, *list(qa_review.get("environment_blockers") or verification.get("missing_evidence") or [])]
                 publish_summary = "No publish result; repairing after review/QA failure."
+                failure_source = "execution/review/QA failure"
+            failed_checks = _unique(failed_checks)
+            blocker_summaries = _unique(blocker_summaries)
+            strategy_block = _active_strategy_prompt_block(services, strategy_state)
             await _emit(services, "stage_started", "repair", "Running bounded repair packet after failed publish/check evidence", task_id=task.id, attempt=attempt, failed_checks=failed_checks)
             prompt = (
-                "You are performing a bounded repair packet after publish/PR checks reported failures.\n"
+                f"You are performing a bounded repair packet after {failure_source}.\n"
                 "Do not commit, push, create or update PRs, wait PR checks, or choose the next workflow step.\n"
-                "Make only the smallest source/test changes needed to address the controller-provided failed checks, then run the relevant local checks and return structured evidence.\n\n"
+                "Make only the smallest source/test changes needed to address the controller-provided failed checks, then run the relevant local checks and return structured evidence.\n"
+                "If the failure is a build/compiler/test failure, inspect the exact generated/types involved and repair that failure before expanding scope.\n\n"
                 f"Task: {task.description}\n\n"
-                f"{strategy_block}\n\n"
                 f"Failed checks: {failed_checks}\n"
-                f"Publish blockers: {blocker_summaries}\n"
+                f"Blockers: {blocker_summaries}\n"
                 f"Previous execution summary: {execution.summary}\n"
                 f"Publish summary: {publish_summary}\n\n"
+                f"{strategy_block}\n\n"
                 f"Plan summary: {plan.summary}\n"
                 "Plan steps:\n" + "\n".join(f"- {step}" for step in plan.steps) + "\n\n"
                 "Return changed files, commands run, test results, blockers, and repair summary as structured evidence."
@@ -186,12 +192,7 @@ class ExecutionStageMixin:
                 scope_constraints=["do not choose next workflow step", "do not expand task scope", "do not commit/push/create PR", "repair only controller-provided failures"],
                 context_packet_id=context_packet.id if context_packet else None,
                 artifact_ids=list(strategy_state.get("artifact_ids") or []),
-                metadata={
-                    "model_slot": "execute",
-                    "model_override": _openhands_model_for(services, "execute"),
-                    "repair_attempt": attempt,
-                    **_strategy_metadata(services, strategy_state),
-                },
+                metadata={"model_slot": "execute", "model_override": _openhands_model_for(services, "execute"), "repair_attempt": attempt, **_strategy_metadata(services, strategy_state)},
             )
             result = await services.openhands_adapter.repair(request)
             artifact_ids = list(strategy_state.get("artifact_ids") or [])

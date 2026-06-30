@@ -31,7 +31,12 @@ class ReviewQAStageMixin:
             status = "policy_violation"
             summary_parts.append(lifecycle.reason)
             failing_checks.extend(item.code for item in lifecycle.violations)
-        if execution.stage_failure is not None and status == "pass":
+        repairable_failures = _execution_repair_failure_summaries(execution)
+        if repairable_failures and status == "pass":
+            status = "fail_code"
+            summary_parts.append("Execution produced repairable build/test/code failures: " + "; ".join(repairable_failures))
+            failing_checks.extend(repairable_failures)
+        elif execution.stage_failure is not None and status == "pass":
             status = "fail_code"
             summary_parts.append(execution.stage_failure.summary)
         # Missing derived deliverables are important, but they should flow into
@@ -217,21 +222,29 @@ class ReviewQAStageMixin:
                 completion_status=completion_status,
             )
 
-        review = _qa_review_from_verification(task_id=task.id, result=result, report=report)
+        review = _qa_review_from_verification(task_id=task.id, result=result, report=report, execution=execution)
         review_artifact = services.artifact_store.add_json("qa_review_result", review.model_dump(mode="json"), metadata={"task_id": task.id, "status": review.status})
         artifact_ids.append(review_artifact.id)
         kernel = services.runtime_kernel or RuntimeKernel()
         selected_next = "acceptance" if review.status in {"pass", "fail_env"} else ("repair" if review.status == "fail_code" else "finalize")
-        loop_decision = kernel.evaluate_pipeline_reentry(
-            source_stage="verify",
-            plan=plan,
-            obligations=ObligationAnalysis.model_validate(state["obligations"]) if state.get("obligations") else None,
-            verification=result,
-            loop_decisions=_pipeline_loop_decisions(state),
-        )
-        reentry_target = _reentry_target(loop_decision)
-        if reentry_target is not None:
-            selected_next = reentry_target
+        if review.status == "fail_code":
+            loop_decision = _pipeline_continue_decision(
+                "qa_review",
+                "Repairable execution/build/test failure detected; bounded repair takes precedence over pipeline re-entry budget.",
+            )
+            reentry_target = None
+            selected_next = "repair"
+        else:
+            loop_decision = kernel.evaluate_pipeline_reentry(
+                source_stage="verify",
+                plan=plan,
+                obligations=ObligationAnalysis.model_validate(state["obligations"]) if state.get("obligations") else None,
+                verification=result,
+                loop_decisions=_pipeline_loop_decisions(state),
+            )
+            reentry_target = _reentry_target(loop_decision)
+            if reentry_target is not None:
+                selected_next = reentry_target
         await _emit(services, "stage_completed", "qa_review", "QA review completed", status=review.status, next_stage=selected_next, summary=review.summary)
         transition_artifacts = [review_artifact.id]
         transition_artifacts.extend(item for item in artifact_ids if item not in (state.get("artifact_ids") or []))
@@ -257,17 +270,17 @@ class ReviewQAStageMixin:
         return update
 
     def qa_review_next(self, state: WorkflowState) -> str:
+        review = QAReview.model_validate(state["qa_review_result"])
+        if review.status == "fail_code":
+            return "repair"
         loop_decisions = state.get("pipeline_loop_decisions") or []
         if loop_decisions:
             loop = PipelineLoopDecision.model_validate(loop_decisions[-1])
             target = _reentry_target(loop)
             if target in {"research", "observe", "build_context", "obligations", "plan", "finalize"}:
                 return target
-        review = QAReview.model_validate(state["qa_review_result"])
         if review.status in {"pass", "fail_env"}:
             return "acceptance"
-        if review.status == "fail_code":
-            return "repair"
         return "finalize"
 
 
@@ -295,8 +308,14 @@ def _missing_deliverables(done_contract: DoneContract, execution: ExecutionResul
     return _unique(missing)
 
 
-def _qa_review_from_verification(*, task_id: str, result: VerificationResult, report: QAExecutionReport) -> QAReview:
+def _qa_review_from_verification(*, task_id: str, result: VerificationResult, report: QAExecutionReport, execution: ExecutionResult | None = None) -> QAReview:
     env_blockers = [item.name for item in report.items if item.status == "blocked"]
+    repairable_execution_failures = _execution_repair_failure_summaries(execution)
+    code_failure_text = " ".join([result.summary, *result.checks_failed, *repairable_execution_failures]).lower()
+    code_like = bool(repairable_execution_failures) or any(
+        marker in code_failure_text
+        for marker in ("build", "compile", "compiler", "cs0", "dotnet test", "unit test", "test failed", "execution failure")
+    )
     environment_like = bool(env_blockers)
     environment_like = environment_like or bool(result.missing_setup_steps)
     environment_like = environment_like or any(level in {"integration", "smoke", "e2e"} for level in result.missing_test_levels)
@@ -307,9 +326,11 @@ def _qa_review_from_verification(*, task_id: str, result: VerificationResult, re
     )
     if result.passed:
         status = "pass"
+    elif code_like:
+        status = "fail_code"
     elif environment_like:
         status = "fail_env"
     else:
-        status = "fail_code"
-    failing = [*result.checks_failed, *env_blockers, *result.missing_test_levels, *result.missing_setup_steps]
+        status = "fail_requirements"
+    failing = [*result.checks_failed, *env_blockers, *result.missing_test_levels, *result.missing_setup_steps, *repairable_execution_failures]
     return QAReview(task_id=task_id, status=status, summary=result.summary, failing_checks=_unique(failing), environment_blockers=_unique(env_blockers))
