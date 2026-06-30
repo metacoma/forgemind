@@ -3,14 +3,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from pathlib import Path
 
-from artifact_workflow_runtime.controller import WorkflowController
 from artifact_workflow_runtime.models import Task
-from artifact_workflow_runtime.llm_backend import OpenAICompatibleLLMBackend
-from artifact_workflow_runtime.openhands_adapter import OpenHandsAdapter, OpenHandsInstance
-from artifact_workflow_runtime.policy import StaticApprovalProvider
-from artifact_workflow_runtime.artifacts import ArtifactStore
+from artifact_workflow_runtime.runtime_factory import build_controller
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -18,6 +13,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--task", required=True, help="User task text")
     parser.add_argument("--title", default=None)
     parser.add_argument("--artifact-dir", default="run-artifacts")
+    parser.add_argument("--config", default=None, help="YAML model routing config with stage-based direct_llm/openhands mappings")
 
     parser.add_argument("--direct-llm-endpoint", required=True)
     parser.add_argument("--direct-llm-model", required=True)
@@ -35,22 +31,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def _run(args: argparse.Namespace) -> int:
-    artifact_store = ArtifactStore(args.artifact_dir)
-    llm = OpenAICompatibleLLMBackend(args.direct_llm_endpoint, args.direct_llm_model, api_key=args.direct_llm_api_key)
-    openhands_instance = OpenHandsInstance(
-        args.openhands_endpoint,
-        api_key=args.openhands_api_key,
-        default_model=args.openhands_model,
-        reuse_sandbox=args.reuse,
+    controller = build_controller(
+        artifact_dir=args.artifact_dir,
+        direct_llm_endpoint=args.direct_llm_endpoint,
+        direct_llm_model=args.direct_llm_model,
+        direct_llm_api_key=args.direct_llm_api_key,
+        openhands_endpoint=args.openhands_endpoint,
+        openhands_model=args.openhands_model,
+        openhands_api_key=args.openhands_api_key,
+        reuse=args.reuse,
         sandbox_id=args.sandbox_id,
         conversation_id=args.conversation_id,
-    )
-    openhands_adapter = OpenHandsAdapter(openhands_instance, artifact_store)
-    controller = WorkflowController(
-        llm_backend=llm,
-        openhands_adapter=openhands_adapter,
-        artifact_root=Path(args.artifact_dir),
-        approval_provider=StaticApprovalProvider(approve=args.auto_approve, reviewer="cli"),
+        auto_approve=args.auto_approve,
+        config_path=args.config,
     )
     task = Task(title=args.title, description=args.task)
     report = await controller.run(task)

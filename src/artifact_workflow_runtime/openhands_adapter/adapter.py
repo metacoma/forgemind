@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from artifact_workflow_runtime.artifacts import ArtifactStore
+from artifact_workflow_runtime.model_routing import ModelRoutingConfig
 from artifact_workflow_runtime.models import (
     ExecutionRequest,
     ExecutionResult,
@@ -27,13 +28,26 @@ def _classify_run_text(text: str) -> tuple[bool, str]:
 
 
 class OpenHandsAdapter:
-    def __init__(self, instance: OpenHandsInstance, artifact_store: ArtifactStore) -> None:
+    def __init__(self, instance: OpenHandsInstance, artifact_store: ArtifactStore, model_routing: ModelRoutingConfig | None = None) -> None:
         self.instance = instance
         self.artifact_store = artifact_store
+        self.model_routing = model_routing
+
+    def _resolve_stage_model(self, metadata: dict[str, object] | None, fallback_slot: str) -> str | None:
+        metadata = metadata or {}
+        explicit = metadata.get("model_override")
+        if isinstance(explicit, str) and explicit.strip():
+            return explicit.strip()
+        slot_obj = metadata.get("model_slot")
+        slot = str(slot_obj).strip() if isinstance(slot_obj, str) and slot_obj.strip() else fallback_slot
+        default_model = getattr(self.instance, "default_model", None)
+        return self.model_routing.resolve_openhands(slot, default_model) if self.model_routing else default_model
 
     async def observe(self, request: ObservationRequest) -> ObservationResult:
+        slot = "research" if request.metadata.get("source") == "fresh_external_research" else "observe"
         run = await self.instance.run(
             prompt=request.prompt,
+            model=self._resolve_stage_model(request.metadata, slot),
             title=f"observe:{request.task_id}",
         )
         transport_error, evidence_kind = _classify_run_text(run.text)
@@ -57,6 +71,7 @@ class OpenHandsAdapter:
     async def execute(self, request: ExecutionRequest) -> ExecutionResult:
         run = await self.instance.run(
             prompt=request.prompt,
+            model=self._resolve_stage_model(request.metadata, "execute"),
             title=f"execute:{request.task_id}",
         )
         transport_error, evidence_kind = _classify_run_text(run.text)
@@ -80,6 +95,7 @@ class OpenHandsAdapter:
     async def verify(self, request: VerificationRequest) -> VerificationResult:
         run = await self.instance.run(
             prompt=request.prompt,
+            model=self._resolve_stage_model(request.metadata, "verify"),
             title="verify",
         )
         transport_error, evidence_kind = _classify_run_text(run.text)

@@ -38,6 +38,7 @@ from artifact_workflow_runtime.observation import ObservationService
 from artifact_workflow_runtime.policy import ApprovalProvider, PolicyEngine
 from artifact_workflow_runtime.reports import FinalReportBuilder
 from artifact_workflow_runtime.runtime_events import EventSink, emit_event
+from artifact_workflow_runtime.model_routing import ModelRoutingConfig
 from .contracts import (
     append_artifact_id as _append_artifact_id,
     effective_task_intent as _effective_task_intent,
@@ -67,10 +68,23 @@ class WorkflowServices:
     approval_provider: ApprovalProvider
     final_report_builder: FinalReportBuilder
     event_sink: EventSink | None = None
+    model_routing: ModelRoutingConfig | None = None
 
 
 async def _emit(services: WorkflowServices, kind: str, stage: str, message: str, **payload: Any) -> None:
     await emit_event(services.event_sink, kind, stage, message, payload)
+
+
+def _llm_model_for(services: WorkflowServices, slot: str) -> str | None:
+    routing = services.model_routing
+    default_model = getattr(services.llm_backend, "default_model", None)
+    return routing.resolve_direct_llm(slot, default_model) if routing else default_model
+
+
+def _openhands_model_for(services: WorkflowServices, slot: str) -> str | None:
+    routing = services.model_routing
+    default_model = getattr(services.openhands_adapter.instance, "default_model", None)
+    return routing.resolve_openhands(slot, default_model) if routing else default_model
 
 
 def build_workflow_graph(services: WorkflowServices):
@@ -88,7 +102,7 @@ def build_workflow_graph(services: WorkflowServices):
     async def classify_node(state: WorkflowState) -> dict[str, Any]:
         task = Task.model_validate(state["task"])
         await _emit(services, "stage_started", "classify", "Sending task to Direct LLM for triage", task_id=task.id)
-        request = LLMRequest(kind="classification", prompt=build_classification_prompt(task), task_id=task.id)
+        request = LLMRequest(kind="classification", prompt=build_classification_prompt(task), task_id=task.id, metadata={"model_slot": "classify", "model_override": _llm_model_for(services, "classify")})
         result, parsed = await services.llm_backend.complete_json(request, TaskClassification)
         artifact = services.artifact_store.add_json("classification", parsed.model_dump(mode="json"))
         await _emit(
@@ -113,7 +127,7 @@ def build_workflow_graph(services: WorkflowServices):
         task = Task.model_validate(state["task"])
         classification = TaskClassification.model_validate(state["classification"])
         await _emit(services, "stage_started", "route", "Analyzing evidence requirements before planning", task_id=task.id)
-        request = LLMRequest(kind="route_analysis", prompt=build_route_prompt(task, classification), task_id=task.id)
+        request = LLMRequest(kind="route_analysis", prompt=build_route_prompt(task, classification), task_id=task.id, metadata={"model_slot": "route", "model_override": _llm_model_for(services, "route")})
         result, parsed = await services.llm_backend.complete_json(request, RoutingDecision)
         artifact = services.artifact_store.add_json("route_decision", parsed.model_dump(mode="json"))
         await _emit(
@@ -247,6 +261,7 @@ def build_workflow_graph(services: WorkflowServices):
             prompt=build_obligation_analysis_prompt(task, classification, route, context_packet),
             task_id=task.id,
             context_packet_id=context_packet.id,
+            metadata={"model_slot": "obligations", "model_override": _llm_model_for(services, "obligations")},
         )
         result, parsed = await services.llm_backend.complete_json(request, ObligationAnalysis)
         artifact = services.artifact_store.add_json("obligation_analysis", parsed.model_dump(mode="json"))
@@ -285,6 +300,7 @@ def build_workflow_graph(services: WorkflowServices):
             prompt=build_plan_prompt(task, context_packet, _effective_task_intent(classification), obligations),
             task_id=task.id,
             context_packet_id=context_packet.id,
+            metadata={"model_slot": "plan", "model_override": _llm_model_for(services, "plan")},
         )
         result, parsed = await services.llm_backend.complete_json(request, ExecutionPlan)
         parsed = _merge_plan_with_obligations(parsed, obligations)
@@ -432,7 +448,7 @@ def build_workflow_graph(services: WorkflowServices):
             capabilities=plan.capabilities,
             prompt=prompt,
             plan_summary=plan.summary,
-            metadata={"evidence_required": True},
+            metadata={"evidence_required": True, "model_slot": "execute", "model_override": _openhands_model_for(services, "execute")},
         )
         await _emit(services, "execution_request", "execute", "Execution request created", execution_family=request.execution_family.value, capability_count=len(request.capabilities))
         result = await services.openhands_adapter.execute(request)
@@ -504,7 +520,7 @@ def build_workflow_graph(services: WorkflowServices):
                 capabilities=_publish_capabilities(plan),
                 prompt=prompt,
                 plan_summary="publish obligations",
-                metadata={"mode": "publish", "require_commit": plan.require_commit, "require_push": plan.require_push},
+                metadata={"mode": "publish", "require_commit": plan.require_commit, "require_push": plan.require_push, "model_slot": "publish", "model_override": _openhands_model_for(services, "publish")},
             )
         )
         artifact_ids = list(state.get("artifact_ids") or [])
@@ -623,6 +639,7 @@ def build_workflow_graph(services: WorkflowServices):
                 prompt=build_verification_prompt(task, context_packet, plan, execution, publish),
                 task_id=task.id,
                 context_packet_id=context_packet.id,
+                metadata={"model_slot": "verify", "model_override": _llm_model_for(services, "verify")},
             )
             llm_result, parsed = await services.llm_backend.complete_json(llm_request, EvidenceVerification)
             verification_artifact = services.artifact_store.add_json("verification_assessment", parsed.model_dump(mode="json"))

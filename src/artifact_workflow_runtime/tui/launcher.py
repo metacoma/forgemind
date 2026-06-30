@@ -7,6 +7,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="artifact-workflow-tui")
     parser.add_argument("--task", default=None, help="Initial task text to prefill in the TUI")
     parser.add_argument("--artifact-dir", default="run-artifacts")
+    parser.add_argument("--config", default=None, help="YAML model routing config with stage-based direct_llm/openhands mappings")
 
     parser.add_argument("--direct-llm-endpoint", default="http://127.0.0.1:4000/v1")
     parser.add_argument("--direct-llm-model", default="qwen36-35b")
@@ -36,6 +37,7 @@ def main() -> None:
     args = build_parser().parse_args()
     initial_config = {
         "artifact_dir": args.artifact_dir,
+        "config_path": args.config,
         "direct_llm_endpoint": args.direct_llm_endpoint,
         "direct_llm_model": args.direct_llm_model,
         "direct_llm_api_key": args.direct_llm_api_key,

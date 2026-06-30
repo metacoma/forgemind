@@ -277,6 +277,7 @@ class ForgeMindTUI(App[None]):
                         with Vertical(classes="config-card"):
                             yield Label("Runtime", classes="section-title")
                             yield Input(value=str(self.initial_config.get("artifact_dir", "run-artifacts")), id="artifact-dir", placeholder="Artifact directory")
+                            yield Input(value=str(self.initial_config.get("config_path", "") or ""), id="config-path", placeholder="Model routing config (optional)")
                             yield Input(value=str(self.initial_config.get("sandbox_id", "") or ""), id="sandbox-id", placeholder="Pinned sandbox id")
                             yield Input(value=str(self.initial_config.get("conversation_id", "") or ""), id="conversation-id", placeholder="Pinned conversation id")
                             yield Checkbox("Reuse sandbox", value=bool(self.initial_config.get("reuse", True)), id="reuse")
@@ -1424,6 +1425,7 @@ class ForgeMindTUI(App[None]):
         return {
             "artifact_dir": self.query_one("#artifact-dir", Input).value or "run-artifacts",
             "direct_llm_endpoint": self.query_one("#direct-llm-endpoint", Input).value,
+            "config_path": self.query_one("#config-path", Input).value or None,
             "direct_llm_model": self.query_one("#direct-llm-model", Input).value,
             "direct_llm_api_key": self.query_one("#direct-llm-api-key", Input).value or None,
             "openhands_endpoint": self.query_one("#openhands-endpoint", Input).value,

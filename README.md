@@ -132,3 +132,39 @@ The TUI shows:
 - evidence viewer
 - final JSON report
 - editable task and backend configuration
+
+
+## Per-stage model routing
+
+The runtime supports YAML model routing using only explicit stage-based mappings.
+
+Supported format:
+
+```yaml
+direct_llm:
+  classify: openai/qwen36-27b
+  route: openai/qwen36-35b
+  obligations: openai/qwen36-35b
+  plan: openai/qwen36-35b
+  verify: openai/qwen36-27b
+
+openhands:
+  observe: openai/qwen36-27b
+  research: openai/qwen36-27b
+  execute: openai/qwen36-35b
+  publish: openai/qwen36-35b
+```
+
+You can optionally nest the same mappings under `models:` or use the `stages:` form:
+
+```yaml
+stages:
+  classify:
+    backend: direct_llm
+    model: openai/qwen36-27b
+  execute:
+    backend: openhands
+    model: openai/qwen36-35b
+```
+
+Legacy `roles:` mapping is no longer supported and will raise a configuration error.

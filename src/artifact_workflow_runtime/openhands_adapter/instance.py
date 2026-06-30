@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from artifact_workflow_runtime.runtime_events import EventSink, emit_event
+from artifact_workflow_runtime.model_routing import ModelRoutingConfig
 
 from .client import (
     OpenHandsClient,
@@ -21,6 +22,7 @@ class OpenHandsInstance:
         sandbox_id: str | None = None,
         conversation_id: str | None = None,
         event_sink: EventSink | None = None,
+        model_routing: ModelRoutingConfig | None = None,
     ) -> None:
         self.endpoint = endpoint.rstrip("/")
         self.api_key = api_key
@@ -29,6 +31,7 @@ class OpenHandsInstance:
         self.explicit_sandbox_id = sandbox_id
         self.explicit_conversation_id = conversation_id
         self.event_sink = event_sink
+        self.model_routing = model_routing
         self._sandbox_cache: dict[str, str] = {}
         self._resolved_sandbox_id: str | None = sandbox_id
 

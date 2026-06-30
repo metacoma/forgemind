@@ -5,6 +5,7 @@ from pathlib import Path
 from artifact_workflow_runtime.artifacts import ArtifactStore
 from artifact_workflow_runtime.controller import WorkflowController
 from artifact_workflow_runtime.llm_backend import OpenAICompatibleLLMBackend
+from artifact_workflow_runtime.model_routing import ModelRoutingConfig, load_model_routing_config
 from artifact_workflow_runtime.openhands_adapter import OpenHandsAdapter, OpenHandsInstance
 from artifact_workflow_runtime.policy import StaticApprovalProvider
 from artifact_workflow_runtime.runtime_events import EventSink
@@ -23,9 +24,11 @@ def build_controller(
     sandbox_id: str | None,
     conversation_id: str | None,
     auto_approve: bool,
+    config_path: str | None = None,
     event_sink: EventSink | None = None,
 ) -> WorkflowController:
     artifact_store = ArtifactStore(artifact_dir)
+    model_routing: ModelRoutingConfig | None = load_model_routing_config(config_path)
     llm = OpenAICompatibleLLMBackend(direct_llm_endpoint, direct_llm_model, api_key=direct_llm_api_key)
     openhands_instance = OpenHandsInstance(
         openhands_endpoint,
@@ -35,12 +38,14 @@ def build_controller(
         sandbox_id=sandbox_id,
         conversation_id=conversation_id,
         event_sink=event_sink,
+        model_routing=model_routing,
     )
-    openhands_adapter = OpenHandsAdapter(openhands_instance, artifact_store)
+    openhands_adapter = OpenHandsAdapter(openhands_instance, artifact_store, model_routing=model_routing)
     return WorkflowController(
         llm_backend=llm,
         openhands_adapter=openhands_adapter,
         artifact_root=Path(artifact_dir),
         approval_provider=StaticApprovalProvider(approve=auto_approve, reviewer="cli"),
         event_sink=event_sink,
+        model_routing=model_routing,
     )
