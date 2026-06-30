@@ -45,11 +45,11 @@ async def test_openhands_html_response_is_transport_error_not_evidence(tmp_path)
     assert result.evidence_kind == "html_transport_error"
     assert result.missing_evidence == ["usable verification evidence"]
     raw_artifact = store.get(result.raw_evidence_artifact_id or "")
-    assert raw_artifact.kind == "openhands_transport_error"
+    assert raw_artifact.kind == "openhands_stage_failure"
     persisted = store.read_text(raw_artifact.id)
     assert "<!DOCTYPE html>" not in persisted
     assert "<html" not in persisted.lower()
-    assert "OpenHands transport error during verification" in persisted
+    assert "OpenHands stage failure during verification" in persisted
     assert "raw_response_persisted: false" in persisted
     assert result.evidence_bundle is not None
     assert result.evidence_bundle.structured.blockers

@@ -7,7 +7,9 @@ from pydantic import Field
 
 from artifact_workflow_runtime.models.core import (
     ApprovalRequest,
+    AcceptanceDecision,
     Artifact,
+    ContextPacket,
     ExecutionPlan,
     ExecutionRequest,
     ExecutionResult,
@@ -20,9 +22,12 @@ from artifact_workflow_runtime.models.core import (
     PolicyDecision,
     PublishRequest,
     PublishResult,
+    RepairRequest,
+    RepairResult,
     RoutingDecision,
     RuntimeModel,
     Task,
+    TaskAcceptanceContract,
     TaskClassification,
     VerificationCheckRequest,
     VerificationCheckResult,
@@ -30,6 +35,7 @@ from artifact_workflow_runtime.models.core import (
     VerificationResult,
     utc_now,
 )
+from artifact_workflow_runtime.lifecycle.models import LifecycleTransitionDecision, PipelineLoopDecision
 
 JsonDict = dict[str, Any]
 
@@ -47,12 +53,17 @@ class WorkflowStatus(str, Enum):
     POLICY_CHECKED = "policy_checked"
     APPROVAL_RESOLVED = "approval_resolved"
     EXECUTED = "executed"
+    EXECUTION_REVIEWED = "execution_reviewed"
+    REPAIRED = "repaired"
+    PUBLISH_REVIEWED = "publish_reviewed"
     PUBLISHED = "published"
     VERIFIED = "verified"
+    ACCEPTANCE_EVALUATED = "acceptance_evaluated"
     COMPLETED = "completed"
     BLOCKED = "blocked"
     PARTIALLY_COMPLETED = "partially_completed"
     NEEDS_HUMAN_REVIEW = "needs_human_review"
+    NEEDS_ENVIRONMENT = "needs_environment"
     FAILED = "failed"
 
     @classmethod
@@ -106,24 +117,32 @@ class WorkflowStateSnapshot(RuntimeModel):
     research_result: ObservationResult | None = None
     observation_request: ObservationRequest | None = None
     observation_result: ObservationResult | None = None
-    context_packet: JsonDict | None = None
+    context_packet: ContextPacket | None = None
     obligation_request: LLMRequest | None = None
     obligation_result: LLMResult | None = None
     obligations: ObligationAnalysis | None = None
     plan_request: LLMRequest | None = None
     plan_result: LLMResult | None = None
     plan: ExecutionPlan | None = None
+    acceptance_contract: TaskAcceptanceContract | None = None
     policy_decision: PolicyDecision | None = None
     approval_request: ApprovalRequest | None = None
     execution_request: ExecutionRequest | None = None
     execution_result: ExecutionResult | None = None
+    execution_review_decision: LifecycleTransitionDecision | None = None
+    repair_requests: list[RepairRequest] = Field(default_factory=list)
+    repair_results: list[RepairResult] = Field(default_factory=list)
     publish_request: PublishRequest | None = None
     publish_result: PublishResult | None = None
+    publish_review_decision: LifecycleTransitionDecision | None = None
     verification_request: VerificationRequest | None = None
     verification_check_requests: list[VerificationCheckRequest] = Field(default_factory=list)
     verification_check_results: list[VerificationCheckResult] = Field(default_factory=list)
     verification_result: VerificationResult | None = None
+    acceptance_decision: AcceptanceDecision | None = None
     final_report: FinalReport | None = None
+    lifecycle_decisions: list[LifecycleTransitionDecision] = Field(default_factory=list)
+    pipeline_loop_decisions: list[PipelineLoopDecision] = Field(default_factory=list)
     controller_decisions: list[ControllerDecision] = Field(default_factory=list)
     transitions: list[StageTransition] = Field(default_factory=list)
     artifact_ids: list[str] = Field(default_factory=list)
@@ -183,17 +202,25 @@ class WorkflowState(TypedDict, total=False):
     plan_request: JsonDict | None
     plan_result: JsonDict | None
     plan: JsonDict | None
+    acceptance_contract: JsonDict | None
     policy_decision: JsonDict | None
     approval_request: JsonDict | None
     execution_request: JsonDict | None
     execution_result: JsonDict | None
+    execution_review_decision: JsonDict | None
+    repair_requests: list[JsonDict]
+    repair_results: list[JsonDict]
     publish_request: JsonDict | None
     publish_result: JsonDict | None
+    publish_review_decision: JsonDict | None
     verification_request: JsonDict | None
     verification_check_requests: list[JsonDict]
     verification_check_results: list[JsonDict]
     verification_result: JsonDict | None
+    acceptance_decision: JsonDict | None
     final_report: JsonDict | None
+    lifecycle_decisions: list[JsonDict]
+    pipeline_loop_decisions: list[JsonDict]
     controller_decisions: list[JsonDict]
     transitions: list[JsonDict]
     artifact_ids: list[str]

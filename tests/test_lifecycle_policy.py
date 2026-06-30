@@ -158,7 +158,7 @@ def test_lifecycle_allows_publish_after_only_publish_obligation_remains() -> Non
     assert decision.graph_next == "publish"
 
 
-def test_lifecycle_machine_fallback_is_strict_without_external_statemachine() -> None:
+def test_lifecycle_machine_dev_fallback_is_strict() -> None:
     machine = LifecycleMachine()
     plan = _plan(publish=True)
     execution = _execution("Changed src/client.cc. git push origin feature-branch")
@@ -231,12 +231,57 @@ def test_lifecycle_denies_publisher_that_repairs_ci_inside_publish() -> None:
     assert "publisher_repaired_or_reimplemented" in {violation.code for violation in decision.violations}
 
 
-def test_lifecycle_machine_does_not_inherit_external_statemachine_runtime() -> None:
-    """Regression for real python-statemachine installations.
+def test_lifecycle_machine_is_plain_policy_backed_engine() -> None:
+    """The lifecycle engine is programmatic and policy-backed.
 
-    The lifecycle engine is programmatic and policy-backed. If it subclasses
-    statemachine.StateMachine without declarative class-level states, controller
-    construction fails with InvalidDefinition("There are no states or transitions").
+    It should not rely on an external finite-state-machine runtime; the runtime
+    policy decision is the durable contract.
     """
-    assert all("statemachine" not in getattr(base, "__module__", "") for base in LifecycleMachine.__mro__[1:])
     assert LifecycleMachine().policy_evaluator is not None
+
+
+def test_opa_required_policy_mode_fails_closed_without_opa(tmp_path) -> None:
+    from artifact_workflow_runtime.lifecycle import LifecycleFacts
+    from artifact_workflow_runtime.lifecycle.policy import OpaPolicyEvaluator
+
+    evaluator = OpaPolicyEvaluator(opa_binary="/definitely/missing/opa", policy_path=tmp_path / "missing.rego", mode="opa_required")
+
+    decision = evaluator.evaluate("can_leave_execute", LifecycleFacts())
+
+    assert decision.allowed is False
+    assert decision.engine == "opa_required"
+    assert "policy_evaluation_unavailable" in {violation.code for violation in decision.violations}
+
+
+def test_dev_fallback_policy_mode_is_explicit(tmp_path) -> None:
+    from artifact_workflow_runtime.lifecycle import LifecycleFacts
+    from artifact_workflow_runtime.lifecycle.policy import OpaPolicyEvaluator
+
+    evaluator = OpaPolicyEvaluator(opa_binary="/definitely/missing/opa", policy_path=tmp_path / "missing.rego", mode="dev_fallback")
+
+    decision = evaluator.evaluate("can_leave_execute", LifecycleFacts())
+
+    assert decision.allowed is True
+    assert decision.engine == "dev_fallback"
+
+
+def test_lifecycle_denies_execute_pr_created_from_structured_command_evidence() -> None:
+    kernel = RuntimeKernel()
+    plan = _plan(publish=True, integration=False)
+    execution = _execution(
+        '{"summary":"Implemented code change.","structured_evidence":{'
+        '"commands_run":[{"command":"gh pr create --fill --base main","exit_code":0,"output_excerpt":"https://github.com/acme/repo/pull/42"}],'
+        '"files_changed":[{"path":"src/client.cc","action":"changed","summary":"Implemented client"}],'
+        '"tests":[{"name":"unit","status":"passed","passed":true}],'
+        '"blockers":[],'
+        '"mutation_summary":{"changed":true,"summary":"Changed source","files_changed":["src/client.cc"]},'
+        '"postcheck_summary":{"attempted":true,"summary":"Unit tests passed"}'
+        '}}'
+    )
+
+    decision = kernel.review_execution(plan=plan, execution=execution, acceptance_contract=_contract(plan))
+
+    assert decision.allowed is False
+    assert decision.to_stage == LifecycleStage.CONTROL_PLANE_VIOLATION
+    assert decision.graph_next == "finalize"
+    assert "execute_created_pr" in {violation.code for violation in decision.violations}

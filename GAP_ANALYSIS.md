@@ -35,7 +35,6 @@
 
 - Split long graph prompt strings into dedicated prompt/work-packet builder modules.
 - Add structured evidence extraction from OpenHands output into `EvidenceBundle` records.
-- Add bounded repair loops for failed verification.
 - Add persistent workflow resume from `ArtifactStore.index.json`.
 - Replace `StaticApprovalProvider` with a real human approval backend.
 
@@ -62,3 +61,159 @@ Remaining gaps after this pass:
 2. Repair loops are still not first-class typed state transitions.
 3. Resume/replay from `workflow_state_snapshot` + `ArtifactStore.index.json` is documented but not yet implemented.
 4. The structured evidence extractor is conservative and heuristic; OpenHands should eventually be instructed/validated to emit a strict JSON evidence schema directly.
+
+## Contract/state hardening pass
+
+Closed in this pass:
+
+- `context_packet` in `WorkflowStateSnapshot` is now a typed `ContextPacket`, not a `JsonDict`.
+- Request contracts now include `EvidenceRequirements` and `StructuredResponseContract` and render through `compiled_prompt()`.
+- Direct LLM and OpenHands backends now send compiled typed contracts instead of raw prompt strings.
+- OpenHands output normalization prefers structured JSON evidence sections and uses heuristic extraction only as fallback.
+- `EvidenceBundle` now separates raw text artifact ids from structured artifact ids and exposes an operational summary.
+- `ContextBuilder` renders structured evidence bundles as typed summaries for Direct LLM reasoning.
+- Graph nodes now record typed `StageTransition` and `ControllerDecision` items into workflow state.
+- `RuntimeKernel` now exposes fact/planning/execution/verification readiness checks.
+
+Remaining debt:
+
+1. The execution and publish narrative bodies still live in `graph/workflow.py`; they are now compiled inside typed packets, but should later move into dedicated work-packet builder modules.
+2. Repair loops still finalize after failed verification; a future pass should add typed `RepairRequest` / `RepairResult` and bounded re-execution edges.
+3. Durable resume/replay from `workflow_state_snapshot` and `ArtifactStore.index.json` is still not implemented.
+
+## Acceptance / verification finalization hardening update
+
+Closed in this pass:
+
+- Added typed acceptance models: `TaskAcceptanceContract`, `AcceptanceObligation`, `VerificationObligationResult`, `AcceptanceDecision`, `ExecutionStatus`, `AcceptanceStatus`, and typed environment blockers.
+- Added an explicit graph `acceptance` stage between `verify` and `finalize`.
+- Final reports now follow `AcceptanceDecision.final_workflow_status` when available.
+- Mutation tasks cannot finalize as `completed` when required obligations are `failed`, `blocked`, or `not_run`.
+- Missing Freeplane/integration/runtime prerequisites are classified as `missing_environment_dependency`, `missing_runtime_prerequisite`, or `integration_environment_unavailable` and produce `needs_environment`.
+- Added regression coverage for the C++ gRPC client / Freeplane integration blocker scenario.
+
+Remaining debt:
+
+1. Acceptance obligation derivation is deterministic and typed, but still heuristic. Future iterations can make obligations first-class planner output validated by policy.
+2. OpenHands should eventually emit strict JSON evidence with blocker kinds directly instead of relying on fallback blocker normalization.
+
+
+## Lifecycle / policy engine pass
+
+Closed in this pass:
+
+- Added a dedicated lifecycle state-transition layer instead of continuing to encode publish/finalize decisions as ad hoc `if execution.ok` graph routing.
+- Added OPA/Rego policy gates for lifecycle decisions. Python policy evaluation is now an explicit `dev_fallback`; production wiring can require OPA and fail closed.
+- Added typed lifecycle facts/events/transition decisions and persisted them in workflow state/artifacts.
+- Closed the PR capability leak: `execute` now receives execution-only capabilities and forbids commit/push/create_pr/open_pull_request/publish/wait_pr_checks.
+- Split `publish` from `execute` at the adapter API. Tests now expect `calls["publish"]`, not a second `execute()` call.
+- Added `execution_review` before publish. A PR created during execute is a control-plane violation, not an acceptable publish shortcut.
+- Fixed verification accounting so `missing_evidence` and `not_run` no longer count as a successful run.
+- Stopped optimistic mutation evidence from treating arbitrary path mentions as changed files.
+
+Remaining debt:
+
+1. The lifecycle dev fallback currently mirrors only the hard P0 invariants. More Rego rules should gradually move from Python helper logic into policy modules.
+2. Durable resume/replay still needs to restore lifecycle decisions from artifacts and continue from a safe stage.
+3. OPA-required production mode should grow bundle loading and policy test fixtures.
+
+
+## Repair loop pass
+
+Closed in this pass:
+
+- Added typed `RepairRequest` and `RepairResult` contracts.
+- Added lifecycle facts/policy for `publish_review`, `can_leave_publish`, and `can_repair`.
+- Added `publish_review` and `repair` graph stages.
+- Publisher no longer owns CI repair. It reports failed checks/blockers; lifecycle policy decides whether a bounded repair packet is allowed.
+- Repair packets forbid commit, push, PR creation/update, publishing, waiting PR checks, and workflow decisions.
+- After repair the graph returns to `execution_review`, so repaired code must pass lifecycle review before verification/acceptance and any subsequent publish.
+- Added regression tests for failed PR checks -> repair -> review -> second publish, repair attempt limit, and publisher-repair policy violation.
+
+Remaining debt:
+
+1. Repair budget is currently a fixed controller value (`max_attempts=2`); future work can move this into typed task policy/config.
+2. Publish-forbidden-action detection still has conservative text/evidence fallback; strict JSON publish evidence should eventually become mandatory for publication.
+3. Durable resume/replay should restore mid-repair lifecycle state safely from artifacts.
+
+## Stage prompt / contract hardening update
+
+Closed in this pass:
+
+- Added a centralized OpenHands stage contract renderer instead of relying on per-node prose to communicate boundaries.
+- Every OpenHands packet now renders `Allowed actions`, `Forbidden actions`, `Stop conditions`, `Required outputs`, and explicit control-plane non-goals.
+- Observe/research are read-only by contract and capability-filtered to read-only capabilities.
+- Execute and repair explicitly forbid commit, push, PR creation, release, publish, tag, merge, and rebase actions.
+- Verify/world-check explicitly forbids mutation, repair, publishing, git publication actions, and final acceptance decisions.
+- Publish is limited to publication/check evidence and explicitly forbids source edits, CI repair, feature reimplementation, force push, tags, merge/rebase, and releases.
+- OpenHands adapter validation now checks that compiled prompts contain the standard bounded-packet sections before dispatch.
+- Added prompt/contract regression tests for observe, execute, verify, publish, repair, and mutating capability filtering.
+
+Remaining debt:
+
+1. Some narrative bodies still live in `graph/workflow.py`; they are now bounded by the centralized stage contract compiler, but should eventually move to dedicated packet builder modules.
+2. OPA/Rego currently covers lifecycle gates, while prompt-contract validation is still Python-side. Future work can add policy tests for prompt/action matrices.
+3. Strict JSON evidence emission should become mandatory for publish and repair once OpenHands reliably emits the schema.
+
+## Pipeline-wide re-entry pass
+
+Closed in this pass:
+
+- Added typed `PipelineLoopDecision`, `PipelineLoopTriggerKind`, `PipelineReentryTarget`, and `PipelineLoopBudget` models.
+- Added controller-owned `RuntimeKernel.evaluate_pipeline_reentry()` for verification, acceptance, and publish-review re-entry decisions.
+- Added lifecycle/policy support for `can_reenter` with Rego and explicit dev fallback.
+- Added legal re-entry targets back to research, observe, context build, obligation discovery, and planning.
+- Added global, per-trigger, and per-source-stage budgets so rediscovery cannot become an infinite loop.
+- Expanded obligation discovery to docs, examples, CI/build, codegen/tooling, affected surfaces, adjacent components, discovered impacts, and work-surface completion.
+- Folded discovered impacts into planning, verification, and acceptance obligations.
+- Added regression coverage for verify->obligations re-entry, acceptance-contract broad obligations, and budget exhaustion.
+
+Remaining debt:
+
+1. Re-entry trigger detection is typed at the decision layer but still partially uses conservative text normalization from verification/publish summaries; strict structured trigger output from verification would reduce heuristics further.
+2. Durable resume/replay should restore `PipelineLoopDecision` history and continue from the safe re-entry target.
+3. Policy fixtures should grow from hard invariants into scenario-specific bundles for repo, infra, k8s, and network task families.
+
+## Contract Gateway hardening pass
+
+Closed the ad-hoc LLM schema-drift workaround that normalized `ObligationAnalysis` aliases inside domain models.
+
+New invariant:
+
+- Pydantic domain models remain canonical and strict.
+- Direct LLM JSON never goes directly into `model_validate()` as an uncontrolled runtime boundary.
+- `contracts.ContractGateway` validates raw JSON against the target schema, records typed `ContractViolation` entries, performs a bounded schema-only repair attempt, and returns a canonical typed model only after validation succeeds.
+- If repair fails, workflow returns a controlled `contract_violation` final report and stores the contract result as an artifact instead of surfacing a raw Pydantic traceback.
+
+Remaining work:
+
+- OpenHands structured evidence still uses extractor fallback. It should be moved to the same gateway pattern with an evidence-specific contract repair/re-render packet that cannot execute commands.
+- More LLM stages now use the backend gateway path, but per-stage `ContractSpec` policies could become explicit named contracts rather than inferred from response model names.
+
+## Stabilization pass: OpenHands result presence gate
+
+Closed a core stability gap where an OpenHands stage could reach a terminal/no-result state and the workflow would only notice later during verification as missing evidence. The runtime now treats missing assistant answers, empty results, and UI/HTML transport responses as typed `OpenHandsRunFailure` producer-stage failures. These failures are persisted as `openhands_stage_failure` artifacts and prevent verification from starting on missing producer evidence.
+
+New invariants:
+
+- OpenHands HTML/UI responses are never saved as operational evidence.
+- Empty OpenHands results are `agent_no_result`, not verification failures.
+- Execution with no usable result routes through lifecycle policy to non-success finalization before verification.
+- Observation/research with no usable result stops before context/plan/execution.
+- Final success remains impossible without acceptance.
+
+
+## P1 cleanup update
+
+Closed/partially closed items:
+
+- `stages/workflow_nodes.py` is no longer the physical home for all stage logic; it composes focused stage mixins from separate files.
+- A runtime checkpoint recorder now persists `workflow_checkpoint` artifacts after successful stage nodes. This is not yet a LangGraph-native checkpointer, but it creates a stage-by-stage durable state trail.
+- A typed action ACL seed exists with PDP/PEP interfaces and a static stage policy. OpenHands packet validation now checks allowed actions against this ACL before dispatch.
+
+Still open:
+
+- OpenHands tool-call interception is not implemented yet; enforcement is preflight/stage-level, not per-command.
+- `models/core.py` remains the canonical physical model file behind compatibility modules.
+- `RuntimeKernel` still contains text heuristics that should move to typed evidence facts.
+- OPA/Rego still needs fixture-based policy tests in CI.

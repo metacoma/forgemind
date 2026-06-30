@@ -28,7 +28,13 @@ class DummyInstance:
     async def run(self, *, prompt: str, model: str | None = None, title: str | None = None) -> OpenHandsRunResult:
         start = AppConversationStart(conversation_id="conv", sandbox_id="sandbox")
         return OpenHandsRunResult(
-            text="$ pytest tests/test_contracts.py\nmodified src/app.py\npytest passed",
+            text=(
+                '{"structured_evidence": {'
+                '"commands_run": [{"command": "pytest tests/test_contracts.py", "exit_code": 0}], '
+                '"files_changed": [{"path": "src/app.py", "action": "changed"}], '
+                '"tests": [{"name": "pytest", "passed": true, "status": "passed"}], '
+                '"blockers": []}}'
+            ),
             status="finished",
             conversation_id="conv",
             start=start,

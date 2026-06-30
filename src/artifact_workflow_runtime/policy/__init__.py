@@ -57,3 +57,14 @@ class PolicyEngine:
     @staticmethod
     def _requires_approval(caps: list[Capability], plan: ExecutionPlan) -> bool:
         return bool(plan.requires_mutation or plan.must_change_world or any(cap in MUTATING_CAPABILITIES for cap in caps))
+
+from .acl import (
+    RuntimeAction,
+    RuntimeSubject,
+    RuntimeResource,
+    ActionDecision,
+    PolicyDecisionPoint,
+    StaticStagePolicyDecisionPoint,
+    PolicyEnforcementPoint,
+    PolicyEnforcementError,
+)

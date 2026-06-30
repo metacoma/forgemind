@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from artifact_workflow_runtime.evidence import render_structured_evidence_summary
 from artifact_workflow_runtime.models import Capability, ContextPacket, ExecutionPlan, ExecutionResult, ObligationAnalysis, PublishResult, RoutingDecision, Task, TaskClassification
 
 
@@ -55,10 +56,32 @@ PLAN_SCHEMA_HINT = {
 
 
 OBLIGATION_SCHEMA_HINT = {
-    "required_test_levels": ["build|unit|integration|smoke|lint"],
+    "required_test_levels": ["build|unit|component|integration|e2e|smoke|lint"],
     "required_setup_steps": ["string"],
     "required_environment_conditions": ["string"],
-    "required_publish_actions": ["commit|push|create_pr|wait_pr_checks|fix_failing_pr_checks"],
+    "required_documentation_updates": ["README|user docs|developer docs|API docs|migration notes"],
+    "required_examples_updates": ["examples|snippets|samples|usage demos"],
+    "required_ci_updates": ["workflow changes|CI jobs|build scripts|packaging checks"],
+    "required_codegen_or_build_updates": ["proto/codegen/tooling/build config updates"],
+    "affected_surfaces": ["public API|client binding|integration path|build surface|docs surface"],
+    "adjacent_components": ["string"],
+    "discovered_impacts": [
+        {
+            "kind": "code|test|integration|setup|documentation|examples|ci_build|codegen_tooling|publish|research|observation",
+            "summary": "string",
+            "required": True,
+            "blocking": True,
+            "affected_paths": ["string"],
+            "evidence_artifact_ids": ["string"],
+        }
+    ],
+    "work_surface": {
+        "affected_surfaces": ["string"],
+        "impacts": [],
+        "adjacent_components": ["string"],
+        "reasoning": "string",
+    },
+    "required_publish_actions": ["commit|push|create_pr|wait_pr_checks"],
     "completion_requirements": ["string"],
     "blocker_conditions": ["string"],
     "reasoning_summary": "string",
@@ -89,6 +112,22 @@ VERIFICATION_SCHEMA_HINT = {
     "completion_status": "completed|implemented_not_verified|verified_not_published|partially_completed|blocked",
 }
 
+
+
+def _operational_evidence_text(result: ExecutionResult | PublishResult | None, *, fallback: str) -> str:
+    if result is None:
+        return fallback
+    parts: list[str] = []
+    if result.evidence_bundle is not None:
+        parts.append("Structured EvidenceBundle operational summary:")
+        parts.append(result.evidence_bundle.operational_summary())
+    parts.append("StructuredEvidence:")
+    parts.append(render_structured_evidence_summary(result.structured_evidence))
+    if result.raw_evidence_artifact_id:
+        parts.append(f"Raw evidence artifact: {result.raw_evidence_artifact_id} (raw text is supplement, not source of truth)")
+    if not parts:
+        parts.append(result.evidence_text)
+    return "\n".join(part for part in parts if part).strip()
 
 def build_classification_prompt(task: Task) -> str:
     return (
@@ -153,6 +192,10 @@ def build_obligation_analysis_prompt(task: Task, classification: TaskClassificat
         "Synthesize execution obligations from observed evidence before planning.\n"
         "You are not producing an execution plan. You are extracting mandatory obligations from the task plus evidence.\n"
         "Do not weaken or skip evidence-backed requirements.\n"
+        "Discovery is broad: for a feature/API/client/binding/integration path, identify the whole required work surface, not only the main code change.\n"
+        "Explicitly discover obligations for code, build/config, tests, integration/e2e/smoke, environment setup, documentation, examples/snippets, CI/pipeline, codegen/tooling, packaging, and adjacent components.\n"
+        "If a public API/client/binding or user-facing behavior changes, require user/developer/API docs and examples unless evidence proves none exist.\n"
+        "If proto/generated code/build tooling/CI workflows are affected, require codegen/build/CI obligations.\n"
         "If the repository evidence shows an integration harness, integration scripts, or setup scripts for runtime dependencies such as Freeplane inside Docker, require them when the change touches the same functional surface.\n"
         "Prefer semantic reasoning over surface wording.\n"
         "Return strict JSON matching this shape:\n"
@@ -171,7 +214,7 @@ def build_obligation_analysis_prompt(task: Task, classification: TaskClassificat
     )
 
 def build_verification_prompt(task: Task, context_packet: ContextPacket, plan: ExecutionPlan, execution: ExecutionResult, publish: PublishResult | None = None) -> str:
-    publish_text = publish.evidence_text if publish else "No separate publish step evidence was captured."
+    publish_text = _operational_evidence_text(publish, fallback="No separate publish step evidence was captured.")
     return (
         "Verify the result using evidence only.\n"
         "You do not have live access to the world.\n"
@@ -182,7 +225,7 @@ def build_verification_prompt(task: Task, context_packet: ContextPacket, plan: E
         "Check whether the performed test levels are sufficient for the change. Unit-only evidence is insufficient when the plan required integration tests.\n"
         "Check whether commit/push obligations were fulfilled if they were required by the plan.\n"
         "If publish evidence indicates that a PR exists, check whether the workflow waited for all PR checks to complete and whether all of them passed.\n"
-        "If any PR checks failed, verify that the agent inspected the failures, fixed the issues, pushed follow-up commits, and re-waited for the checks.\n"
+        "If any PR checks failed, classify publish verification as failed/blocked and report the failing jobs as controller repair input; publisher must not fix CI inside publish.\n"
         "Return strict JSON matching this shape:\n"
         f"{json.dumps(VERIFICATION_SCHEMA_HINT, ensure_ascii=False, indent=2)}\n\n"
         f"Task:\n{task.description}\n\n"
@@ -197,7 +240,7 @@ def build_verification_prompt(task: Task, context_packet: ContextPacket, plan: E
         + "\n".join(f"- {item}" for item in plan.success_criteria)
         + "\n\nVerification checks:\n"
         + "\n".join(f"- {item}" for item in plan.verification_checks)
-        + f"\n\nExecution evidence:\n{execution.evidence_text}\n\nPublish evidence:\n{publish_text}\n"
+        + f"\n\nExecution structured evidence:\n{_operational_evidence_text(execution, fallback='No execution evidence.')}\n\nPublish structured evidence:\n{publish_text}\n"
     )
 
 
@@ -209,7 +252,7 @@ def build_verification_check_prompt(
     check_name: str,
     publish: PublishResult | None = None,
 ) -> str:
-    publish_text = publish.evidence_text if publish else "No separate publish step evidence was captured."
+    publish_text = _operational_evidence_text(publish, fallback="No separate publish step evidence was captured.")
     return (
         "Verify exactly one verification check using evidence only.\n"
         "You do not have live access to the world.\n"
@@ -230,5 +273,5 @@ def build_verification_check_prompt(
         + "\n".join(f"- {item}" for item in plan.success_criteria)
         + "\n\nAll verification checks from plan:\n"
         + "\n".join(f"- {item}" for item in plan.verification_checks)
-        + f"\n\nExecution evidence:\n{execution.evidence_text}\n\nPublish evidence:\n{publish_text}\n"
+        + f"\n\nExecution structured evidence:\n{_operational_evidence_text(execution, fallback='No execution evidence.')}\n\nPublish structured evidence:\n{publish_text}\n"
     )
