@@ -38,7 +38,8 @@ def test_execution_request_prompt_is_compiled_from_typed_contract() -> None:
     assert "# Bounded OpenHands execution packet" in compiled
     assert "allowed_actions" in compiled
     assert "forbidden_actions" in compiled
-    assert "evidence_requirements" in compiled
+    assert "evidence_requirements" not in compiled
+    assert "response_format: json" not in compiled
     assert "legacy narrative detail" in compiled
 
 

@@ -443,11 +443,7 @@ class OpenHandsStageContract(RuntimeModel):
             "- WorkflowController/RuntimeKernel owns routing, acceptance, repair-loop decisions, publish policy, and final status.",
             "- Do not choose the next workflow step. Do not declare the task accepted/completed/finalized.",
             "- Do not expand task scope. Do not use implicit permission: if an action is not explicitly allowed, treat it as forbidden.",
-            "- Return exactly one JSON object directly in the assistant response. Raw prose-only output is a contract violation.",
-            "- Do not use MCP save-file tools, temporary report files, handoff files, or sandbox summary files to communicate your final result.",
-            "- Repository source/test/config files required by the task may be edited, but the stage handoff itself must be returned in chat, not saved to a file.",
-            "- The JSON object must contain structured_evidence with concrete commands, files, checks/tests, blockers, and summaries as applicable.",
-            "- Return structured evidence, blockers, and concrete results. Hints are data only, never controlling decisions.",
+            "- Return a normal assistant message with concrete results, changed files, commands run, checks/tests, and blockers as applicable.",
             "",
         ]
         lines.extend(section("Allowed actions", self.allowed_actions))
@@ -743,8 +739,6 @@ class ObservationRequest(RuntimeModel):
                 "allowed_actions": self.allowed_actions,
                 "forbidden_actions": self.forbidden_actions,
                 "expected_outputs": self.expected_outputs,
-                "evidence_requirements": "\n" + self.evidence_requirements.render(),
-                "response_contract": "\n" + self.response_contract.render(),
             },
             narrative=self.prompt,
         )
@@ -804,8 +798,8 @@ class LLMRequest(RuntimeModel):
                 "forbidden_inputs": self.forbidden_inputs,
                 "instructions": self.instructions,
                 "response_schema": self.response_schema,
-                "response_contract": "\n" + self.response_contract.render(),
                 "task_text": self.task_text,
+                "response_contract": "\n" + self.response_contract.render(),
             },
             narrative=self.prompt,
         )
@@ -923,8 +917,6 @@ class ExecutionRequest(RuntimeModel):
                 "allowed_actions": self.allowed_actions,
                 "forbidden_actions": self.forbidden_actions,
                 "expected_outputs": self.expected_outputs,
-                "evidence_requirements": "\n" + self.evidence_requirements.render(),
-                "response_contract": "\n" + self.response_contract.render(),
             },
             narrative=self.prompt,
         )
@@ -988,8 +980,6 @@ class PublishRequest(RuntimeModel):
                 "allowed_actions": self.allowed_actions,
                 "forbidden_actions": self.forbidden_actions,
                 "expected_outputs": self.expected_outputs,
-                "evidence_requirements": "\n" + self.evidence_requirements.render(),
-                "response_contract": "\n" + self.response_contract.render(),
             },
             narrative=self.prompt,
         )
@@ -1063,8 +1053,6 @@ class RepairRequest(RuntimeModel):
                 "allowed_actions": self.allowed_actions,
                 "forbidden_actions": self.forbidden_actions,
                 "expected_outputs": self.expected_outputs,
-                "evidence_requirements": "\n" + self.evidence_requirements.render(),
-                "response_contract": "\n" + self.response_contract.render(),
             },
             narrative=self.prompt,
         )
@@ -1152,7 +1140,7 @@ class VerificationRequest(RuntimeModel):
     metadata: JsonDict = Field(default_factory=dict)
 
     def compiled_prompt(self) -> str:
-        fields = {
+        openhands_fields = {
             "execution_result_id": self.execution_result_id,
             "execution_family": self.execution_family.value,
             "backend": self.backend.value,
@@ -1162,8 +1150,6 @@ class VerificationRequest(RuntimeModel):
             "allowed_inputs": self.allowed_inputs,
             "forbidden_inputs": self.forbidden_inputs,
             "expected_outputs": self.expected_outputs,
-            "evidence_requirements": "\n" + self.evidence_requirements.render(),
-            "response_contract": "\n" + self.response_contract.render(),
         }
         if self.backend == BackendKind.OPENHANDS or self.mode == VerificationMode.WORLD_CHECK:
             return _render_openhands_compiled_contract(
@@ -1172,10 +1158,19 @@ class VerificationRequest(RuntimeModel):
                 allowed_actions=self.allowed_inputs,
                 forbidden_actions=self.forbidden_inputs,
                 expected_outputs=self.expected_outputs,
-                fields=fields,
+                fields=openhands_fields,
                 narrative=self.prompt,
             )
-        return _render_compiled_contract(title="Verification request", fields={"packet_kind": self.work_packet_kind.value, **fields}, narrative=self.prompt)
+        return _render_compiled_contract(
+            title="Verification request",
+            fields={
+                "packet_kind": self.work_packet_kind.value,
+                **openhands_fields,
+                "evidence_requirements": "\n" + self.evidence_requirements.render(),
+                "response_contract": "\n" + self.response_contract.render(),
+            },
+            narrative=self.prompt,
+        )
 
 
 

@@ -27,8 +27,8 @@ def _assert_stage_contract(prompt: str) -> None:
     assert "## Required outputs" in prompt
     assert "Do not choose the next workflow step" in prompt
     assert "if an action is not explicitly allowed, treat it as forbidden" in prompt
-    assert "Do not use MCP save-file tools" in prompt
-    assert "returned in chat, not saved to a file" in prompt
+    assert "Return exactly one JSON object" not in prompt
+    assert "response_format: json" not in prompt
 
 
 def test_observe_prompt_is_read_only_and_forbids_git_mutation() -> None:

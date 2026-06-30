@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-from artifact_workflow_runtime.runtime_events import EventSink, emit_event
 from artifact_workflow_runtime.model_routing import ModelRoutingConfig
+from artifact_workflow_runtime.runtime_events import EventSink, emit_event
 
 from .client import (
     OpenHandsClient,
     find_reusable_sandbox_for_model,
     run_conversation_and_collect,
+    run_followup_message_and_collect,
 )
-from .models import OpenHandsRunResult
+from .models import AppConversationStart, OpenHandsRunResult
 
 
 class OpenHandsInstance:
@@ -118,3 +119,20 @@ class OpenHandsInstance:
         title: str | None = None,
     ) -> OpenHandsRunResult:
         return await self._run_new(prompt=prompt, model=model, title=title)
+
+    async def followup(
+        self,
+        *,
+        conversation: OpenHandsRunResult | AppConversationStart,
+        prompt: str,
+    ) -> OpenHandsRunResult:
+        base = conversation.start if isinstance(conversation, OpenHandsRunResult) else conversation
+        known_event_ids = conversation.seen_event_ids if isinstance(conversation, OpenHandsRunResult) else frozenset()
+        return await run_followup_message_and_collect(
+            endpoint=self.endpoint,
+            conversation=base,
+            prompt=prompt,
+            api_key=self.api_key,
+            known_event_ids=known_event_ids,
+            event_sink=self.event_sink,
+        )
