@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import re
+
 from artifact_workflow_runtime.artifacts import ArtifactStore
 from artifact_workflow_runtime.evidence import EvidenceContractError, EvidenceExtractor, render_structured_evidence_summary
 from artifact_workflow_runtime.model_routing import ModelRoutingConfig
@@ -74,16 +77,20 @@ def _verification_passed_from_bundle(*, text: str, ok: bool, transport_error: bo
     return any(marker in lowered for marker in positive) and not any(marker in lowered for marker in negative)
 
 
-def _contract_repair_prompt(*, stage: str, response_contract: StructuredResponseContract, evidence_requirements: object | None) -> str:
+def _json_handoff_instructions(*, stage: str, response_contract: StructuredResponseContract, evidence_requirements: object | None) -> str:
     lines = [
-        f"Return JSON only. This is the machine-readable handoff for the {stage} stage.",
-        "Do not perform any new repository, shell, git, network, or environment actions.",
-        "Do not edit files, run commands, rerun tests, install dependencies, commit, push, create PRs, or change workflow decisions.",
-        "Use only the work and observations that already happened in this conversation.",
-        "Do not include prose before or after the JSON.",
-        "Do not include markdown fences.",
-        "Do not save a file or use MCP/file-save tools.",
-        "If a required field has no data, return an empty value of the appropriate type and explain the gap in blockers.",
+        f"You are a strict JSON handoff generator for the OpenHands {stage} stage.",
+        "Summarize the completed OpenHands work below as ONE valid JSON object.",
+        "Hard requirements:",
+        "- Return JSON only.",
+        "- Do not use Markdown.",
+        "- Do not wrap the JSON in a code fence.",
+        "- Do not add any text before or after the JSON.",
+        "- Do not perform any new repository, shell, git, network, or environment actions.",
+        "- Do not edit files, run commands, rerun tests, install dependencies, commit, push, create PRs, or change workflow decisions.",
+        "- Use only the work and observations that already happened in this conversation.",
+        "- Do not save a file or use MCP/file-save tools.",
+        "- If a required field has no data, return an empty value of the appropriate type and explain the gap in blockers.",
         "Desired JSON contract:",
         response_contract.render(),
     ]
@@ -94,10 +101,122 @@ def _contract_repair_prompt(*, stage: str, response_contract: StructuredResponse
     return "\n".join(lines)
 
 
+def _build_json_handoff_prompt(
+    *,
+    answer: str,
+    instructions: str,
+    previous_text: str | None = None,
+    previous_error: str | None = None,
+) -> str:
+    if previous_text is None and previous_error is None:
+        return f"""{instructions}
+
+OpenHands answer to convert into a machine-readable handoff:
+<openhands_answer>
+{answer}
+</openhands_answer>
+""".strip()
+
+    return f"""Your previous response was not valid JSON.
+
+JSON/parser error:
+{previous_error or 'unknown error'}
+
+Previous invalid response:
+<invalid_response>
+{previous_text or ''}
+</invalid_response>
+
+Return a corrected valid JSON object only. Do not include Markdown, code fences, comments, or prose.
+
+Original OpenHands answer to convert into a machine-readable handoff:
+<openhands_answer>
+{answer}
+</openhands_answer>
+
+Original JSON-handoff instructions:
+{instructions}
+""".strip()
+
+
+def _strip_markdown_fence(text: str) -> str:
+    stripped = text.strip()
+    match = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", stripped, flags=re.IGNORECASE | re.DOTALL)
+    return match.group(1).strip() if match else stripped
+
+
+def _extract_first_json_object(text: str) -> str | None:
+    start = text.find("{")
+    if start < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+    last_index: int | None = None
+
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : idx + 1].strip()
+        last_index = idx
+
+    if depth > 0 and not in_string:
+        return text[start:].strip() + ("}" * depth)
+    return text[start : last_index + 1].strip() if last_index is not None else None
+
+
+def _parse_json_handoff_text(text: str) -> object:
+    stripped = _strip_markdown_fence(text)
+    if not stripped:
+        raise ValueError("handoff response is empty, expected JSON")
+
+    candidates = [stripped]
+    extracted = _extract_first_json_object(stripped)
+    if extracted and extracted not in candidates:
+        candidates.append(extracted)
+
+    errors: list[str] = []
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            errors.append(f"invalid JSON: {exc.msg} at line {exc.lineno} column {exc.colno} char {exc.pos}")
+            continue
+
+    raise ValueError(errors[-1] if errors else "unknown JSON parse error")
+
+
+def _validate_json_handoff_payload(payload: object, response_contract: StructuredResponseContract) -> None:
+    if not isinstance(payload, dict):
+        raise ValueError(f"handoff JSON must be an object, got {type(payload).__name__}")
+    missing = [
+        field.name
+        for field in response_contract.required_fields
+        if field.required and field.name not in payload
+    ]
+    if missing:
+        raise ValueError(f"handoff JSON missing required fields: {', '.join(missing)}")
+
+
 def _response_contract_for_request(request: object) -> StructuredResponseContract | None:
     contract = getattr(request, "response_contract", None)
     return contract if isinstance(contract, StructuredResponseContract) else None
-
 
 
 class OpenHandsAdapter:
@@ -128,27 +247,58 @@ class OpenHandsAdapter:
         followup = getattr(self.instance, "followup", None)
         if response_contract is None or followup is None or getattr(run, "start", None) is None:
             return None, None, None
-        repair_prompt = _contract_repair_prompt(
+
+        instructions = _json_handoff_instructions(
             stage=stage,
             response_contract=response_contract,
             evidence_requirements=getattr(request, "evidence_requirements", None),
         )
-        try:
-            return await followup(conversation=run, prompt=repair_prompt), None, None
-        except Exception as exc:  # pragma: no cover - defensive runtime guard
-            message = f"OpenHands JSON handoff follow-up failed: {exc}"
-            failure = OpenHandsRunFailure(
-                stage=stage,
-                request_id=getattr(request, "id", ""),
-                work_packet_kind=getattr(request, "work_packet_kind", WorkPacketKind.EXECUTE),
-                failure_kind=StageFailureKind.API_ERROR,
-                summary=message,
-                retryable=True,
-                evidence_kind="api_error",
-                conversation_id=getattr(getattr(run, "start", None), "conversation_id", None),
-                sandbox_id=getattr(getattr(run, "start", None), "sandbox_id", None),
+        original_answer = str(getattr(run, "text", "") or "").strip()
+        if not original_answer:
+            return None, None, None
+
+        previous_text: str | None = None
+        previous_error: str | None = None
+        current_run = run
+        max_attempts = 3
+
+        for attempt in range(1, max_attempts + 1):
+            repair_prompt = _build_json_handoff_prompt(
+                answer=original_answer,
+                instructions=instructions,
+                previous_text=previous_text,
+                previous_error=previous_error,
             )
-            return None, failure, message
+            try:
+                handoff_run = await followup(conversation=current_run, prompt=repair_prompt)
+            except Exception as exc:  # pragma: no cover - defensive runtime guard
+                message = f"OpenHands JSON handoff follow-up failed: {exc}"
+                failure = OpenHandsRunFailure(
+                    stage=stage,
+                    request_id=getattr(request, "id", ""),
+                    work_packet_kind=getattr(request, "work_packet_kind", WorkPacketKind.EXECUTE),
+                    failure_kind=StageFailureKind.API_ERROR,
+                    summary=message,
+                    retryable=True,
+                    evidence_kind="api_error",
+                    conversation_id=getattr(getattr(current_run, "start", None), "conversation_id", None),
+                    sandbox_id=getattr(getattr(current_run, "start", None), "sandbox_id", None),
+                )
+                return None, failure, message
+
+            summary_text = str(getattr(handoff_run, "text", "") or "")
+            try:
+                payload = _parse_json_handoff_text(summary_text)
+                _validate_json_handoff_payload(payload, response_contract)
+                return handoff_run, None, None
+            except Exception as exc:
+                previous_text = summary_text
+                previous_error = str(exc)
+                current_run = handoff_run
+                if attempt >= max_attempts:
+                    return handoff_run, None, None
+
+        return None, None, None
 
     async def _bundle_with_json_handoff(
         self,

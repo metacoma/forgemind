@@ -94,6 +94,24 @@ class ProseThenFencedJsonInstance(ProseOnlyInstance):
         )
 
 
+
+class ProseThenInvalidJsonThenValidInstance(ProseOnlyInstance):
+    def __init__(self) -> None:
+        self.followup_prompts: list[str] = []
+        self.calls = 0
+
+    async def followup(self, *, conversation, prompt: str) -> OpenHandsRunResult:
+        self.followup_prompts.append(prompt)
+        self.calls += 1
+        text = '{"summary":"broken"' if self.calls == 1 else '{"summary":"execute summary","structured_evidence":{"commands_run":[{"command":"pytest","cwd":null,"exit_code":0,"output_excerpt":"passed"}],"files_changed":["src/app.py"],"tests":[{"name":"pytest","status":"passed","output_excerpt":"1 passed"}],"mutation_summary":{"changed":true,"files_changed":["src/app.py"],"summary":"modified src/app.py"},"postcheck_summary":{"attempted":true,"checks":[],"summary":"pytest passed"},"blockers":[]}}'
+        return OpenHandsRunResult(
+            text=text,
+            status="finished",
+            conversation_id=conversation.conversation_id,
+            start=conversation,
+        )
+
+
 def test_openhands_adapter_default_strict_evidence_rejects_prose_only_output(tmp_path) -> None:
     adapter = OpenHandsAdapter(ProseOnlyInstance(), ArtifactStore(tmp_path))
     result = asyncio.run(
@@ -178,6 +196,29 @@ def test_openhands_adapter_accepts_fenced_json_on_contract_repair_followup(tmp_p
     assert result.stage_failure is None
     assert result.structured_evidence.commands_run[0].command == "pytest"
     assert instance.followup_prompts
+
+
+
+
+def test_openhands_adapter_retries_invalid_followup_json_in_same_conversation(tmp_path) -> None:
+    instance = ProseThenInvalidJsonThenValidInstance()
+    adapter = OpenHandsAdapter(instance, ArtifactStore(tmp_path))
+    result = asyncio.run(
+        adapter.execute(
+            ExecutionRequest(
+                task_id="task",
+                execution_family=ExecutionFamily.REPOSITORY_CHANGE,
+                prompt="execute bounded packet",
+                expected_outputs=["changed_files", "commands_run", "test_results"],
+            )
+        )
+    )
+
+    assert result.ok is True
+    assert instance.calls >= 2
+    assert "OpenHands answer to convert into a machine-readable handoff" in instance.followup_prompts[0]
+    assert "Your previous response was not valid JSON." in instance.followup_prompts[1]
+    assert "$ pytest" in instance.followup_prompts[1]
 
 
 def test_openhands_adapter_always_requests_json_handoff_when_followup_is_available(tmp_path) -> None:
