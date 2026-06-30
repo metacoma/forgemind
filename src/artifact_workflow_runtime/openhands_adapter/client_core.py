@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import inspect
 import json
 import sys
@@ -694,13 +695,12 @@ class OpenHandsClient:
             )
             or conversation.session_api_key
         )
-        return conversation.model_copy(
-            update={
-                "conversation_url": conversation_url,
-                "agent_server_url": agent_server_url,
-                "session_api_key": session_api_key,
-                "raw_conversation": info,
-            }
+        return replace(
+            conversation,
+            conversation_url=conversation_url,
+            agent_server_url=agent_server_url,
+            session_api_key=session_api_key,
+            raw_conversation=info,
         )
 
     async def stream_v1_events(
