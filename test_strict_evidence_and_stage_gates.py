@@ -6,7 +6,7 @@ import pytest
 
 from artifact_workflow_runtime.artifacts import ArtifactStore
 from artifact_workflow_runtime.graph.stage_gates import StageReadinessError, StageReadinessGate
-from artifact_workflow_runtime.models import ExecutionFamily, ExecutionRequest
+from artifact_workflow_runtime.models import ExecutionFamily, ExecutionRequest, ObservationRequest
 from artifact_workflow_runtime.openhands_adapter.adapter import OpenHandsAdapter
 from artifact_workflow_runtime.openhands_adapter.models import AppConversationStart, OpenHandsRunResult
 
@@ -22,6 +22,13 @@ class ProseOnlyInstance:
             conversation_id="conv",
             start=start,
         )
+
+
+
+
+class FollowupRaisesInstance(ProseOnlyInstance):
+    async def followup(self, *, conversation, prompt: str):
+        raise RuntimeError("followup boom")
 
 
 class ProseThenJsonInstance(ProseOnlyInstance):
@@ -190,3 +197,22 @@ def test_openhands_adapter_always_requests_json_handoff_when_followup_is_availab
     assert "Return JSON only." in instance.followup_prompts[0]
     assert "Return exactly one JSON object" not in request.compiled_prompt()
     assert "response_format: json" not in request.compiled_prompt()
+
+
+def test_openhands_adapter_reports_json_handoff_followup_failure_without_crashing(tmp_path) -> None:
+    adapter = OpenHandsAdapter(FollowupRaisesInstance(), ArtifactStore(tmp_path))
+    result = asyncio.run(
+        adapter.observe(
+            ObservationRequest(
+                task_id="task",
+                execution_family=ExecutionFamily.REPOSITORY_CHANGE,
+                prompt="observe bounded packet",
+            )
+        )
+    )
+
+    assert result.ok is False
+    assert result.stage_failure is not None
+    assert result.stage_failure.failure_kind.value == "api_error"
+    assert "JSON handoff follow-up failed" in result.stage_failure.summary
+    assert any(a.kind == "openhands_followup_error" for a in result.artifacts)

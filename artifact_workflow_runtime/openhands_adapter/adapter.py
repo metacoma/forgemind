@@ -74,18 +74,24 @@ def _verification_passed_from_bundle(*, text: str, ok: bool, transport_error: bo
     return any(marker in lowered for marker in positive) and not any(marker in lowered for marker in negative)
 
 
-def _contract_repair_prompt(*, stage: str, response_contract: StructuredResponseContract) -> str:
-    return "\n".join([
-        f"Your work for the {stage} stage is finished. Do not make any further repository changes, shell commands, git actions, network calls, or tool calls.",
-        "Using only the work already completed in this conversation, return exactly one JSON object that summarizes the completed work in the required machine-readable format.",
-        "This is a reporting-only follow-up. Do not continue implementing, fixing, or exploring.",
-        "Return JSON only.",
-        "Do not include prose.",
+def _contract_repair_prompt(*, stage: str, response_contract: StructuredResponseContract, evidence_requirements: object | None) -> str:
+    lines = [
+        f"Return JSON only. This is the machine-readable handoff for the {stage} stage.",
+        "Do not perform any new repository, shell, git, network, or environment actions.",
+        "Do not edit files, run commands, rerun tests, install dependencies, commit, push, create PRs, or change workflow decisions.",
+        "Use only the work and observations that already happened in this conversation.",
+        "Do not include prose before or after the JSON.",
         "Do not include markdown fences.",
         "Do not save a file or use MCP/file-save tools.",
-        "Required response contract:",
+        "If a required field has no data, return an empty value of the appropriate type and explain the gap in blockers.",
+        "Desired JSON contract:",
         response_contract.render(),
-    ])
+    ]
+    if evidence_requirements is not None:
+        render = getattr(evidence_requirements, "render", None)
+        if callable(render):
+            lines.extend(["Operational evidence requirements:", render()])
+    return "\n".join(lines)
 
 
 def _response_contract_for_request(request: object) -> StructuredResponseContract | None:
@@ -117,13 +123,32 @@ class OpenHandsAdapter:
         stage: str,
         request: object,
         run,
-    ):
+    ) -> tuple[object | None, OpenHandsRunFailure | None, str | None]:
         response_contract = _response_contract_for_request(request)
         followup = getattr(self.instance, "followup", None)
         if response_contract is None or followup is None or getattr(run, "start", None) is None:
-            return None
-        repair_prompt = _contract_repair_prompt(stage=stage, response_contract=response_contract)
-        return await followup(conversation=run.start, prompt=repair_prompt)
+            return None, None, None
+        repair_prompt = _contract_repair_prompt(
+            stage=stage,
+            response_contract=response_contract,
+            evidence_requirements=getattr(request, "evidence_requirements", None),
+        )
+        try:
+            return await followup(conversation=run, prompt=repair_prompt), None, None
+        except Exception as exc:  # pragma: no cover - defensive runtime guard
+            message = f"OpenHands JSON handoff follow-up failed: {exc}"
+            failure = OpenHandsRunFailure(
+                stage=stage,
+                request_id=getattr(request, "id", ""),
+                work_packet_kind=getattr(request, "work_packet_kind", WorkPacketKind.EXECUTE),
+                failure_kind=StageFailureKind.API_ERROR,
+                summary=message,
+                retryable=True,
+                evidence_kind="api_error",
+                conversation_id=getattr(getattr(run, "start", None), "conversation_id", None),
+                sandbox_id=getattr(getattr(run, "start", None), "sandbox_id", None),
+            )
+            return None, failure, message
 
     async def _bundle_with_json_handoff(
         self,
@@ -152,7 +177,7 @@ class OpenHandsAdapter:
         selected_stage_failure = stage_failure
 
         if not transport_error and str(evidence_text or "").strip():
-            handoff_run = await self._run_json_handoff_followup(stage=stage, request=request, run=run)
+            handoff_run, handoff_failure, handoff_error_text = await self._run_json_handoff_followup(stage=stage, request=request, run=run)
             if handoff_run is not None:
                 handoff_artifact, handoff_text, handoff_ok, handoff_transport_error, handoff_evidence_kind, handoff_summary, handoff_stage_failure = self._materialize_stage_result(
                     stage=stage,
@@ -169,6 +194,25 @@ class OpenHandsAdapter:
                 selected_evidence_kind = handoff_evidence_kind
                 selected_summary = handoff_summary
                 selected_stage_failure = handoff_stage_failure
+            elif handoff_failure is not None and handoff_error_text is not None:
+                failure_artifact = self.artifact_store.add_text(
+                    "openhands_followup_error",
+                    handoff_error_text,
+                    metadata={
+                        "conversation_id": getattr(getattr(run, "start", None), "conversation_id", None),
+                        "request_id": getattr(request, "id", None),
+                        "evidence_kind": "api_error",
+                        "raw_response_persisted": True,
+                    },
+                )
+                artifacts.append(failure_artifact)
+                selected_artifact = failure_artifact
+                selected_text = handoff_error_text
+                selected_ok = False
+                selected_transport_error = True
+                selected_evidence_kind = "api_error"
+                selected_summary = handoff_failure.summary
+                selected_stage_failure = handoff_failure
 
         bundle, bundle_artifact, selected_ok, selected_evidence_kind, strict_failure = self._evidence_bundle(
             stage=stage,

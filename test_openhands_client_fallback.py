@@ -130,3 +130,21 @@ async def test_refresh_app_conversation_start_metadata_uses_dataclass_replace(mo
         "session_api_key": "session-key",
     }
     assert start.conversation_url is None
+
+
+async def test_refresh_app_conversation_start_metadata_skips_lookup_when_runtime_metadata_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = OpenHandsClient("http://openhands")
+
+    async def fail_get_app_conversation(conversation_id: str):
+        raise AssertionError("metadata refresh should have been skipped")
+
+    monkeypatch.setattr(client, "get_app_conversation", fail_get_app_conversation)
+
+    start = AppConversationStart(
+        conversation_id="conv-1",
+        conversation_url="http://openhands/api/conversations/conv-1",
+        session_api_key="session-key",
+    )
+    refreshed = await client._refresh_app_conversation_start_metadata(start)
+
+    assert refreshed is start

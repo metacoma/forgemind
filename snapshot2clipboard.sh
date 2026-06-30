@@ -3,7 +3,7 @@ ssh bebebeka@172.25.255.123 '
   latest=$(find /var/lib/homellm/forgemind/run-artifacts \
     -maxdepth 1 \
     -type f \
-    -name "artifact_*" \
+    -name "artifact_*.json" \
     -printf "%T@ %p\n" \
     | sort -nr \
     | head -n1 \

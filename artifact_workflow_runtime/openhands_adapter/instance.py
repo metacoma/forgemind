@@ -9,7 +9,7 @@ from .client import (
     run_conversation_and_collect,
     run_followup_message_and_collect,
 )
-from .models import OpenHandsRunResult
+from .models import AppConversationStart, OpenHandsRunResult
 
 
 class OpenHandsInstance:
@@ -123,28 +123,17 @@ class OpenHandsInstance:
     async def followup(
         self,
         *,
-        conversation,
+        conversation: OpenHandsRunResult | AppConversationStart,
         prompt: str,
     ) -> OpenHandsRunResult:
-        await emit_event(
-            self.event_sink,
-            "conversation_followup_starting",
-            "transport",
-            "Requesting OpenHands follow-up in existing conversation",
-            {"conversation_id": conversation.conversation_id, "mode": "followup"},
-        )
-        result = await run_followup_message_and_collect(
+        base = conversation.start if isinstance(conversation, OpenHandsRunResult) else conversation
+        known_event_ids = conversation.seen_event_ids if isinstance(conversation, OpenHandsRunResult) else frozenset()
+        return await run_followup_message_and_collect(
             endpoint=self.endpoint,
-            api_key=self.api_key,
-            conversation=conversation,
+            conversation=base,
             prompt=prompt,
+            api_key=self.api_key,
+            known_event_ids=known_event_ids,
             event_sink=self.event_sink,
         )
-        await emit_event(
-            self.event_sink,
-            "conversation_followup_finished",
-            "transport",
-            "Collected OpenHands follow-up result",
-            {"conversation_id": result.conversation_id, "last_status": result.status, "mode": "followup"},
-        )
-        return result
+
