@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import re
-
 from artifact_workflow_runtime.artifacts import ArtifactStore
 from artifact_workflow_runtime.evidence import EvidenceContractError, EvidenceExtractor, render_structured_evidence_summary
 from artifact_workflow_runtime.model_routing import ModelRoutingConfig
@@ -19,6 +17,7 @@ from artifact_workflow_runtime.models import (
     PublishResult,
     RepairRequest,
     RepairResult,
+    StructuredResponseContract,
     VerificationMode,
     VerificationRequest,
     VerificationResult,
@@ -33,16 +32,6 @@ from .instance import OpenHandsInstance
 from .result_gate import StageResultGate
 
 
-
-
-_TOKENIZED_URL_RE = re.compile(r"(?P<scheme>https?://)(?P<secret>[^\s/@:]+(?::[^\s/@]+)?@)")
-_GITHUB_PAT_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b")
-
-
-def _sanitize_transport_text(text: str) -> str:
-    sanitized = _TOKENIZED_URL_RE.sub(lambda m: f"{m.group('scheme')}***@", text)
-    sanitized = _GITHUB_PAT_RE.sub('***', sanitized)
-    return sanitized
 
 
 def _add_transport_error_blocker(structured: StructuredEvidence, *, evidence_kind: str) -> StructuredEvidence:
@@ -85,6 +74,26 @@ def _verification_passed_from_bundle(*, text: str, ok: bool, transport_error: bo
     return any(marker in lowered for marker in positive) and not any(marker in lowered for marker in negative)
 
 
+def _contract_repair_prompt(*, stage: str, response_contract: StructuredResponseContract) -> str:
+    return "\n".join([
+        f"Your previous {stage} reply did not satisfy the required JSON response contract.",
+        "Do not make any further repository changes, shell commands, git actions, network calls, or tool calls.",
+        "Using only the work already completed in this conversation, restate the final result as exactly one raw JSON object.",
+        "Return JSON only.",
+        "Do not include prose.",
+        "Do not include markdown fences.",
+        "Do not save a file or use MCP/file-save tools.",
+        "Required response contract:",
+        response_contract.render(),
+    ])
+
+
+def _response_contract_for_request(request: object) -> StructuredResponseContract | None:
+    contract = getattr(request, "response_contract", None)
+    return contract if isinstance(contract, StructuredResponseContract) else None
+
+
+
 class OpenHandsAdapter:
     def __init__(
         self,
@@ -101,6 +110,86 @@ class OpenHandsAdapter:
         self.evidence_extractor = EvidenceExtractor()
         self.contract_gate = OpenHandsStageContractGate()
         self.result_gate = StageResultGate(artifact_store)
+
+    async def _run_contract_repair_followup(
+        self,
+        *,
+        stage: str,
+        request: object,
+        run,
+    ):
+        response_contract = _response_contract_for_request(request)
+        followup = getattr(self.instance, "followup", None)
+        if response_contract is None or followup is None or getattr(run, "start", None) is None:
+            return None
+        repair_prompt = _contract_repair_prompt(stage=stage, response_contract=response_contract)
+        return await followup(conversation=run.start, prompt=repair_prompt)
+
+    async def _bundle_with_contract_repair(
+        self,
+        *,
+        stage: str,
+        request: object,
+        run,
+        artifact,
+        evidence_text: str,
+        ok: bool,
+        transport_error: bool,
+        evidence_kind: str,
+        summary: str,
+        stage_failure,
+        work_packet_kind: WorkPacketKind,
+        changed_default: bool = False,
+    ):
+        artifacts = [artifact]
+        bundle, bundle_artifact, ok, evidence_kind, strict_failure = self._evidence_bundle(
+            stage=stage,
+            text=evidence_text,
+            raw_artifact_id=artifact.id,
+            request_id=request.id,
+            ok=ok,
+            summary=summary,
+            evidence_kind=evidence_kind,
+            work_packet_kind=work_packet_kind,
+            changed_default=changed_default,
+        )
+        artifacts.append(bundle_artifact)
+        effective_run = run
+        effective_stage_failure = stage_failure or strict_failure
+        effective_evidence_text = evidence_text
+        if strict_failure is not None and strict_failure.failure_kind == StageFailureKind.EVIDENCE_CONTRACT_MISSING:
+            repaired_run = await self._run_contract_repair_followup(stage=stage, request=request, run=run)
+            if repaired_run is not None:
+                repaired_artifact, repaired_text, repaired_ok, repaired_transport_error, repaired_evidence_kind, repaired_summary, repaired_stage_failure = self._materialize_stage_result(
+                    stage=stage,
+                    request_id=request.id,
+                    work_packet_kind=work_packet_kind,
+                    run=repaired_run,
+                )
+                artifacts.append(repaired_artifact)
+                repaired_bundle, repaired_bundle_artifact, repaired_ok, repaired_evidence_kind, repaired_strict_failure = self._evidence_bundle(
+                    stage=stage,
+                    text=repaired_text,
+                    raw_artifact_id=repaired_artifact.id,
+                    request_id=request.id,
+                    ok=repaired_ok,
+                    summary=repaired_summary,
+                    evidence_kind=repaired_evidence_kind,
+                    work_packet_kind=work_packet_kind,
+                    changed_default=changed_default,
+                )
+                artifacts.append(repaired_bundle_artifact)
+                if repaired_strict_failure is None:
+                    bundle = repaired_bundle
+                    bundle.artifact_ids = list(dict.fromkeys([*bundle.artifact_ids, artifact.id, bundle_artifact.id]))
+                    ok = repaired_ok
+                    evidence_kind = repaired_evidence_kind
+                    transport_error = repaired_transport_error
+                    summary = repaired_summary
+                    effective_stage_failure = repaired_stage_failure
+                    effective_evidence_text = repaired_text
+                    effective_run = repaired_run
+        return artifacts, bundle, ok, evidence_kind, transport_error, summary, effective_stage_failure, effective_evidence_text, effective_run
 
     def _resolve_stage_model(self, metadata: dict[str, object] | None, fallback_slot: str) -> str | None:
         metadata = metadata or {}
@@ -152,12 +241,11 @@ class OpenHandsAdapter:
 
     def _materialize_stage_result(self, *, stage: str, request_id: str, work_packet_kind: WorkPacketKind, run) -> tuple[object, str, bool, bool, str, str, object | None]:
         gate = self.result_gate.evaluate(stage=stage, request_id=request_id, work_packet_kind=work_packet_kind, run=run)
-        sanitized_text = _sanitize_transport_text(gate.evidence_text)
         if gate.diagnostic_artifact is not None:
-            return gate.diagnostic_artifact, sanitized_text, gate.ok, gate.transport_error, gate.evidence_kind, gate.summary, gate.failure
+            return gate.diagnostic_artifact, gate.evidence_text, gate.ok, gate.transport_error, gate.evidence_kind, gate.summary, gate.failure
         artifact = self.artifact_store.add_text(
             gate.artifact_kind,
-            sanitized_text,
+            gate.evidence_text,
             metadata={
                 "conversation_id": run.conversation_id,
                 "request_id": request_id,
@@ -165,7 +253,7 @@ class OpenHandsAdapter:
                 "raw_response_persisted": True,
             },
         )
-        return artifact, sanitized_text, gate.ok, gate.transport_error, gate.evidence_kind, gate.summary, gate.failure
+        return artifact, gate.evidence_text, gate.ok, gate.transport_error, gate.evidence_kind, gate.summary, gate.failure
 
     def _evidence_bundle(
         self,
@@ -249,14 +337,17 @@ class OpenHandsAdapter:
             work_packet_kind=request.work_packet_kind,
             run=run,
         )
-        bundle, bundle_artifact, ok, evidence_kind, strict_failure = self._evidence_bundle(
+        artifacts, bundle, ok, evidence_kind, transport_error, summary, effective_stage_failure, evidence_text, run = await self._bundle_with_contract_repair(
             stage="observation",
-            text=evidence_text,
-            raw_artifact_id=artifact.id,
-            request_id=request.id,
+            request=request,
+            run=run,
+            artifact=artifact,
+            evidence_text=evidence_text,
             ok=ok,
-            summary=summary,
+            transport_error=transport_error,
             evidence_kind=evidence_kind,
+            summary=summary,
+            stage_failure=stage_failure,
             work_packet_kind=request.work_packet_kind,
         )
         return ObservationResult(
@@ -264,15 +355,15 @@ class OpenHandsAdapter:
             ok=ok,
             summary=summary,
             evidence_text=evidence_text,
-            artifacts=[artifact, bundle_artifact],
+            artifacts=artifacts,
             structured_evidence=bundle.structured,
             evidence_bundle=bundle,
-            primary_evidence_artifact_ids=[bundle_artifact.id],
+            primary_evidence_artifact_ids=[bundle.structured_artifact_id] if bundle.structured_artifact_id else [],
             raw_evidence_artifact_id=artifact.id,
             conversation_id=run.conversation_id,
             transport_error=transport_error,
             evidence_kind=evidence_kind,
-            stage_failure=stage_failure or strict_failure,
+            stage_failure=effective_stage_failure,
         )
 
     async def execute(self, request: ExecutionRequest) -> ExecutionResult:
@@ -289,14 +380,17 @@ class OpenHandsAdapter:
             work_packet_kind=request.work_packet_kind,
             run=run,
         )
-        bundle, bundle_artifact, ok, evidence_kind, strict_failure = self._evidence_bundle(
+        artifacts, bundle, ok, evidence_kind, transport_error, summary, effective_stage_failure, evidence_text, run = await self._bundle_with_contract_repair(
             stage="execution",
-            text=evidence_text,
-            raw_artifact_id=artifact.id,
-            request_id=request.id,
+            request=request,
+            run=run,
+            artifact=artifact,
+            evidence_text=evidence_text,
             ok=ok,
-            summary=summary,
+            transport_error=transport_error,
             evidence_kind=evidence_kind,
+            summary=summary,
+            stage_failure=stage_failure,
             work_packet_kind=request.work_packet_kind,
             changed_default=False,
         )
@@ -306,15 +400,15 @@ class OpenHandsAdapter:
             execution_status=_execution_status_from_bundle(ok=ok, transport_error=transport_error, bundle=bundle),
             summary=summary,
             evidence_text=evidence_text,
-            artifacts=[artifact, bundle_artifact],
+            artifacts=artifacts,
             structured_evidence=bundle.structured,
             evidence_bundle=bundle,
-            primary_evidence_artifact_ids=[bundle_artifact.id],
+            primary_evidence_artifact_ids=[bundle.structured_artifact_id] if bundle.structured_artifact_id else [],
             raw_evidence_artifact_id=artifact.id,
             conversation_id=run.conversation_id,
             transport_error=transport_error,
             evidence_kind=evidence_kind,
-            stage_failure=stage_failure or strict_failure,
+            stage_failure=effective_stage_failure,
         )
 
     async def publish(self, request: PublishRequest) -> PublishResult:
@@ -330,14 +424,17 @@ class OpenHandsAdapter:
             work_packet_kind=request.work_packet_kind,
             run=run,
         )
-        bundle, bundle_artifact, ok, evidence_kind, strict_failure = self._evidence_bundle(
+        artifacts, bundle, ok, evidence_kind, transport_error, summary, effective_stage_failure, evidence_text, run = await self._bundle_with_contract_repair(
             stage="publish",
-            text=evidence_text,
-            raw_artifact_id=artifact.id,
-            request_id=request.id,
+            request=request,
+            run=run,
+            artifact=artifact,
+            evidence_text=evidence_text,
             ok=ok,
-            summary=summary,
+            transport_error=transport_error,
             evidence_kind=evidence_kind,
+            summary=summary,
+            stage_failure=stage_failure,
             work_packet_kind=WorkPacketKind.PUBLISH,
         )
         return PublishResult(
@@ -345,15 +442,15 @@ class OpenHandsAdapter:
             ok=ok,
             summary=summary,
             evidence_text=evidence_text,
-            artifacts=[artifact, bundle_artifact],
+            artifacts=artifacts,
             structured_evidence=bundle.structured,
             evidence_bundle=bundle,
-            primary_evidence_artifact_ids=[bundle_artifact.id],
+            primary_evidence_artifact_ids=[bundle.structured_artifact_id] if bundle.structured_artifact_id else [],
             raw_evidence_artifact_id=artifact.id,
             conversation_id=run.conversation_id,
             transport_error=transport_error,
             evidence_kind=evidence_kind,
-            stage_failure=stage_failure or strict_failure,
+            stage_failure=effective_stage_failure,
         )
 
 
@@ -370,14 +467,17 @@ class OpenHandsAdapter:
             work_packet_kind=request.work_packet_kind,
             run=run,
         )
-        bundle, bundle_artifact, ok, evidence_kind, strict_failure = self._evidence_bundle(
+        artifacts, bundle, ok, evidence_kind, transport_error, summary, effective_stage_failure, evidence_text, run = await self._bundle_with_contract_repair(
             stage="repair",
-            text=evidence_text,
-            raw_artifact_id=artifact.id,
-            request_id=request.id,
+            request=request,
+            run=run,
+            artifact=artifact,
+            evidence_text=evidence_text,
             ok=ok,
-            summary=summary,
+            transport_error=transport_error,
             evidence_kind=evidence_kind,
+            summary=summary,
+            stage_failure=stage_failure,
             work_packet_kind=WorkPacketKind.REPAIR,
             changed_default=False,
         )
@@ -387,15 +487,15 @@ class OpenHandsAdapter:
             execution_status=_execution_status_from_bundle(ok=ok, transport_error=transport_error, bundle=bundle),
             summary=summary,
             evidence_text=evidence_text,
-            artifacts=[artifact, bundle_artifact],
+            artifacts=artifacts,
             structured_evidence=bundle.structured,
             evidence_bundle=bundle,
-            primary_evidence_artifact_ids=[bundle_artifact.id],
+            primary_evidence_artifact_ids=[bundle.structured_artifact_id] if bundle.structured_artifact_id else [],
             raw_evidence_artifact_id=artifact.id,
             conversation_id=run.conversation_id,
             transport_error=transport_error,
             evidence_kind=evidence_kind,
-            stage_failure=stage_failure or strict_failure,
+            stage_failure=effective_stage_failure,
         )
         return RepairResult(request_id=request.id, attempt=request.attempt, ok=ok, summary=summary, execution_result=execution_result)
 
@@ -412,16 +512,20 @@ class OpenHandsAdapter:
             work_packet_kind=request.work_packet_kind,
             run=run,
         )
-        bundle, bundle_artifact, ok, evidence_kind, strict_failure = self._evidence_bundle(
+        artifacts, bundle, ok, evidence_kind, transport_error, summary, effective_stage_failure, evidence_text, run = await self._bundle_with_contract_repair(
             stage="verification",
-            text=evidence_text,
-            raw_artifact_id=artifact.id,
-            request_id=request.id,
+            request=request,
+            run=run,
+            artifact=artifact,
+            evidence_text=evidence_text,
             ok=ok,
-            summary=summary,
+            transport_error=transport_error,
             evidence_kind=evidence_kind,
+            summary=summary,
+            stage_failure=stage_failure,
             work_packet_kind=WorkPacketKind.VERIFY,
         )
+        strict_failure = effective_stage_failure if isinstance(effective_stage_failure, OpenHandsRunFailure) and effective_stage_failure.failure_kind == StageFailureKind.EVIDENCE_CONTRACT_MISSING else None
         passed = _verification_passed_from_bundle(text=evidence_text, ok=ok, transport_error=transport_error, bundle=bundle)
         checks_passed = request.checks if passed else []
         checks_failed = [] if passed else list(request.checks)
@@ -433,15 +537,15 @@ class OpenHandsAdapter:
             passed=passed,
             summary=summary,
             evidence_text=evidence_text,
-            artifacts=[artifact, bundle_artifact],
+            artifacts=artifacts,
             structured_evidence=bundle.structured,
             evidence_bundle=bundle,
-            primary_evidence_artifact_ids=[bundle_artifact.id],
+            primary_evidence_artifact_ids=[bundle.structured_artifact_id] if bundle.structured_artifact_id else [],
             raw_evidence_artifact_id=artifact.id,
             conversation_id=run.conversation_id,
             transport_error=transport_error,
             evidence_kind=evidence_kind,
-            stage_failure=stage_failure or strict_failure,
+            stage_failure=effective_stage_failure,
             checks_passed=checks_passed,
             checks_failed=checks_failed,
             missing_evidence=missing_evidence,
