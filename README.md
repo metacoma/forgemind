@@ -1,66 +1,64 @@
 # artifact-workflow-runtime
 
-Новый standalone-проект для capability-driven orchestration без ролевой модели.
+`artifact-workflow-runtime` is an engineering runtime/control-plane for agentic work with hard separation between orchestration, text reasoning, world execution, policy, state, and artifacts.
 
-Базовая формула системы:
+The current codebase is no longer organized around roles. It is organized around typed stage contracts and bounded backend responsibilities:
 
-- **WorkflowController управляет**
-- **LangGraph orchestrates**
-- **Direct LLM думает только по тексту**
-- **OpenHands наблюдает и исполняет**
-- **Artifacts фиксируют истину**
-- **ContextPacket переносит факты из мира в текст**
-- **Policy/Approval ограничивают действия**
+- **WorkflowController / RuntimeKernel** owns workflow decisions.
+- **LangGraph** runs the state machine.
+- **Direct LLM backend** receives text-only `LLMRequest` packets.
+- **OpenHands backend** receives bounded `observe`, `research`, `execute`, `publish`, or `verify` work packets.
+- **ArtifactStore + WorkflowState** are the source of truth.
+- **ContextBuilder** converts persisted artifacts into a text-only `ContextPacket` for Direct LLM reasoning.
+- **PolicyEngine / EvidenceGate / ApprovalProvider** are separate control layers.
 
-## Что это не делает
-
-Этот проект не является рефакторингом старого репозитория. Он не сохраняет team lead/scout/architect/coder/reviewer/publisher модель и не использует role theater.
-
-## Откуда взят код
-
-Старый архив использован как **донор**:
-
-- explicit-only OpenHands payload builder
-- OpenHands REST/WebSocket patterns
-- conversation/session contracts
-- Pydantic public contracts
-- fake OpenHands test harness
-
-Весь role-centric слой отброшен.
-
-## Структура
+## Architecture map
 
 ```text
 src/artifact_workflow_runtime/
-  controller/
-  graph/
-  llm_backend/
-  openhands_adapter/
-  context/
-  observation/
-  artifacts/
-  policy/
-  capabilities/
-  families/
-  models/
-  reports/
+  controller/          # public WorkflowController entrypoint
+  control_plane/       # RuntimeKernel: next-step and policy gate decisions
+  graph/               # LangGraph workflow + offline compat state graph
+  models/              # Pydantic typed contracts and WorkflowState
+  artifacts/           # file-backed ArtifactStore and index
+  context/             # artifacts -> ContextPacket text bridge
+  llm_backend/         # text-only Direct LLM adapters and fake backend
+  openhands_adapter/   # bounded OpenHands observe/execute/verify adapter
+  observation/         # ObservationRequest / research request construction
+  policy/              # policy, evidence gate, approvals
+  reports/             # FinalReport assembly
+  runtime_events.py    # stage and transport telemetry
 ```
 
-## MVP-flow
+## Runtime flow
 
-1. intake task
-2. classify through Direct LLM
-3. if world facts are needed → OpenHands observation
-4. build context packet
-5. Direct LLM planning
-6. policy check
-7. approval if needed
-8. OpenHands execution
-9. ingest artifacts/evidence
-10. verification
-11. final report
+1. `intake` stores the task as an artifact.
+2. `classify` asks the Direct LLM for a typed `TaskClassification`.
+3. `route` asks the Direct LLM what evidence is required before planning.
+4. `RuntimeKernel` decides whether to run external research and/or world observation.
+5. OpenHands collects facts as bounded observation/research packets.
+6. `ContextBuilder` builds a text-only `ContextPacket` from artifacts.
+7. Direct LLM synthesizes obligations and an `ExecutionPlan` from the `ContextPacket`.
+8. `RuntimeKernel` + `EvidenceGate` + `PolicyEngine` decide whether execution is blocked, allowed, or approval-gated.
+9. OpenHands executes only after policy/approval and receives an explicit bounded `ExecutionRequest`.
+10. Optional publish obligations are handled as a separate bounded packet.
+11. Direct LLM verifies evidence from artifacts; final status is assembled by `FinalReportBuilder`.
 
-## Установка
+## Backend invariants
+
+### Direct LLM
+
+The Direct LLM gets only text. Its request contract includes forbidden inputs such as filesystem, shell, git, host, Kubernetes, and network runtime state. It must not be given live world access.
+
+### OpenHands
+
+OpenHands is not the workflow brain. It receives bounded work packets and returns evidence/artifacts/blockers. It does not decide the next graph step.
+
+### Artifacts and state
+
+Every meaningful step writes typed records or evidence files to `ArtifactStore`. `WorkflowState` stores serializable model dumps plus artifact ids; runtime services are injected separately.
+
+## Installation
 
 ```bash
 python -m venv .venv
@@ -68,77 +66,25 @@ python -m venv .venv
 pip install -e '.[test,langgraph]'
 ```
 
-`langgraph` — основной orchestrator. Если пакет временно недоступен, в проекте есть маленький совместимый fallback для офлайн-тестов.
+`langgraph` is the preferred runtime layer. The project also includes a tiny `graph.compat` fallback so offline tests can run when LangGraph is unavailable.
 
 ## CLI
 
 ```bash
 artifact-workflow-run \
-  --task "Работай с репозиторием metacoma/freeplane_plugin_grpc, склонируй его и внеси нужные изменения" \
-  --direct-llm-endpoint http://localhost:4000/v1 \
-  --direct-llm-model openai/reasoner \
-  --openhands-endpoint http://localhost:3000 \
-  --openhands-model openai/executor
-```
-
-Важно: runtime больше **не принимает** `--repository/--branch/--git-provider` как пользовательские флаги.
-Источник истины для целевого репозитория, ветки, хоста или кластера — **текст задачи** и/или уже существующий sandbox OpenHands.
-
-CLI печатает финальный JSON report и сохраняет artifacts в `./run-artifacts`.
-
-## Документация
-
-- [ARCHITECTURE.md](ARCHITECTURE.md)
-- [REUSE_PLAN.md](REUSE_PLAN.md)
-
-## OpenHands sandbox reuse
-
-The CLI supports `--reuse` to search for an existing OpenHands sandbox already associated with the selected OpenHands model and reuse it for the workflow run. You can also pin a specific sandbox or conversation explicitly with `--sandbox-id` and `--conversation-id`.
-
-Example:
-
-```bash
-artifact-workflow-run \
-  --task "Inspect repo and fix failing tests in metacoma/freeplane_plugin_grpc" \
+  --task "Inspect repo metacoma/freeplane_plugin_grpc and fix failing tests" \
   --direct-llm-endpoint http://127.0.0.1:4000/v1 \
   --direct-llm-model openai/reasoner \
   --openhands-endpoint http://127.0.0.1:3000 \
   --openhands-model openai/executor \
-  --reuse \
   --auto-approve
 ```
 
-
-## Modern TUI cockpit
-
-The project now ships with an optional Textual-based TUI. Textual provides a full Python app framework for terminal UIs, with widgets such as `DataTable`, `RichLog`, `Tree`, `MarkdownViewer`, `Input`, and `TextArea`, plus support for workers, a command palette, CLI integration, and running over SSH. Rich remains valuable for renderables like tables, trees, live views, and logs, while prompt_toolkit is a strong lower-level option for full-screen terminal apps when you want to build the layout and key bindings more manually. Textual is the best fit here because this runtime needs a high-information cockpit rather than a raw prompt shell.
-
-Install the TUI extra:
-
-```bash
-pip install -e '.[tui]'
-```
-
-Run the cockpit:
-
-```bash
-artifact-workflow-tui
-```
-
-The TUI shows:
-- live pipeline stage status
-- event log with stage-level telemetry
-- artifacts table with preview
-- evidence viewer
-- final JSON report
-- editable task and backend configuration
-
+The CLI prints the final JSON `FinalReport` and writes artifacts to `./run-artifacts` by default.
 
 ## Per-stage model routing
 
-The runtime supports YAML model routing using only explicit stage-based mappings.
-
-Supported format:
+Supported YAML format:
 
 ```yaml
 direct_llm:
@@ -153,18 +99,26 @@ openhands:
   research: openai/qwen36-27b
   execute: openai/qwen36-35b
   publish: openai/qwen36-35b
+
+verification_checks:
+  # Optional: when present, each plan.verification_checks item is assessed
+  # as a separate typed VerificationCheckRequest with its own model_override.
+  unit_tests: openai/qwen36-27b
+  integration_tests: openai/qwen36-35b
+  pr_checks: openai/qwen36-35b
+  security: openai/qwen36-35b
+  docs: openai/qwen36-27b
+  default: openai/qwen36-27b
 ```
 
-You can optionally nest the same mappings under `models:` or use the `stages:` form:
+`verification_checks` keys are normalized from human plan checks. For example, `run unit tests` maps to `unit_tests`, while `wait for GitHub Actions PR checks` maps to `pr_checks`. If no check-specific route matches, the runtime falls back to `direct_llm.verify`, then the Direct LLM default model.
 
-```yaml
-stages:
-  classify:
-    backend: direct_llm
-    model: openai/qwen36-27b
-  execute:
-    backend: openhands
-    model: openai/qwen36-35b
+Legacy `roles:` configs are rejected.
+
+## Tests
+
+```bash
+python -m pytest -q
 ```
 
-Legacy `roles:` mapping is no longer supported and will raise a configuration error.
+The current test suite covers capability normalization, per-stage and per-verification-check model routing, OpenHands transport fallback, sandbox reuse, runtime events, policy gating, research/observation routing, publish obligations, and verification behavior.

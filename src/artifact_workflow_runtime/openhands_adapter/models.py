@@ -1,31 +1,28 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
-
-from pydantic import BaseModel, ConfigDict, Field
 
 JsonDict = dict[str, Any]
 
 
-class OpenHandsModel(BaseModel):
-    model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True, populate_by_name=True)
-
-
-class AppConversationStart(OpenHandsModel):
+@dataclass(slots=True)
+class AppConversationStart:
     conversation_id: str
     task_id: str | None = None
     status: str | None = None
     sandbox_id: str | None = None
     agent_server_url: str | None = None
     conversation_url: str | None = None
-    session_api_key: str | None = Field(default=None, exclude=True, repr=False)
-    raw_task: JsonDict | None = Field(default=None, repr=False)
-    raw_conversation: JsonDict | None = Field(default=None, repr=False)
+    session_api_key: str | None = None
+    raw_task: JsonDict = field(default_factory=dict)
+    raw_conversation: JsonDict | None = None
 
 
-class OpenHandsRunResult(OpenHandsModel):
+@dataclass(slots=True)
+class OpenHandsRunResult:
     text: str
-    status: str | None = None
+    status: str | None
     conversation_id: str
     start: AppConversationStart
-    seen_event_ids: frozenset[str] = Field(default_factory=frozenset)
+    seen_event_ids: frozenset[str] = field(default_factory=frozenset)

@@ -92,6 +92,19 @@ class ExecutionFamily(str, Enum):
     NETWORK_INVESTIGATION = "network_investigation"
 
 
+class BackendKind(str, Enum):
+    DIRECT_LLM = "direct_llm"
+    OPENHANDS = "openhands"
+
+
+class WorkPacketKind(str, Enum):
+    RESEARCH = "research"
+    OBSERVE = "observe"
+    EXECUTE = "execute"
+    PUBLISH = "publish"
+    VERIFY = "verify"
+
+
 class Task(RuntimeModel):
     id: str = Field(default_factory=lambda: new_id("task"))
     title: str | None = None
@@ -108,6 +121,18 @@ class Artifact(RuntimeModel):
     created_at: str = Field(default_factory=utc_now)
     text_preview: str | None = None
     metadata: JsonDict = Field(default_factory=dict)
+
+
+class EvidenceBundle(RuntimeModel):
+    id: str = Field(default_factory=lambda: new_id("evidence"))
+    source_backend: BackendKind
+    work_packet_kind: WorkPacketKind
+    ok: bool
+    summary: str
+    artifact_ids: list[str] = Field(default_factory=list)
+    evidence_kind: str = "agent_text"
+    blockers: list[str] = Field(default_factory=list)
+    created_at: str = Field(default_factory=utc_now)
 
 
 class ContextSection(RuntimeModel):
@@ -171,8 +196,12 @@ class ObservationRequest(RuntimeModel):
     id: str = Field(default_factory=lambda: new_id("observe_req"))
     task_id: str
     execution_family: ExecutionFamily
+    work_packet_kind: WorkPacketKind = WorkPacketKind.OBSERVE
     capabilities: list[Capability] = Field(default_factory=list)
     prompt: str
+    allowed_actions: list[str] = Field(default_factory=lambda: ["read_files", "run_read_only_commands", "inspect_repo", "inspect_runtime_state"] )
+    forbidden_actions: list[str] = Field(default_factory=lambda: ["edit_files", "commit", "push", "apply_cluster_changes", "change_host_config"] )
+    expected_outputs: list[str] = Field(default_factory=lambda: ["facts", "commands_run", "outputs", "blockers", "unknowns"] )
     metadata: JsonDict = Field(default_factory=dict)
 
     @field_validator("capabilities", mode="before")
@@ -199,8 +228,11 @@ class LLMRequest(RuntimeModel):
     kind: str
     prompt: str
     task_id: str
+    backend: BackendKind = BackendKind.DIRECT_LLM
     context_packet_id: str | None = None
     response_schema: str | None = None
+    allowed_inputs: list[str] = Field(default_factory=lambda: ["task_text", "context_packet_text", "schema_text"] )
+    forbidden_inputs: list[str] = Field(default_factory=lambda: ["filesystem", "shell", "git", "hosts", "kubernetes", "network_runtime_state"] )
     metadata: JsonDict = Field(default_factory=dict)
 
 
@@ -273,9 +305,16 @@ class ExecutionRequest(RuntimeModel):
     id: str = Field(default_factory=lambda: new_id("exec_req"))
     task_id: str
     execution_family: ExecutionFamily
+    work_packet_kind: WorkPacketKind = WorkPacketKind.EXECUTE
     capabilities: list[Capability] = Field(default_factory=list)
     prompt: str
     plan_summary: str | None = None
+    context_packet_id: str | None = None
+    artifact_ids: list[str] = Field(default_factory=list)
+    allowed_actions: list[str] = Field(default_factory=lambda: ["edit_files", "run_commands", "run_tests", "use_git_when_requested", "collect_evidence"] )
+    forbidden_actions: list[str] = Field(default_factory=lambda: ["change_workflow_decision", "skip_required_evidence", "act_outside_capabilities"] )
+    expected_outputs: list[str] = Field(default_factory=lambda: ["changed_files", "commands_run", "test_results", "blockers"] )
+    success_criteria: list[str] = Field(default_factory=list)
     metadata: JsonDict = Field(default_factory=dict)
 
     @field_validator("capabilities", mode="before")
@@ -301,9 +340,12 @@ class PublishRequest(RuntimeModel):
     id: str = Field(default_factory=lambda: new_id("publish_req"))
     execution_result_id: str
     task_id: str
+    work_packet_kind: WorkPacketKind = WorkPacketKind.PUBLISH
     prompt: str
     require_commit: bool = False
     require_push: bool = False
+    artifact_ids: list[str] = Field(default_factory=list)
+    expected_outputs: list[str] = Field(default_factory=lambda: ["git_status", "commit_hashes", "push_result", "pr_url", "check_statuses", "blockers"] )
     metadata: JsonDict = Field(default_factory=dict)
 
 
@@ -320,10 +362,44 @@ class PublishResult(RuntimeModel):
     created_at: str = Field(default_factory=utc_now)
 
 
+class VerificationCheckRequest(RuntimeModel):
+    id: str = Field(default_factory=lambda: new_id("verify_check_req"))
+    parent_request_id: str
+    task_id: str
+    execution_result_id: str
+    execution_family: ExecutionFamily
+    check_name: str
+    normalized_check: str
+    backend: BackendKind = BackendKind.DIRECT_LLM
+    prompt: str
+    context_packet_id: str | None = None
+    artifact_ids: list[str] = Field(default_factory=list)
+    allowed_inputs: list[str] = Field(default_factory=lambda: ["task_text", "context_packet_text", "execution_evidence_text", "publish_evidence_text", "schema_text"] )
+    forbidden_inputs: list[str] = Field(default_factory=lambda: ["filesystem", "shell", "git", "hosts", "kubernetes", "network_runtime_state"] )
+    metadata: JsonDict = Field(default_factory=dict)
+
+
+class VerificationCheckResult(RuntimeModel):
+    id: str = Field(default_factory=lambda: new_id("verify_check_res"))
+    request_id: str
+    check_name: str
+    normalized_check: str
+    passed: bool
+    summary: str
+    evidence_text: str
+    missing_evidence: list[str] = Field(default_factory=list)
+    confidence: str = "low"
+    model: str | None = None
+    verifier_backend: str = "direct_llm"
+    llm_request_id: str | None = None
+    created_at: str = Field(default_factory=utc_now)
+
+
 class VerificationRequest(RuntimeModel):
     id: str = Field(default_factory=lambda: new_id("verify_req"))
     execution_result_id: str
     execution_family: ExecutionFamily
+    work_packet_kind: WorkPacketKind = WorkPacketKind.VERIFY
     prompt: str
     artifact_ids: list[str] = Field(default_factory=list)
     checks: list[str] = Field(default_factory=list)

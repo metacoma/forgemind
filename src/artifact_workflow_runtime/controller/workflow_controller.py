@@ -4,6 +4,7 @@ from pathlib import Path
 
 from artifact_workflow_runtime.artifacts import ArtifactStore
 from artifact_workflow_runtime.context import ContextBuilder
+from artifact_workflow_runtime.control_plane import RuntimeKernel
 from artifact_workflow_runtime.graph import WorkflowServices, build_workflow_graph
 from artifact_workflow_runtime.models import FinalReport, Task
 from artifact_workflow_runtime.observation import ObservationService

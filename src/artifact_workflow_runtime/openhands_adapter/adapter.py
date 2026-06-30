@@ -9,6 +9,7 @@ from artifact_workflow_runtime.models import (
     ObservationResult,
     VerificationRequest,
     VerificationResult,
+    WorkPacketKind,
 )
 
 from .instance import OpenHandsInstance
@@ -44,7 +45,9 @@ class OpenHandsAdapter:
         return self.model_routing.resolve_openhands(slot, default_model) if self.model_routing else default_model
 
     async def observe(self, request: ObservationRequest) -> ObservationResult:
-        slot = "research" if request.metadata.get("source") == "fresh_external_research" else "observe"
+        if request.work_packet_kind not in {WorkPacketKind.OBSERVE, WorkPacketKind.RESEARCH}:
+            raise ValueError(f"OpenHands observe() only accepts observe/research packets, got {request.work_packet_kind}")
+        slot = "research" if request.work_packet_kind == WorkPacketKind.RESEARCH or request.metadata.get("source") == "fresh_external_research" else "observe"
         run = await self.instance.run(
             prompt=request.prompt,
             model=self._resolve_stage_model(request.metadata, slot),
@@ -69,6 +72,8 @@ class OpenHandsAdapter:
         )
 
     async def execute(self, request: ExecutionRequest) -> ExecutionResult:
+        if request.work_packet_kind not in {WorkPacketKind.EXECUTE, WorkPacketKind.PUBLISH}:
+            raise ValueError(f"OpenHands execute() only accepts execute/publish packets, got {request.work_packet_kind}")
         run = await self.instance.run(
             prompt=request.prompt,
             model=self._resolve_stage_model(request.metadata, "execute"),
@@ -93,6 +98,8 @@ class OpenHandsAdapter:
         )
 
     async def verify(self, request: VerificationRequest) -> VerificationResult:
+        if request.work_packet_kind != WorkPacketKind.VERIFY:
+            raise ValueError(f"OpenHands verify() only accepts verify packets, got {request.work_packet_kind}")
         run = await self.instance.run(
             prompt=request.prompt,
             model=self._resolve_stage_model(request.metadata, "verify"),

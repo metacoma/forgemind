@@ -2,15 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+import json
 
 from artifact_workflow_runtime.artifacts import ArtifactStore
 from artifact_workflow_runtime.context import ContextBuilder
-from artifact_workflow_runtime.families import family_requires_evidence_gate
+from artifact_workflow_runtime.control_plane import RuntimeKernel
 from artifact_workflow_runtime.llm_backend.prompts import (
     build_classification_prompt,
     build_obligation_analysis_prompt,
     build_plan_prompt,
     build_route_prompt,
+    build_verification_check_prompt,
     build_verification_prompt,
 )
 from artifact_workflow_runtime.models import (
@@ -30,6 +32,8 @@ from artifact_workflow_runtime.models import (
     RoutingDecision,
     Task,
     TaskClassification,
+    VerificationCheckRequest,
+    VerificationCheckResult,
     VerificationRequest,
     VerificationResult,
 )
@@ -38,16 +42,14 @@ from artifact_workflow_runtime.observation import ObservationService
 from artifact_workflow_runtime.policy import ApprovalProvider, PolicyEngine
 from artifact_workflow_runtime.reports import FinalReportBuilder
 from artifact_workflow_runtime.runtime_events import EventSink, emit_event
-from artifact_workflow_runtime.model_routing import ModelRoutingConfig
+from artifact_workflow_runtime.model_routing import ModelRoutingConfig, normalize_verification_check_slot
 from .contracts import (
     append_artifact_id as _append_artifact_id,
     effective_task_intent as _effective_task_intent,
     execution_capabilities as _execution_capabilities,
     merge_plan_with_obligations as _merge_plan_with_obligations,
     normalized_completion_status as _normalized_completion_status,
-    plan_intent_mismatch as _plan_intent_mismatch,
     publish_capabilities as _publish_capabilities,
-    publish_required as _publish_required,
     render_steps as _render_steps,
 )
 
@@ -69,6 +71,7 @@ class WorkflowServices:
     final_report_builder: FinalReportBuilder
     event_sink: EventSink | None = None
     model_routing: ModelRoutingConfig | None = None
+    runtime_kernel: RuntimeKernel | None = None
 
 
 async def _emit(services: WorkflowServices, kind: str, stage: str, message: str, **payload: Any) -> None:
@@ -83,9 +86,223 @@ def _llm_model_for(services: WorkflowServices, slot: str) -> str | None:
 
 def _openhands_model_for(services: WorkflowServices, slot: str) -> str | None:
     routing = services.model_routing
-    default_model = getattr(services.openhands_adapter.instance, "default_model", None)
+    instance = getattr(services.openhands_adapter, "instance", None)
+    default_model = getattr(instance, "default_model", None)
     return routing.resolve_openhands(slot, default_model) if routing else default_model
 
+
+
+def _llm_model_for_verification_check(services: WorkflowServices, check_name: object) -> str | None:
+    routing = services.model_routing
+    default_model = getattr(services.llm_backend, "default_model", None)
+    return routing.resolve_verification_check(check_name, default_model) if routing else _llm_model_for(services, "verify")
+
+
+def _unique(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        text = str(item).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def _aggregate_confidence(values: list[str]) -> str:
+    normalized = {str(value or "").strip().lower() for value in values}
+    if "low" in normalized:
+        return "low"
+    if "medium" in normalized:
+        return "medium"
+    if "high" in normalized:
+        return "high"
+    return "low"
+
+
+async def _run_check_routed_verification(
+    services: WorkflowServices,
+    *,
+    task: Task,
+    plan: ExecutionPlan,
+    execution: ExecutionResult,
+    publish: PublishResult | None,
+    context_packet: ContextPacket,
+    base_request: VerificationRequest,
+    artifact_ids: list[str],
+) -> tuple[VerificationRequest, VerificationResult, list[str], list[dict[str, Any]], list[dict[str, Any]]]:
+    check_requests: list[VerificationCheckRequest] = []
+    check_results: list[VerificationCheckResult] = []
+    parsed_assessments: list[EvidenceVerification] = []
+    result_artifacts = []
+
+    for check_name in plan.verification_checks:
+        normalized_check = normalize_verification_check_slot(check_name)
+        model_override = _llm_model_for_verification_check(services, check_name)
+        prompt = build_verification_check_prompt(task, context_packet, plan, execution, check_name, publish)
+        check_request = VerificationCheckRequest(
+            parent_request_id=base_request.id,
+            task_id=task.id,
+            execution_result_id=execution.id,
+            execution_family=plan.execution_family,
+            check_name=check_name,
+            normalized_check=normalized_check,
+            prompt=prompt,
+            context_packet_id=context_packet.id,
+            artifact_ids=list(artifact_ids),
+            metadata={
+                "mode": "per_check_evidence_only",
+                "model_slot": f"verify:{normalized_check}",
+                "verification_check": normalized_check,
+                "model_override": model_override,
+            },
+        )
+        llm_request = LLMRequest(
+            kind="verification_check",
+            prompt=check_request.prompt,
+            task_id=task.id,
+            context_packet_id=context_packet.id,
+            metadata={
+                **check_request.metadata,
+                "verification_check_request_id": check_request.id,
+                "check_name": check_name,
+            },
+        )
+        llm_result, parsed = await services.llm_backend.complete_json(llm_request, EvidenceVerification)
+        parsed_assessments.append(parsed)
+
+        check_result = VerificationCheckResult(
+            request_id=check_request.id,
+            check_name=check_name,
+            normalized_check=normalized_check,
+            passed=parsed.passed,
+            summary=parsed.summary,
+            evidence_text=llm_result.raw_text,
+            missing_evidence=list(parsed.missing_evidence),
+            confidence=parsed.confidence,
+            model=llm_result.model,
+            verifier_backend=llm_result.backend or "direct_llm",
+            llm_request_id=llm_request.id,
+        )
+        assessment_artifact = services.artifact_store.add_json(
+            "verification_check_assessment",
+            {
+                "request": check_request.model_dump(mode="json"),
+                "llm_request": llm_request.model_dump(mode="json"),
+                "llm_result": llm_result.model_dump(mode="json"),
+                "assessment": parsed.model_dump(mode="json"),
+                "check_result": check_result.model_dump(mode="json"),
+            },
+            metadata={
+                "task_id": task.id,
+                "check_name": check_name,
+                "normalized_check": normalized_check,
+                "model": llm_result.model,
+            },
+        )
+        raw_artifact = services.artifact_store.add_text(
+            "verification_check_llm_raw",
+            llm_result.raw_text,
+            metadata={
+                "request_id": llm_request.id,
+                "verification_check_request_id": check_request.id,
+                "check_name": check_name,
+                "normalized_check": normalized_check,
+                "backend": llm_result.backend,
+                "model": llm_result.model,
+            },
+        )
+        result_artifacts.extend([assessment_artifact, raw_artifact])
+        artifact_ids.extend([assessment_artifact.id, raw_artifact.id])
+        check_requests.append(check_request)
+        check_results.append(check_result)
+
+    checks_passed = _unique([result.check_name for result in check_results if result.passed])
+    checks_failed = _unique([result.check_name for result in check_results if not result.passed])
+    missing_evidence = _unique([item for parsed in parsed_assessments for item in parsed.missing_evidence])
+    performed_test_levels = _unique([item for parsed in parsed_assessments for item in parsed.performed_test_levels])
+    missing_test_levels = _unique([item for parsed in parsed_assessments for item in parsed.missing_test_levels])
+    setup_steps_performed = _unique([item for parsed in parsed_assessments for item in parsed.setup_steps_performed])
+    missing_setup_steps = _unique([item for parsed in parsed_assessments for item in parsed.missing_setup_steps])
+    missing_obligations = _unique([item for parsed in parsed_assessments for item in parsed.missing_obligations])
+    pr_checks_passed = _unique([item for parsed in parsed_assessments for item in parsed.pr_checks_passed])
+    pr_checks_failed = _unique([item for parsed in parsed_assessments for item in parsed.pr_checks_failed])
+    pr_checks_pending = _unique([item for parsed in parsed_assessments for item in parsed.pr_checks_pending])
+    passed = bool(check_results) and not checks_failed and not missing_evidence and all(parsed.passed for parsed in parsed_assessments)
+    commit_required = any(parsed.commit_required for parsed in parsed_assessments)
+    push_required = any(parsed.push_required for parsed in parsed_assessments)
+    commit_done = any(parsed.commit_done for parsed in parsed_assessments)
+    push_done = any(parsed.push_done for parsed in parsed_assessments)
+    completion_status = _normalized_completion_status(
+        passed,
+        missing_evidence,
+        checks_passed,
+        checks_failed,
+        missing_test_levels,
+        missing_setup_steps,
+        missing_obligations,
+        commit_required,
+        push_required,
+        commit_done,
+        push_done,
+        "completed" if passed else "partially_completed",
+    )
+    aggregate_payload = {
+        "mode": "per_check_evidence_only",
+        "checks": [result.model_dump(mode="json") for result in check_results],
+        "models": {result.check_name: result.model for result in check_results},
+        "passed": passed,
+        "checks_passed": checks_passed,
+        "checks_failed": checks_failed,
+        "missing_evidence": missing_evidence,
+        "completion_status": completion_status,
+    }
+    aggregate_artifact = services.artifact_store.add_json("verification_assessment", aggregate_payload, metadata={"task_id": task.id, "mode": "per_check"})
+    artifact_ids.append(aggregate_artifact.id)
+    result_artifacts.append(aggregate_artifact)
+
+    request = VerificationRequest(
+        execution_result_id=execution.id,
+        execution_family=plan.execution_family,
+        prompt="per_check_evidence_verification",
+        artifact_ids=artifact_ids,
+        checks=list(plan.verification_checks),
+        metadata={
+            "mode": "per_check_evidence_only",
+            "parent_request_id": base_request.id,
+            "check_count": len(check_results),
+            "check_models": {result.check_name: result.model for result in check_results},
+        },
+    )
+    result = VerificationResult(
+        request_id=request.id,
+        passed=passed,
+        summary=f"Per-check verification completed: {len(checks_passed)} passed, {len(checks_failed)} failed.",
+        evidence_text=json.dumps(aggregate_payload, ensure_ascii=False, indent=2),
+        artifacts=result_artifacts,
+        checks_passed=checks_passed,
+        checks_failed=checks_failed,
+        missing_evidence=missing_evidence,
+        confidence=_aggregate_confidence([parsed.confidence for parsed in parsed_assessments]),
+        verifier_backend="direct_llm_per_check",
+        performed_test_levels=performed_test_levels,
+        missing_test_levels=missing_test_levels,
+        setup_steps_performed=setup_steps_performed,
+        missing_setup_steps=missing_setup_steps,
+        commit_required=commit_required,
+        push_required=push_required,
+        commit_done=commit_done,
+        push_done=push_done,
+        pr_detected=any(parsed.pr_detected for parsed in parsed_assessments),
+        pr_checks_waited=any(parsed.pr_checks_waited for parsed in parsed_assessments),
+        pr_checks_passed=pr_checks_passed,
+        pr_checks_failed=pr_checks_failed,
+        pr_checks_pending=pr_checks_pending,
+        missing_obligations=missing_obligations,
+        completion_status=completion_status,
+    )
+    return request, result, artifact_ids, [req.model_dump(mode="json") for req in check_requests], [res.model_dump(mode="json") for res in check_results]
 
 def build_workflow_graph(services: WorkflowServices):
     async def intake_node(state: WorkflowState) -> dict[str, Any]:
@@ -151,11 +368,8 @@ def build_workflow_graph(services: WorkflowServices):
 
     def route_next(state: WorkflowState) -> str:
         decision = RoutingDecision.model_validate(state["route_decision"])
-        if decision.needs_fresh_external_research:
-            return "research"
-        if decision.needs_repository_observation or decision.needs_world_observation:
-            return "observe"
-        return "build_context"
+        kernel = services.runtime_kernel or RuntimeKernel()
+        return kernel.next_after_route(decision)
 
     async def research_node(state: WorkflowState) -> dict[str, Any]:
         task = Task.model_validate(state["task"])
@@ -185,9 +399,8 @@ def build_workflow_graph(services: WorkflowServices):
 
     def research_next(state: WorkflowState) -> str:
         decision = RoutingDecision.model_validate(state["route_decision"])
-        if decision.needs_repository_observation or decision.needs_world_observation:
-            return "observe"
-        return "build_context"
+        kernel = services.runtime_kernel or RuntimeKernel()
+        return kernel.next_after_research(decision)
 
     async def observe_node(state: WorkflowState) -> dict[str, Any]:
         task = Task.model_validate(state["task"])
@@ -330,43 +543,17 @@ def build_workflow_graph(services: WorkflowServices):
         plan = ExecutionPlan.model_validate(state["plan"])
         task = Task.model_validate(state["task"])
         await _emit(services, "stage_started", "policy", "Checking policy and evidence gates", task_id=task.id)
-        reasons: list[str] = []
-        blocked = False
-        mismatch = _plan_intent_mismatch(classification, plan)
-        if mismatch:
-            blocked = True
-            reasons.append(mismatch)
-        observation_raw = state.get("observation_result")
-        if family_requires_evidence_gate(plan.execution_family):
-            if observation_raw is None:
-                blocked = True
-                reasons.append("Execution requires observation evidence, but no observation result was captured.")
-            else:
-                observation = ObservationResult.model_validate(observation_raw)
-                if not observation.ok:
-                    blocked = True
-                    reasons.append("Execution requires usable observation evidence, but observation failed or returned transport garbage.")
-        if route.needs_fresh_external_research:
-            research_raw = state.get("research_result")
-            if research_raw is None:
-                blocked = True
-                reasons.append("Planning and execution require fresh external research evidence, but none was captured.")
-            else:
-                research = ObservationResult.model_validate(research_raw)
-                if not research.ok:
-                    blocked = True
-                    reasons.append("Fresh external research was required, but the research observation failed or returned unusable evidence.")
-        if blocked:
-            decision = PolicyDecision(
-                allowed=False,
-                blocked=True,
-                requires_approval=False,
-                reasons=reasons,
-                execution_family=plan.execution_family,
-                capabilities=list(dict.fromkeys([*classification.capabilities, *plan.capabilities])),
-            )
-        else:
-            decision = services.policy_engine.decide(classification, plan)
+        observation = ObservationResult.model_validate(state["observation_result"]) if state.get("observation_result") else None
+        research = ObservationResult.model_validate(state["research_result"]) if state.get("research_result") else None
+        kernel = services.runtime_kernel or RuntimeKernel()
+        decision = kernel.evaluate_policy(
+            classification=classification,
+            route=route,
+            plan=plan,
+            policy_engine=services.policy_engine,
+            research=research,
+            observation=observation,
+        )
         artifact = services.artifact_store.add_json("policy_decision", decision.model_dump(mode="json"))
         await _emit(
             services,
@@ -386,12 +573,8 @@ def build_workflow_graph(services: WorkflowServices):
         }
 
     def policy_next(state: WorkflowState) -> str:
-        decision = state["policy_decision"]
-        if decision.get("blocked"):
-            return "finalize"
-        if decision.get("requires_approval"):
-            return "approval"
-        return "execute"
+        kernel = services.runtime_kernel or RuntimeKernel()
+        return kernel.next_after_policy(state["policy_decision"])
 
     async def approval_node(state: WorkflowState) -> dict[str, Any]:
         decision = state["policy_decision"]
@@ -411,8 +594,8 @@ def build_workflow_graph(services: WorkflowServices):
         }
 
     def approval_next(state: WorkflowState) -> str:
-        approval = state.get("approval_request") or {}
-        return "execute" if approval.get("approved") else "finalize"
+        kernel = services.runtime_kernel or RuntimeKernel()
+        return kernel.next_after_approval(state.get("approval_request"))
 
     async def execute_node(state: WorkflowState) -> dict[str, Any]:
         task = Task.model_validate(state["task"])
@@ -448,6 +631,10 @@ def build_workflow_graph(services: WorkflowServices):
             capabilities=plan.capabilities,
             prompt=prompt,
             plan_summary=plan.summary,
+            context_packet_id=context_packet.id if context_packet else None,
+            artifact_ids=list(state.get("artifact_ids") or []),
+            success_criteria=list(plan.success_criteria),
+            expected_outputs=["changed_files", "commands_run", "setup_steps", "test_results", "blockers"],
             metadata={"evidence_required": True, "model_slot": "execute", "model_override": _openhands_model_for(services, "execute")},
         )
         await _emit(services, "execution_request", "execute", "Execution request created", execution_family=request.execution_family.value, capability_count=len(request.capabilities))
@@ -475,9 +662,8 @@ def build_workflow_graph(services: WorkflowServices):
     def execute_next(state: WorkflowState) -> str:
         plan = ExecutionPlan.model_validate(state["plan"])
         execution = ExecutionResult.model_validate(state["execution_result"])
-        if execution.ok and _publish_required(plan):
-            return "publish"
-        return "verify"
+        kernel = services.runtime_kernel or RuntimeKernel()
+        return kernel.next_after_execution(plan, execution)
 
     async def publish_node(state: WorkflowState) -> dict[str, Any]:
         task = Task.model_validate(state["task"])
@@ -511,6 +697,7 @@ def build_workflow_graph(services: WorkflowServices):
             prompt=prompt,
             require_commit=plan.require_commit,
             require_push=plan.require_push,
+            artifact_ids=list(state.get("artifact_ids") or []),
             metadata={"mode": "repo_completion", "execution_environment": plan.execution_environment},
         )
         run = await services.openhands_adapter.execute(
@@ -520,6 +707,9 @@ def build_workflow_graph(services: WorkflowServices):
                 capabilities=_publish_capabilities(plan),
                 prompt=prompt,
                 plan_summary="publish obligations",
+                context_packet_id=state.get("context_packet", {}).get("id") if isinstance(state.get("context_packet"), dict) else None,
+                artifact_ids=list(state.get("artifact_ids") or []),
+                expected_outputs=["git_status", "commit_hashes", "push_result", "pr_url", "check_statuses", "blockers"],
                 metadata={"mode": "publish", "require_commit": plan.require_commit, "require_push": plan.require_push, "model_slot": "publish", "model_override": _openhands_model_for(services, "publish")},
             )
         )
@@ -568,6 +758,8 @@ def build_workflow_graph(services: WorkflowServices):
             checks=list(plan.verification_checks),
             metadata={"mode": "evidence_only"},
         )
+        check_requests: list[dict[str, Any]] = []
+        check_results: list[dict[str, Any]] = []
         if not execution.ok:
             parsed = EvidenceVerification(
                 passed=False,
@@ -634,70 +826,82 @@ def build_workflow_graph(services: WorkflowServices):
             if context_packet_raw is None:
                 raise RuntimeError("context_packet missing")
             context_packet = ContextPacket.model_validate(context_packet_raw)
-            llm_request = LLMRequest(
-                kind="verification",
-                prompt=build_verification_prompt(task, context_packet, plan, execution, publish),
-                task_id=task.id,
-                context_packet_id=context_packet.id,
-                metadata={"model_slot": "verify", "model_override": _llm_model_for(services, "verify")},
-            )
-            llm_result, parsed = await services.llm_backend.complete_json(llm_request, EvidenceVerification)
-            verification_artifact = services.artifact_store.add_json("verification_assessment", parsed.model_dump(mode="json"))
-            llm_artifact = services.artifact_store.add_text(
-                "verification_llm_raw",
-                llm_result.raw_text,
-                metadata={"request_id": llm_request.id, "backend": llm_result.backend, "model": llm_result.model},
-            )
-            artifact_ids.extend([verification_artifact.id, llm_artifact.id])
-            completion_status = _normalized_completion_status(
-                parsed.passed,
-                parsed.missing_evidence,
-                parsed.checks_passed,
-                parsed.checks_failed,
-                parsed.missing_test_levels,
-                parsed.missing_setup_steps,
-                parsed.missing_obligations,
-                parsed.commit_required,
-                parsed.push_required,
-                parsed.commit_done,
-                parsed.push_done,
-                parsed.completion_status,
-            )
-            request = VerificationRequest(
-                execution_result_id=execution.id,
-                execution_family=plan.execution_family,
-                prompt=llm_request.prompt,
-                artifact_ids=artifact_ids,
-                checks=list(plan.verification_checks),
-                metadata={"mode": "evidence_only", "llm_request_id": llm_request.id},
-            )
-            result = VerificationResult(
-                request_id=request.id,
-                passed=parsed.passed,
-                summary=parsed.summary,
-                evidence_text=llm_result.raw_text,
-                artifacts=[verification_artifact, llm_artifact],
-                checks_passed=parsed.checks_passed,
-                checks_failed=parsed.checks_failed,
-                missing_evidence=parsed.missing_evidence,
-                confidence=parsed.confidence,
-                verifier_backend=llm_result.backend or "direct_llm",
-                performed_test_levels=parsed.performed_test_levels,
-                missing_test_levels=parsed.missing_test_levels,
-                setup_steps_performed=parsed.setup_steps_performed,
-                missing_setup_steps=parsed.missing_setup_steps,
-                commit_required=parsed.commit_required,
-                push_required=parsed.push_required,
-                commit_done=parsed.commit_done,
-                push_done=parsed.push_done,
-                pr_detected=parsed.pr_detected,
-                pr_checks_waited=parsed.pr_checks_waited,
-                pr_checks_passed=parsed.pr_checks_passed,
-                pr_checks_failed=parsed.pr_checks_failed,
-                pr_checks_pending=parsed.pr_checks_pending,
-                missing_obligations=parsed.missing_obligations,
-                completion_status=completion_status,
-            )
+            if services.model_routing and services.model_routing.verification_checks and plan.verification_checks:
+                request, result, artifact_ids, check_requests, check_results = await _run_check_routed_verification(
+                    services,
+                    task=task,
+                    plan=plan,
+                    execution=execution,
+                    publish=publish,
+                    context_packet=context_packet,
+                    base_request=request,
+                    artifact_ids=artifact_ids,
+                )
+            else:
+                llm_request = LLMRequest(
+                    kind="verification",
+                    prompt=build_verification_prompt(task, context_packet, plan, execution, publish),
+                    task_id=task.id,
+                    context_packet_id=context_packet.id,
+                    metadata={"model_slot": "verify", "model_override": _llm_model_for(services, "verify")},
+                )
+                llm_result, parsed = await services.llm_backend.complete_json(llm_request, EvidenceVerification)
+                verification_artifact = services.artifact_store.add_json("verification_assessment", parsed.model_dump(mode="json"))
+                llm_artifact = services.artifact_store.add_text(
+                    "verification_llm_raw",
+                    llm_result.raw_text,
+                    metadata={"request_id": llm_request.id, "backend": llm_result.backend, "model": llm_result.model},
+                )
+                artifact_ids.extend([verification_artifact.id, llm_artifact.id])
+                completion_status = _normalized_completion_status(
+                    parsed.passed,
+                    parsed.missing_evidence,
+                    parsed.checks_passed,
+                    parsed.checks_failed,
+                    parsed.missing_test_levels,
+                    parsed.missing_setup_steps,
+                    parsed.missing_obligations,
+                    parsed.commit_required,
+                    parsed.push_required,
+                    parsed.commit_done,
+                    parsed.push_done,
+                    parsed.completion_status,
+                )
+                request = VerificationRequest(
+                    execution_result_id=execution.id,
+                    execution_family=plan.execution_family,
+                    prompt=llm_request.prompt,
+                    artifact_ids=artifact_ids,
+                    checks=list(plan.verification_checks),
+                    metadata={"mode": "evidence_only", "llm_request_id": llm_request.id},
+                )
+                result = VerificationResult(
+                    request_id=request.id,
+                    passed=parsed.passed,
+                    summary=parsed.summary,
+                    evidence_text=llm_result.raw_text,
+                    artifacts=[verification_artifact, llm_artifact],
+                    checks_passed=parsed.checks_passed,
+                    checks_failed=parsed.checks_failed,
+                    missing_evidence=parsed.missing_evidence,
+                    confidence=parsed.confidence,
+                    verifier_backend=llm_result.backend or "direct_llm",
+                    performed_test_levels=parsed.performed_test_levels,
+                    missing_test_levels=parsed.missing_test_levels,
+                    setup_steps_performed=parsed.setup_steps_performed,
+                    missing_setup_steps=parsed.missing_setup_steps,
+                    commit_required=parsed.commit_required,
+                    push_required=parsed.push_required,
+                    commit_done=parsed.commit_done,
+                    push_done=parsed.push_done,
+                    pr_detected=parsed.pr_detected,
+                    pr_checks_waited=parsed.pr_checks_waited,
+                    pr_checks_passed=parsed.pr_checks_passed,
+                    pr_checks_failed=parsed.pr_checks_failed,
+                    pr_checks_pending=parsed.pr_checks_pending,
+                    missing_obligations=parsed.missing_obligations,
+                    completion_status=completion_status,
+                )
         await _emit(
             services,
             "stage_completed",
@@ -718,6 +922,8 @@ def build_workflow_graph(services: WorkflowServices):
         )
         return {
             "verification_request": request.model_dump(mode="json"),
+            "verification_check_requests": check_requests,
+            "verification_check_results": check_results,
             "verification_result": result.model_dump(mode="json"),
             "artifact_ids": artifact_ids,
             "status": "verified",

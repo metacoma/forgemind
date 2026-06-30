@@ -32,6 +32,8 @@ class WorkflowState(TypedDict, total=False):
     publish_request: JsonDict | None
     publish_result: JsonDict | None
     verification_request: JsonDict | None
+    verification_check_requests: list[JsonDict]
+    verification_check_results: list[JsonDict]
     verification_result: JsonDict | None
     final_report: JsonDict | None
     artifact_ids: list[str]

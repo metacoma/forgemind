@@ -5,6 +5,7 @@ import pytest
 from artifact_workflow_runtime.artifacts import ArtifactStore
 from artifact_workflow_runtime.controller import WorkflowController
 from artifact_workflow_runtime.llm_backend import ScriptedLLMBackend
+from artifact_workflow_runtime.model_routing import ModelRoutingConfig
 from artifact_workflow_runtime.models import Capability, ExecutionFamily, Task
 from artifact_workflow_runtime.openhands_adapter import FakeOpenHandsAdapter
 from artifact_workflow_runtime.policy import StaticApprovalProvider
@@ -612,3 +613,140 @@ async def test_publish_step_runs_for_pr_capability_and_prompt_requires_waiting_f
     publish_request = openhands.calls["execute"][1]
     assert "wait for all PR checks" in publish_request.prompt
     assert "if checks fail" in publish_request.prompt
+
+
+async def test_verification_checks_use_per_check_model_routing(tmp_path) -> None:
+    artifact_store = ArtifactStore(tmp_path / "artifacts")
+    llm = ScriptedLLMBackend(
+        {
+            "classification": [
+                {
+                    "normalized_task": "Fix repo and verify with multiple checks",
+                    "needs_world_facts": True,
+                    "execution_family": ExecutionFamily.REPOSITORY_CHANGE.value,
+                    "task_intent": "modify",
+                    "capabilities": [Capability.REPO_READ.value, Capability.REPO_WRITE.value, Capability.GIT_WRITE.value],
+                    "observation_focus": ["inspect repo"],
+                    "reasoning": "Repository facts are needed before planning.",
+                    "risk_level": "medium",
+                }
+            ],
+            "route_analysis": [
+                {
+                    "needs_repository_observation": True,
+                    "needs_world_observation": False,
+                    "needs_fresh_external_research": False,
+                    "can_plan_immediately": False,
+                    "required_evidence_types": ["repo_structure"],
+                    "research_targets": [],
+                    "observation_focus": ["inspect repo"],
+                    "reasoning": "Need repository evidence.",
+                }
+            ],
+            "obligation_analysis": [
+                {
+                    "required_test_levels": ["unit"],
+                    "required_setup_steps": [],
+                    "required_environment_conditions": ["docker_container"],
+                    "required_publish_actions": [],
+                    "completion_requirements": ["unit tests and PR checks are accounted for"],
+                    "blocker_conditions": [],
+                    "reasoning_summary": "The plan must verify both local tests and PR checks.",
+                }
+            ],
+            "planning": [
+                {
+                    "summary": "Apply repo fix and verify with local and PR evidence",
+                    "execution_family": ExecutionFamily.REPOSITORY_CHANGE.value,
+                    "task_intent": "modify",
+                    "deliverable_kind": "repository_changes",
+                    "capabilities": [Capability.REPO_WRITE.value, Capability.GIT_WRITE.value],
+                    "steps": ["edit code", "run unit tests", "wait PR checks"],
+                    "success_criteria": ["unit tests pass", "PR checks are green"],
+                    "verification_checks": ["run unit tests", "wait for GitHub Actions PR checks"],
+                    "requires_mutation": True,
+                    "must_change_world": True,
+                    "expected_repo_changes": ["src/app.py updated"],
+                    "reasoning": "Two different verification concerns should be assessed separately.",
+                }
+            ],
+            "verification_check": [
+                {
+                    "passed": True,
+                    "summary": "Unit test evidence is present.",
+                    "checks_passed": ["run unit tests"],
+                    "checks_failed": [],
+                    "missing_evidence": [],
+                    "confidence": "high",
+                    "reasoning": "Execution evidence says pytest passed.",
+                    "performed_test_levels": ["unit"],
+                    "commit_required": False,
+                    "push_required": False,
+                    "completion_status": "completed",
+                },
+                {
+                    "passed": True,
+                    "summary": "PR check evidence is present.",
+                    "checks_passed": ["wait for GitHub Actions PR checks"],
+                    "checks_failed": [],
+                    "missing_evidence": [],
+                    "confidence": "medium",
+                    "reasoning": "Execution evidence says PR checks passed.",
+                    "pr_detected": True,
+                    "pr_checks_waited": True,
+                    "pr_checks_passed": ["ci/test"],
+                    "commit_required": False,
+                    "push_required": False,
+                    "completion_status": "completed",
+                },
+                {
+                    "passed": True,
+                    "summary": "Completion obligation evidence is present.",
+                    "checks_passed": ["unit tests and PR checks are accounted for"],
+                    "checks_failed": [],
+                    "missing_evidence": [],
+                    "confidence": "medium",
+                    "reasoning": "Execution evidence includes both local unit and PR check status.",
+                    "performed_test_levels": ["unit"],
+                    "pr_detected": True,
+                    "pr_checks_waited": True,
+                    "pr_checks_passed": ["ci/test"],
+                    "commit_required": False,
+                    "push_required": False,
+                    "completion_status": "completed",
+                },
+            ],
+        }
+    )
+    openhands = FakeOpenHandsAdapter(
+        artifact_store,
+        scripts={
+            "observe": ["Repo observed."],
+            "execute": ["Changed src/app.py. Ran pytest tests/test_app.py: passed. PR #1 checks ci/test passed."],
+        },
+    )
+    routing = ModelRoutingConfig(
+        direct_llm={"verify": "openai/default-verifier"},
+        verification_checks={
+            "unit_tests": "openai/qwen36-27b",
+            "pr_checks": "openai/qwen36-35b",
+        },
+    )
+    controller = WorkflowController(
+        llm_backend=llm,
+        openhands_adapter=openhands,
+        artifact_root=tmp_path / "artifacts",
+        approval_provider=StaticApprovalProvider(approve=True, reviewer="test"),
+        model_routing=routing,
+    )
+    report = await controller.run(Task(description="Work with repository and fix code, then verify tests and PR checks"))
+
+    assert report.status == "completed"
+    assert report.verification is not None and report.verification.verifier_backend == "direct_llm_per_check"
+    assert report.verification.checks_passed[:2] == ["run unit tests", "wait for GitHub Actions PR checks"]
+    assert len(llm.calls["verification_check"]) == 3
+    assert len(llm.calls["verification"]) == 0
+    assert llm.calls["verification_check"][0].metadata["model_override"] == "openai/qwen36-27b"
+    assert llm.calls["verification_check"][1].metadata["model_override"] == "openai/qwen36-35b"
+    assert llm.calls["verification_check"][0].metadata["verification_check"] == "unit_tests"
+    assert llm.calls["verification_check"][1].metadata["verification_check"] == "pr_checks"

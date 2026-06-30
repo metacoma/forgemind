@@ -12,6 +12,57 @@ except Exception:  # pragma: no cover
 
 DIRECT_LLM_SLOTS = ("classify", "route", "obligations", "plan", "verify")
 OPENHANDS_SLOTS = ("observe", "research", "execute", "publish")
+VERIFICATION_CHECK_SLOTS = (
+    "default",
+    "build",
+    "unit_tests",
+    "integration_tests",
+    "smoke_tests",
+    "lint",
+    "typecheck",
+    "docs",
+    "security",
+    "pr_checks",
+)
+
+
+def normalize_verification_check_slot(check_name: object) -> str:
+    """Map a human verification check name to a stable routing slot.
+
+    Plans intentionally keep `verification_checks` human-readable. This helper
+    creates a deterministic control-plane key so model routing does not depend
+    on fragile exact prompt wording. Exact normalized custom keys are still
+    supported by `ModelRoutingConfig.resolve_verification_check`.
+    """
+    text = str(check_name or "").strip().lower()
+    normalized = "_".join(part for part in _split_key(text) if part)
+    padded = f" {text.replace('-', ' ').replace('_', ' ')} "
+
+    if any(marker in padded for marker in (" pr ", " pull request ", " github actions ", " ci ", " status checks ", " check run ")):
+        return "pr_checks"
+    if any(marker in padded for marker in (" integration ", " e2e ", " end to end ")):
+        return "integration_tests"
+    if any(marker in padded for marker in (" unit ", " pytest ", " go test ", " cargo test ")):
+        return "unit_tests"
+    if any(marker in padded for marker in (" smoke ", " sanity ")):
+        return "smoke_tests"
+    if any(marker in padded for marker in (" security ", " semgrep ", " trivy ", " sast ", " vulnerability ")):
+        return "security"
+    if any(marker in padded for marker in (" lint ", " ruff ", " eslint ", " flake8 ")):
+        return "lint"
+    if any(marker in padded for marker in (" typecheck ", " type check ", " mypy ", " tsc ", " pyright ")):
+        return "typecheck"
+    if any(marker in padded for marker in (" docs ", " documentation ", " readme ", " architecture ")):
+        return "docs"
+    if any(marker in padded for marker in (" build ", " compile ", " package ")):
+        return "build"
+    return normalized or "default"
+
+
+def _split_key(value: str) -> list[str]:
+    import re
+
+    return re.split(r"[^a-z0-9]+", value.strip().lower())
 
 
 class ModelRoutingConfigError(ValueError):
@@ -22,6 +73,7 @@ class ModelRoutingConfigError(ValueError):
 class ModelRoutingConfig:
     direct_llm: dict[str, str] = field(default_factory=dict)
     openhands: dict[str, str] = field(default_factory=dict)
+    verification_checks: dict[str, str] = field(default_factory=dict)
     source_path: str | None = None
 
     def resolve_direct_llm(self, slot: str, default_model: str | None) -> str | None:
@@ -32,11 +84,21 @@ class ModelRoutingConfig:
         value = _clean_model(self.openhands.get(slot))
         return value or default_model
 
+    def resolve_verification_check(self, check_name: object, default_model: str | None) -> str | None:
+        custom_key = "_".join(part for part in _split_key(str(check_name or "")))
+        canonical_key = normalize_verification_check_slot(check_name)
+        for key in (custom_key, canonical_key, "default"):
+            value = _clean_model(self.verification_checks.get(key))
+            if value:
+                return value
+        return self.resolve_direct_llm("verify", default_model)
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "source_path": self.source_path,
             "direct_llm": dict(self.direct_llm),
             "openhands": dict(self.openhands),
+            "verification_checks": dict(self.verification_checks),
         }
 
     def summary_lines(self) -> list[str]:
@@ -55,6 +117,12 @@ class ModelRoutingConfig:
                 model = self.openhands.get(key)
                 if model:
                     lines.append(f"  {key}: {model}")
+        if self.verification_checks:
+            lines.append("verification_checks:")
+            ordered_keys = [key for key in VERIFICATION_CHECK_SLOTS if key in self.verification_checks]
+            ordered_keys.extend(sorted(key for key in self.verification_checks if key not in VERIFICATION_CHECK_SLOTS))
+            for key in ordered_keys:
+                lines.append(f"  {key}: {self.verification_checks[key]}")
         return lines or ["no per-stage model routing configured"]
 
 
@@ -74,6 +142,19 @@ def _normalize_model_mapping(value: object) -> dict[str, str]:
         model = _clean_model(raw)
         if slot and model:
             out[slot] = model
+    return out
+
+
+def _normalize_verification_model_mapping(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, raw in value.items():
+        model = _clean_model(raw)
+        if not model:
+            continue
+        slot = normalize_verification_check_slot(key)
+        out[slot] = model
     return out
 
 
@@ -124,11 +205,13 @@ def load_model_routing_config(config_path: str | None = None) -> ModelRoutingCon
 
         direct = _normalize_model_mapping(data.get("direct_llm"))
         openhands = _normalize_model_mapping(data.get("openhands"))
+        verification_checks = _normalize_verification_model_mapping(data.get("verification_checks") or data.get("checks"))
 
         models_block = data.get("models")
         if isinstance(models_block, dict):
             direct = {**_normalize_model_mapping(models_block.get("direct_llm")), **direct}
             openhands = {**_normalize_model_mapping(models_block.get("openhands")), **openhands}
+            verification_checks = {**_normalize_verification_model_mapping(models_block.get("verification_checks") or models_block.get("checks")), **verification_checks}
 
         stages_block = data.get("stages")
         if isinstance(stages_block, dict):
@@ -147,8 +230,9 @@ def load_model_routing_config(config_path: str | None = None) -> ModelRoutingCon
         resolved = ModelRoutingConfig(
             direct_llm=direct,
             openhands=openhands,
+            verification_checks=verification_checks,
             source_path=str(candidate),
         )
-        if resolved.direct_llm or resolved.openhands:
+        if resolved.direct_llm or resolved.openhands or resolved.verification_checks:
             return resolved
     return None

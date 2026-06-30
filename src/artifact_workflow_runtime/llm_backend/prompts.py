@@ -199,3 +199,36 @@ def build_verification_prompt(task: Task, context_packet: ContextPacket, plan: E
         + "\n".join(f"- {item}" for item in plan.verification_checks)
         + f"\n\nExecution evidence:\n{execution.evidence_text}\n\nPublish evidence:\n{publish_text}\n"
     )
+
+
+def build_verification_check_prompt(
+    task: Task,
+    context_packet: ContextPacket,
+    plan: ExecutionPlan,
+    execution: ExecutionResult,
+    check_name: str,
+    publish: PublishResult | None = None,
+) -> str:
+    publish_text = publish.evidence_text if publish else "No separate publish step evidence was captured."
+    return (
+        "Verify exactly one verification check using evidence only.\n"
+        "You do not have live access to the world.\n"
+        "Judge only the named check below, but preserve global obligations such as required setup, required test levels, commit/push, and PR checks when they are relevant.\n"
+        "Do not invent missing facts. If evidence is missing, say so explicitly.\n"
+        "Return strict JSON matching this shape:\n"
+        f"{json.dumps(VERIFICATION_SCHEMA_HINT, ensure_ascii=False, indent=2)}\n\n"
+        f"Check under review:\n{check_name}\n\n"
+        f"Task:\n{task.description}\n\n"
+        f"ContextPacket:\n{context_packet.text}\n\n"
+        f"Plan summary: {plan.summary}\n"
+        f"Required test levels: {plan.required_test_levels}\n"
+        f"Required setup steps: {plan.required_setup_steps}\n"
+        f"Require commit: {plan.require_commit}\n"
+        f"Require push: {plan.require_push}\n"
+        f"Execution environment: {plan.execution_environment}\n"
+        + "Success criteria:\n"
+        + "\n".join(f"- {item}" for item in plan.success_criteria)
+        + "\n\nAll verification checks from plan:\n"
+        + "\n".join(f"- {item}" for item in plan.verification_checks)
+        + f"\n\nExecution evidence:\n{execution.evidence_text}\n\nPublish evidence:\n{publish_text}\n"
+    )

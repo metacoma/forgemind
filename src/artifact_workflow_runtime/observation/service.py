@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from artifact_workflow_runtime.models import ExecutionFamily, ObservationRequest, RoutingDecision, Task, TaskClassification
+from artifact_workflow_runtime.models import ExecutionFamily, ObservationRequest, RoutingDecision, Task, TaskClassification, WorkPacketKind
 
 
 class ObservationService:
@@ -47,6 +47,10 @@ class ObservationService:
             execution_family=classification.execution_family,
             capabilities=[],
             prompt=prompt,
+            work_packet_kind=WorkPacketKind.RESEARCH,
+            allowed_actions=["internet_research", "read_official_docs", "inspect_public_metadata", "collect_source_attribution"],
+            forbidden_actions=["edit_files", "commit", "push", "change_hosts", "change_cluster_state"],
+            expected_outputs=["source_urls", "version_facts", "release_notes", "blockers", "unknowns"],
             metadata={
                 "mode": "observe_only",
                 "evidence_required": True,
