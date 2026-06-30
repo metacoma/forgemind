@@ -25,6 +25,7 @@ from artifact_workflow_runtime.models import (
     VerificationRequest,
     VerificationResult,
     WorkPacketKind,
+    render_openhands_machine_handoff_schema_block,
 )
 
 from .contracts import OpenHandsStageContractGate
@@ -89,7 +90,9 @@ def _contract_repair_prompt(*, stage: str, response_contract: StructuredResponse
         "Do not include markdown fences.",
         "Do not save a file or use MCP/file-save tools.",
         "If a required field has no data, return an empty value of the appropriate type and explain the gap in blockers.",
-        "Desired JSON contract:",
+        "Machine JSON Schema:",
+        render_openhands_machine_handoff_schema_block(),
+        "Response contract summary:",
         response_contract.render(),
     ]
     if evidence_requirements is not None:

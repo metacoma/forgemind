@@ -13,6 +13,7 @@ from artifact_workflow_runtime.models import (
     ExtractedFact,
     FileEvidence,
     MutationSummary,
+    OpenHandsMachineHandoff,
     PostcheckSummary,
     StructuredEvidence,
     TestCheckEvidence,
@@ -29,7 +30,7 @@ _OBSERVED_RE = re.compile(r"\b(read|observed|inspected|found|located)\b", re.IGN
 _FACT_RE = re.compile(r"^\s*(?:fact|finding|found|observed)\s*[:=-]\s*(?P<fact>.+)$", re.IGNORECASE)
 _BLOCKER_RE = re.compile(r"\b(blocker|blocked|cannot|can't|unable|permission denied|not found|missing|failed|error|timeout)\b", re.IGNORECASE)
 _DIFF_RE = re.compile(r"\b(diff|patch|hunk|@@|git diff)\b", re.IGNORECASE)
-_EVIDENCE_KEYS = {"commands_run", "files_changed", "files_observed", "extracted_facts", "diffs", "tests", "checks", "blockers", "mutation_summary", "postcheck_summary"}
+_EVIDENCE_KEYS = {"commands_run", "files_changed", "files_observed", "extracted_facts", "facts", "diffs", "tests", "checks", "blockers", "unknowns", "missing_evidence", "mutation_summary", "postcheck_summary"}
 
 
 class EvidenceContractError(ValueError):
@@ -185,19 +186,44 @@ class EvidenceExtractor:
         payload = _extract_json_payload(text)
         if not isinstance(payload, Mapping):
             return None
+        artifact_ids = [artifact_id] if artifact_id else []
+
+        try:
+            handoff = OpenHandsMachineHandoff.model_validate(payload)
+            evidence = handoff.structured_evidence
+            if handoff.mutation_summary is not None:
+                evidence.mutation_summary = handoff.mutation_summary
+            if handoff.postcheck_summary is not None:
+                evidence.postcheck_summary = handoff.postcheck_summary
+            if handoff.blockers:
+                evidence.blockers.extend(handoff.blockers)
+            for unknown in handoff.unknowns:
+                evidence.blockers.append(BlockerEvidence(summary=f"Unknown: {unknown}", blocker_kind=BlockerKind.MISSING_EVIDENCE, artifact_ids=artifact_ids))
+            for missing in handoff.missing_evidence:
+                evidence.blockers.append(BlockerEvidence(summary=f"Missing evidence: {missing}", blocker_kind=BlockerKind.MISSING_EVIDENCE, artifact_ids=artifact_ids))
+            return self._with_summaries(evidence)
+        except Exception:
+            pass
+
         data = payload.get("structured_evidence") if isinstance(payload.get("structured_evidence"), Mapping) else payload
         if not isinstance(data, Mapping) or not (_EVIDENCE_KEYS & set(data.keys())):
             return None
-        artifact_ids = [artifact_id] if artifact_id else []
         try:
+            blockers = [self._blocker(item, artifact_ids) for item in _list(data.get("blockers"))]
+            if isinstance(payload.get("blockers"), list):
+                blockers.extend(self._blocker(item, artifact_ids) for item in _list(payload.get("blockers")))
+            for unknown in _list(data.get("unknowns") or payload.get("unknowns")):
+                blockers.append(BlockerEvidence(summary=f"Unknown: {unknown}", blocker_kind=BlockerKind.MISSING_EVIDENCE, artifact_ids=artifact_ids))
+            for missing in _list(data.get("missing_evidence") or payload.get("missing_evidence")):
+                blockers.append(BlockerEvidence(summary=f"Missing evidence: {missing}", blocker_kind=BlockerKind.MISSING_EVIDENCE, artifact_ids=artifact_ids))
             evidence = StructuredEvidence(
                 commands_run=[self._command(item, artifact_ids) for item in _list(data.get("commands_run"))],
-                files_changed=[self._file(item, "changed", artifact_ids) for item in _list(data.get("files_changed"))],
-                files_observed=[self._file(item, "observed", artifact_ids) for item in _list(data.get("files_observed"))],
-                extracted_facts=[self._fact(item, artifact_ids) for item in _list(data.get("extracted_facts") or data.get("facts"))],
+                files_changed=[self._file(item, "changed", artifact_ids) for item in _file_items(data.get("files_changed"))],
+                files_observed=[self._file(item, "observed", artifact_ids) for item in _file_items(data.get("files_observed"))],
+                extracted_facts=[self._fact(item, artifact_ids) for item in _fact_items(data.get("extracted_facts") or data.get("facts"))],
                 diffs=[self._diff(item, artifact_ids) for item in _list(data.get("diffs"))],
                 tests=[self._test(item, artifact_ids) for item in _list(data.get("tests") or data.get("checks"))],
-                blockers=[self._blocker(item, artifact_ids) for item in _list(data.get("blockers"))],
+                blockers=blockers,
                 mutation_summary=MutationSummary.model_validate(data.get("mutation_summary")) if isinstance(data.get("mutation_summary"), Mapping) else MutationSummary(),
                 postcheck_summary=PostcheckSummary.model_validate(data.get("postcheck_summary")) if isinstance(data.get("postcheck_summary"), Mapping) else PostcheckSummary(),
             )
@@ -223,24 +249,38 @@ class EvidenceExtractor:
     def _command(self, item: object, artifact_ids: list[str]) -> CommandEvidence:
         if isinstance(item, Mapping):
             data = dict(item)
+            if "output_excerpt" not in data and "summary" in data:
+                data["output_excerpt"] = str(data.pop("summary"))
+            allowed = {"command", "cwd", "exit_code", "output_excerpt", "output_artifact_ids"}
+            data = {key: value for key, value in data.items() if key in allowed}
             data.setdefault("output_artifact_ids", artifact_ids)
+            if "command" not in data:
+                data["command"] = "unknown"
             return CommandEvidence.model_validate(data)
         return CommandEvidence(command=str(item), output_artifact_ids=artifact_ids)
 
     def _file(self, item: object, action: str, artifact_ids: list[str]) -> FileEvidence:
         if isinstance(item, Mapping):
             data = dict(item)
+            if "path" not in data:
+                data["path"] = str(data.get("file") or data.get("name") or data.get("value") or data)
             data.setdefault("action", action)
             data.setdefault("artifact_ids", artifact_ids)
+            allowed = {"path", "action", "summary", "artifact_ids"}
+            data = {key: value for key, value in data.items() if key in allowed}
             return FileEvidence.model_validate(data)
         return FileEvidence(path=str(item), action=action, artifact_ids=artifact_ids)
 
     def _fact(self, item: object, artifact_ids: list[str]) -> ExtractedFact:
         if isinstance(item, Mapping):
             data = dict(item)
+            if "fact" not in data:
+                data["fact"] = _jsonish(data.get("value") if "value" in data else data)
             data.setdefault("artifact_ids", artifact_ids)
-            data.setdefault("subject", "agent_observation")
+            data.setdefault("subject", str(data.get("key") or "agent_observation"))
             data.setdefault("confidence", "medium")
+            allowed = {"subject", "fact", "source", "confidence", "artifact_ids"}
+            data = {key: value for key, value in data.items() if key in allowed}
             return ExtractedFact.model_validate(data)
         return ExtractedFact(subject="agent_observation", fact=str(item), confidence="medium", artifact_ids=artifact_ids)
 
@@ -292,6 +332,50 @@ def _classify_blocker_kind(text: str) -> BlockerKind:
     if any(marker in lowered for marker in ("missing evidence", "not run", "not executed")):
         return BlockerKind.MISSING_EVIDENCE
     return BlockerKind.GENERIC
+
+
+def _jsonish(value: object) -> str:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return str(value)
+
+
+def _fact_items(value: object) -> list[object]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, Mapping):
+        return [{"subject": str(key), "fact": _jsonish(val), "confidence": "medium"} for key, val in value.items()]
+    return [value]
+
+
+def _file_items(value: object) -> list[object]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, Mapping):
+        items: list[object] = []
+        for key, val in value.items():
+            if isinstance(val, str):
+                items.append({"path": val, "summary": str(key)})
+            elif isinstance(val, list):
+                for entry in val:
+                    if isinstance(entry, str):
+                        items.append({"path": entry, "summary": str(key)})
+                    else:
+                        items.append(entry)
+            elif isinstance(val, Mapping):
+                for subkey, subval in val.items():
+                    if isinstance(subval, str):
+                        items.append({"path": subval, "summary": f"{key}.{subkey}"})
+                    else:
+                        items.append({"path": f"{key}.{subkey}", "summary": _jsonish(subval)})
+            else:
+                items.append({"path": str(key), "summary": _jsonish(val)})
+        return items
+    return [value]
 
 
 def _list(value: object) -> list[object]:

@@ -42,18 +42,9 @@ def main_run_events(answer: str = "main answer") -> list[JsonDict]:
     ]
 
 
-def followup_run_events(answer: str = '{"valid": true, "status": "completed", "summary": "followup ok"}') -> list[JsonDict]:
-    return [
-        _status_event("followup-running", "running"),
-        _message_event("followup-answer", answer),
-        _status_event("followup-finished", "finished"),
-    ]
-
-
 @dataclass
 class FakeOpenHandsServer:
     main_events: list[JsonDict] = field(default_factory=main_run_events)
-    summary_event_batches: list[list[JsonDict]] = field(default_factory=lambda: [followup_run_events()])
     conversation_id: str = "conv-1"
     sandbox_id: str = "sb-1"
     llm_model: str = "openai/executor"
@@ -149,21 +140,14 @@ class FakeOpenHandsServer:
             return web.json_response({"success": True})
         return web.json_response(self.main_events)
 
-    def events_for_current_run(self) -> list[JsonDict]:
-        if self.followup_payloads:
-            batch_idx = min(len(self.followup_payloads), len(self.summary_event_batches)) - 1
-            if batch_idx >= 0:
-                return self.summary_event_batches[batch_idx]
-        return self.main_events
-
     async def handle_conversation_messages(self, request: web.Request) -> web.Response:
-        messages = [event for event in self.events_for_current_run() if event.get("kind") == "MessageEvent"]
+        messages = [event for event in self.main_events if event.get("kind") == "MessageEvent"]
         return web.json_response(messages)
 
     async def handle_websocket(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse()
         await ws.prepare(request)
-        for event in self.events_for_current_run():
+        for event in self.main_events:
             await ws.send_str(json.dumps(event))
             await asyncio.sleep(0)
         await ws.close()

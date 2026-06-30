@@ -17,6 +17,7 @@ from .core import (
     EvidenceBundle,
     EvidenceRequirements,
     EvidenceVerification,
+    OpenHandsMachineHandoff,
 )
 
 __all__ = [
@@ -32,4 +33,5 @@ __all__ = [
     "EvidenceBundle",
     "EvidenceRequirements",
     "EvidenceVerification",
+    "OpenHandsMachineHandoff",
 ]

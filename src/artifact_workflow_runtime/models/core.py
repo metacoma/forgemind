@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
@@ -344,6 +345,44 @@ class EvidenceBundle(RuntimeModel):
         return "; ".join(parts) or self.summary
 
 
+class OpenHandsMachineHandoff(RuntimeModel):
+    """Canonical OpenHands machine handoff envelope.
+
+    OpenHands can write rich prose during its first pass, but the final
+    machine handoff must validate against this typed envelope. Unknown or
+    unavailable details belong in blockers or missing_evidence, not as
+    invented facts or ad-hoc top-level keys.
+    """
+
+    summary: str
+    structured_evidence: StructuredEvidence = Field(default_factory=StructuredEvidence)
+    blockers: list[BlockerEvidence] = Field(default_factory=list)
+    unknowns: list[str] = Field(default_factory=list)
+    missing_evidence: list[str] = Field(default_factory=list)
+    mutation_summary: MutationSummary | None = None
+    postcheck_summary: PostcheckSummary | None = None
+    repair_summary: str | None = None
+    notes: str | None = None
+
+
+def render_openhands_machine_handoff_schema() -> str:
+    return json.dumps(OpenHandsMachineHandoff.model_json_schema(), ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def render_openhands_machine_handoff_schema_block() -> str:
+    return (
+        "Your final machine-readable answer MUST be exactly one JSON object.\n"
+        "Do not include markdown fences, prose, bullets, or comments around the JSON.\n"
+        "The JSON MUST validate against the exact schema between BEGIN_JSON_SCHEMA and END_JSON_SCHEMA.\n"
+        "Do not infer new facts. Do not fill gaps with likely values.\n"
+        "If evidence is missing, put the gap in blockers or missing_evidence.\n"
+        "Use only facts, files, commands, outputs, and checks already observed in this conversation.\n"
+        "BEGIN_JSON_SCHEMA\n"
+        f"{render_openhands_machine_handoff_schema()}\n"
+        "END_JSON_SCHEMA"
+    )
+
+
 class ResponseFieldExpectation(RuntimeModel):
     name: str
     required: bool = True
@@ -586,6 +625,7 @@ def _render_openhands_compiled_contract(*, title: str, packet_kind: WorkPacketKi
         "forbidden_actions": stage_contract.forbidden_actions,
         "expected_outputs": stage_contract.required_outputs,
         "stage_contract": "\n" + stage_contract.render(),
+        "machine_json_handoff_schema": "\n" + render_openhands_machine_handoff_schema_block(),
     }
     return _render_compiled_contract(title=title, fields=fields, narrative=narrative)
 

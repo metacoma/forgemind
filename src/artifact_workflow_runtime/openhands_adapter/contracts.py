@@ -70,6 +70,9 @@ class OpenHandsStageContractGate:
             "## Required outputs",
             "Do not choose the next workflow step",
             "if an action is not explicitly allowed, treat it as forbidden",
+            "BEGIN_JSON_SCHEMA",
+            "END_JSON_SCHEMA",
+            "additionalProperties",
         )
         missing = [marker for marker in required_markers if marker not in prompt]
         if missing:
