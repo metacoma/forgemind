@@ -7,13 +7,27 @@ from pathlib import Path
 
 from artifact_workflow_runtime.environment import EnvironmentPlan
 from artifact_workflow_runtime.qa.models import QAExecutionItem, QAExecutionReport, QAPlan
+from artifact_workflow_runtime.state.workspace import infer_workspace_root_from_environment_plan
 
 
 class DeterministicQARunner:
     def run(self, *, plan: QAPlan, environment_plan: EnvironmentPlan | None = None, cwd: str | None = None) -> QAExecutionReport:
         items: list[QAExecutionItem] = []
-        workdir = cwd or os.getcwd()
+        workdir = cwd or infer_workspace_root_from_environment_plan(environment_plan) or os.getcwd()
+        workspace_problem = self._workspace_problem(workdir)
         for check in plan.checks:
+            if workspace_problem is not None and check.kind in {"command", "runtime_proof", "ci_config_check"}:
+                items.append(
+                    QAExecutionItem(
+                        check_id=check.id,
+                        name=check.name,
+                        kind=check.kind,
+                        status="blocked",
+                        command=check.command,
+                        reason=workspace_problem,
+                    )
+                )
+                continue
             if check.kind == "command" and check.command:
                 items.append(self._run_command(check_id=check.id, name=check.name, command=check.command, cwd=workdir))
                 continue
@@ -25,7 +39,15 @@ class DeterministicQARunner:
                 continue
             items.append(QAExecutionItem(check_id=check.id, name=check.name, kind=check.kind, status="declared", reason="Evidence-review check; no deterministic command to run."))
         summary = "; ".join(f"{item.name}={item.status}" for item in items) or "No QA checks executed."
-        return QAExecutionReport(task_id=plan.task_id, plan_id=plan.id, items=items, summary=summary)
+        return QAExecutionReport(task_id=plan.task_id, plan_id=plan.id, items=items, summary=summary, workspace_root=workdir)
+
+    def _workspace_problem(self, cwd: str) -> str | None:
+        path = Path(cwd)
+        if not path.exists():
+            return f"Workspace root {cwd!r} is not accessible to deterministic QA runner."
+        if not path.is_dir():
+            return f"Workspace root {cwd!r} is not a directory."
+        return None
 
     def _run_command(self, *, check_id: str, name: str, command: str, cwd: str) -> QAExecutionItem:
         try:
@@ -39,10 +61,10 @@ class DeterministicQARunner:
                 command=command,
                 exit_code=completed.returncode,
                 output=output[:8000],
-                reason="Command executed by deterministic QA runner.",
+                reason=f"Command executed by deterministic QA runner in workspace {cwd}.",
             )
         except Exception as exc:  # pragma: no cover - defensive
-            return QAExecutionItem(check_id=check_id, name=name, kind="command", status="blocked", command=command, output=str(exc), reason="Deterministic QA runner failed to execute command.")
+            return QAExecutionItem(check_id=check_id, name=name, kind="command", status="blocked", command=command, output=str(exc), reason=f"Deterministic QA runner failed to execute command in workspace {cwd}.")
 
     def _run_runtime_proof(self, *, check_id: str, name: str, environment_plan: EnvironmentPlan | None, cwd: str) -> QAExecutionItem:
         command = None
@@ -53,11 +75,38 @@ class DeterministicQARunner:
                     break
         if not command:
             return QAExecutionItem(check_id=check_id, name=name, kind="runtime_proof", status="blocked", reason="No bootstrap/runtime proof command available.")
+        missing = self._missing_relative_executable(command, cwd)
+        if missing is not None:
+            return QAExecutionItem(
+                check_id=check_id,
+                name=name,
+                kind="runtime_proof",
+                status="blocked",
+                command=command,
+                reason=f"Runtime proof command {missing!r} is not present in workspace {cwd}.",
+            )
         return self._run_command(check_id=check_id, name=name, command=command, cwd=cwd)
+
+    def _missing_relative_executable(self, command: str, cwd: str) -> str | None:
+        try:
+            first = shlex.split(command, posix=True)[0]
+        except Exception:
+            return None
+        if first.startswith("./"):
+            path = Path(cwd) / first[2:]
+            if not path.exists():
+                return first
+        return None
 
     def _run_ci_check(self, *, check_id: str, cwd: str) -> QAExecutionItem:
         workflows = Path(cwd) / ".github" / "workflows"
         if not workflows.exists():
-            return QAExecutionItem(check_id=check_id, name="ci_config_check", kind="ci_config_check", status="failed", reason=".github/workflows directory is missing.")
+            return QAExecutionItem(
+                check_id=check_id,
+                name="ci_config_check",
+                kind="ci_config_check",
+                status="failed",
+                reason=f".github/workflows directory is missing under workspace {cwd}.",
+            )
         files = sorted(str(path.relative_to(workflows)) for path in workflows.glob("*.y*ml"))
-        return QAExecutionItem(check_id=check_id, name="ci_config_check", kind="ci_config_check", status="passed" if files else "failed", output="\n".join(files), reason="Checked workflow directory for CI wiring.")
+        return QAExecutionItem(check_id=check_id, name="ci_config_check", kind="ci_config_check", status="passed" if files else "failed", output="\n".join(files), reason=f"Checked workflow directory for CI wiring under workspace {cwd}.")

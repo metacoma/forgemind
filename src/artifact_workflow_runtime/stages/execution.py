@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .common import *
 from artifact_workflow_runtime.control_plane.stage_filters import execute_prompt_steps, execute_success_criteria as build_execute_success_criteria, execute_verification_commands
+from artifact_workflow_runtime.state.workspace import infer_workspace_root_from_execution, workspace_root_from_state
 
 
 class ExecutionStageMixin:
@@ -59,6 +60,7 @@ class ExecutionStageMixin:
             result = await services.openhands_adapter.execute(request)
             artifact_ids = list(state.get("artifact_ids") or [])
             artifact_ids.extend(artifact.id for artifact in result.artifacts)
+            workspace_root = infer_workspace_root_from_execution(result) or workspace_root_from_state(state)
             await _emit(
                 services,
                 "stage_completed",
@@ -73,6 +75,7 @@ class ExecutionStageMixin:
             return {
                 "execution_request": request.model_dump(mode="json"),
                 "execution_result": result.model_dump(mode="json"),
+                "workspace_root": workspace_root,
                 "artifact_ids": artifact_ids,
                 "status": "executed",
                 "transitions": _append_transition(state, "execute", "executed", "Bounded OpenHands execution packet finished", [artifact.id for artifact in result.artifacts]),

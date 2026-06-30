@@ -6,6 +6,7 @@ from .common import *
 from artifact_workflow_runtime.done_contract import DoneContract
 from artifact_workflow_runtime.environment import EnvironmentPlan
 from artifact_workflow_runtime.qa import QAExecutionReport, QAPlan, QAReview
+from artifact_workflow_runtime.state.workspace import workspace_root_from_state
 
 
 class ReviewQAStageMixin:
@@ -90,16 +91,18 @@ class ReviewQAStageMixin:
     async def qa_execute_node(self, state: WorkflowState) -> dict[str, Any]:
         services = self.services
         readiness_gate = self.readiness_gate
-        readiness_gate.require(state, "qa_execute", "task", "qa_plan")
+        readiness_gate.require(state, "qa_execute")
         task = Task.model_validate(state["task"])
         qa_plan = QAPlan.model_validate(state["qa_plan"])
         env_plan = EnvironmentPlan.model_validate(state["environment_plan"]) if state.get("environment_plan") else None
         await _emit(services, "stage_started", "qa_execute", "Running deterministic QA plan", task_id=task.id)
-        report = services.qa_runner.run(plan=qa_plan, environment_plan=env_plan)
+        workspace_root = workspace_root_from_state(state)
+        report = services.qa_runner.run(plan=qa_plan, environment_plan=env_plan, cwd=workspace_root)
         artifact = services.artifact_store.add_json("qa_execution_report", report.model_dump(mode="json"), metadata={"task_id": task.id})
         await _emit(services, "stage_completed", "qa_execute", "Deterministic QA execution completed", summary=report.summary, artifact_id=artifact.id)
         return {
             "qa_execution_report": report.model_dump(mode="json"),
+            "workspace_root": report.workspace_root or workspace_root,
             "artifact_ids": _append_artifact_id(state.get("artifact_ids"), artifact.id),
             "status": "qa_executed",
             "transitions": _append_transition(state, "qa_execute", "qa_executed", report.summary, [artifact.id]),

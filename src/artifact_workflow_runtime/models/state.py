@@ -161,11 +161,11 @@ STAGE_STATE_CONTRACTS: dict[CoreWorkflowStage, StageStateContract] = {
         _stage_contract(CoreWorkflowStage.PLAN, ("task", "classification", "context_packet", "obligations", "done_contract"), ("plan_request", "plan_result", "plan", "acceptance_contract"), WorkflowStatus.PLANNED),
         _stage_contract(CoreWorkflowStage.POLICY, ("task", "classification", "route_decision", "plan"), ("policy_decision",), WorkflowStatus.POLICY_CHECKED),
         _stage_contract(CoreWorkflowStage.APPROVAL, ("policy_decision",), ("approval_request",), WorkflowStatus.APPROVAL_RESOLVED),
-        _stage_contract(CoreWorkflowStage.WORKSPACE_PREPARE, ("task", "done_contract"), ("workspace_branch", "environment_plan"), WorkflowStatus.WORKSPACE_PREPARED),
+        _stage_contract(CoreWorkflowStage.WORKSPACE_PREPARE, ("task", "done_contract"), ("workspace_branch", "workspace_root", "environment_plan"), WorkflowStatus.WORKSPACE_PREPARED),
         _stage_contract(CoreWorkflowStage.EXECUTE, ("task", "plan", "context_packet"), ("execution_request", "execution_result"), WorkflowStatus.EXECUTED),
         _stage_contract(CoreWorkflowStage.REVIEW, ("task", "plan", "execution_result", "done_contract"), ("review_result", "execution_review_decision"), WorkflowStatus.REVIEWED),
         _stage_contract(CoreWorkflowStage.QA_PLAN, ("task", "plan", "done_contract"), ("qa_plan",), WorkflowStatus.QA_PLANNED),
-        _stage_contract(CoreWorkflowStage.QA_EXECUTE, ("task", "qa_plan"), ("qa_execution_report",), WorkflowStatus.QA_EXECUTED),
+        _stage_contract(CoreWorkflowStage.QA_EXECUTE, ("task", "qa_plan", "workspace_root"), ("qa_execution_report",), WorkflowStatus.QA_EXECUTED),
         _stage_contract(CoreWorkflowStage.QA_REVIEW, ("task", "plan", "execution_result", "context_packet", "qa_execution_report"), ("verification_request", "verification_result", "qa_review_result"), WorkflowStatus.QA_REVIEWED),
         _stage_contract(CoreWorkflowStage.VERIFY, ("task", "plan", "execution_result", "context_packet"), ("verification_request", "verification_result"), WorkflowStatus.VERIFIED),
         _stage_contract(CoreWorkflowStage.ACCEPTANCE, ("task", "acceptance_contract"), ("acceptance_decision",), WorkflowStatus.ACCEPTANCE_EVALUATED),
@@ -190,11 +190,11 @@ STATUS_REQUIRED_FIELDS: dict[WorkflowStatus, tuple[str, ...]] = {
     WorkflowStatus.PLANNED: ("task", "plan", "acceptance_contract"),
     WorkflowStatus.POLICY_CHECKED: ("task", "plan", "policy_decision"),
     WorkflowStatus.APPROVAL_RESOLVED: ("task", "policy_decision", "approval_request"),
-    WorkflowStatus.WORKSPACE_PREPARED: ("task", "workspace_branch", "environment_plan"),
+    WorkflowStatus.WORKSPACE_PREPARED: ("task", "workspace_branch", "workspace_root", "environment_plan"),
     WorkflowStatus.EXECUTED: ("task", "plan", "execution_result"),
     WorkflowStatus.REVIEWED: ("task", "execution_result", "review_result", "execution_review_decision"),
     WorkflowStatus.QA_PLANNED: ("task", "qa_plan"),
-    WorkflowStatus.QA_EXECUTED: ("task", "qa_execution_report"),
+    WorkflowStatus.QA_EXECUTED: ("task", "workspace_root", "qa_execution_report"),
     WorkflowStatus.QA_REVIEWED: ("task", "qa_review_result"),
     WorkflowStatus.EXECUTION_REVIEWED: ("task", "execution_result", "execution_review_decision"),
     WorkflowStatus.REPAIRED: ("task", "execution_result", "repair_results"),
@@ -283,6 +283,7 @@ class WorkflowStateSnapshot(RuntimeModel):
     obligations: ObligationAnalysis | None = None
     done_contract: DoneContract | None = None
     workspace_branch: str | None = None
+    workspace_root: str | None = None
     environment_plan: EnvironmentPlan | None = None
     plan_request: LLMRequest | None = None
     plan_result: LLMResult | None = None
@@ -421,6 +422,7 @@ class WorkflowState(TypedDict, total=False):
     obligations: JsonDict | None
     done_contract: JsonDict | None
     workspace_branch: str | None
+    workspace_root: str | None
     environment_plan: JsonDict | None
     plan_request: JsonDict | None
     plan_result: JsonDict | None

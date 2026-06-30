@@ -3,6 +3,7 @@ from __future__ import annotations
 from .common import *
 from artifact_workflow_runtime.done_contract import DoneContract
 from artifact_workflow_runtime.environment import EnvironmentPlan
+from artifact_workflow_runtime.state.workspace import infer_workspace_root_from_text, workspace_root_from_state
 
 
 class ContractPrepStageMixin:
@@ -47,15 +48,17 @@ class ContractPrepStageMixin:
         context_packet = ContextPacket.model_validate(state["context_packet"]) if state.get("context_packet") else None
         await _emit(services, "stage_started", "workspace_prepare", "Preparing workspace branch and environment plan", task_id=task.id)
         workspace_branch = f"awrt/{task.id}"
+        workspace_root = workspace_root_from_state(state) or infer_workspace_root_from_text(task.description) or "/workspace/project"
         env_plan = services.environment_discovery.build_plan(
             task=task,
             done_contract=contract,
             context_packet=context_packet,
             workspace_branch=workspace_branch,
+            workspace_root=workspace_root,
         )
         branch_artifact = services.artifact_store.add_json(
             "workspace_allocation",
-            {"task_id": task.id, "workspace_branch": workspace_branch, "created": False, "mode": "allocated_only"},
+            {"task_id": task.id, "workspace_branch": workspace_branch, "workspace_root": workspace_root, "created": False, "mode": "allocated_only"},
             metadata={"task_id": task.id},
         )
         env_artifact = services.artifact_store.add_json("environment_plan", env_plan.model_dump(mode="json"), metadata={"task_id": task.id})
@@ -65,12 +68,14 @@ class ContractPrepStageMixin:
             "workspace_prepare",
             "Workspace metadata and environment plan prepared",
             workspace_branch=workspace_branch,
+            workspace_root=workspace_root,
             environment_items=[item.model_dump(mode="json") for item in env_plan.items],
             artifact_id=branch_artifact.id,
             environment_artifact_id=env_artifact.id,
         )
         return {
             "workspace_branch": workspace_branch,
+            "workspace_root": workspace_root,
             "environment_plan": env_plan.model_dump(mode="json"),
             "artifact_ids": [*_append_artifact_id(state.get("artifact_ids"), branch_artifact.id), env_artifact.id],
             "status": "workspace_prepared",

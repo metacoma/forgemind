@@ -5,6 +5,7 @@ from pathlib import Path
 from artifact_workflow_runtime.done_contract import DoneContract
 from artifact_workflow_runtime.environment.models import EnvironmentPlan, EnvironmentPlanItem
 from artifact_workflow_runtime.models import ContextPacket, Task
+from artifact_workflow_runtime.state.workspace import infer_workspace_root_from_text
 
 
 class EnvironmentDiscovery:
@@ -15,10 +16,12 @@ class EnvironmentDiscovery:
         done_contract: DoneContract,
         context_packet: ContextPacket | None,
         workspace_branch: str,
+        workspace_root: str | None = None,
         repo_root: str | None = None,
     ) -> EnvironmentPlan:
         text = (context_packet.text if context_packet is not None else "").lower()
-        root = Path(repo_root) if repo_root else None
+        inferred_root = workspace_root or infer_workspace_root_from_text(task.description) or infer_workspace_root_from_text(context_packet.text if context_packet is not None else "") or "/workspace/project"
+        root = Path(repo_root or inferred_root) if (repo_root or inferred_root) else None
         items: list[EnvironmentPlanItem] = []
         for requirement in done_contract.environment_requirements:
             command = None
@@ -39,7 +42,7 @@ class EnvironmentDiscovery:
                     failure_mode="needs_environment" if not bootstrap_possible else "bootstrap_then_retry",
                 )
             )
-        return EnvironmentPlan(task_id=task.id, workspace_branch=workspace_branch, items=items)
+        return EnvironmentPlan(task_id=task.id, workspace_branch=workspace_branch, workspace_root=inferred_root, items=items)
 
     def _discover_freeplane_bootstrap(self, root: Path | None, context_text: str) -> str | None:
         candidates = [

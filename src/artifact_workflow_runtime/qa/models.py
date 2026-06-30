@@ -38,6 +38,7 @@ class QAExecutionReport(RuntimeModel):
     plan_id: str
     items: list[QAExecutionItem] = Field(default_factory=list)
     summary: str = ""
+    workspace_root: str | None = None
     created_at: str = Field(default_factory=utc_now)
 
 
