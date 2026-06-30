@@ -50,7 +50,7 @@ class PlanningPolicyStageMixin:
     async def plan_node(self, state: WorkflowState) -> dict[str, Any]:
             services = self.services
             readiness_gate = self.readiness_gate
-            readiness_gate.require(state, "plan", "task", "classification", "context_packet", "obligations")
+            readiness_gate.require(state, "plan", "task", "classification", "context_packet", "obligations", "done_contract")
             task = Task.model_validate(state["task"])
             classification = TaskClassification.model_validate(state["classification"])
             await _emit(services, "stage_started", "plan", "Generating execution plan from task and evidence", task_id=task.id)
@@ -62,9 +62,11 @@ class PlanningPolicyStageMixin:
             if obligations_raw is None:
                 raise RuntimeError("obligations missing")
             obligations = ObligationAnalysis.model_validate(obligations_raw)
+            done_contract = state.get("done_contract")
+            done_contract_text = json.dumps(done_contract, ensure_ascii=False, indent=2) if done_contract is not None else "{}"
             request = LLMRequest(
                 kind="planning",
-                prompt=build_plan_prompt(task, context_packet, _effective_task_intent(classification), obligations),
+                prompt=build_plan_prompt(task, context_packet, _effective_task_intent(classification), obligations) + "\n\nDoneContract:\n" + done_contract_text,
                 task_id=task.id,
                 task_text=task.description,
                 context_packet_id=context_packet.id,

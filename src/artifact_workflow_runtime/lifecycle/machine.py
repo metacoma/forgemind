@@ -186,10 +186,10 @@ class LifecycleMachine:
         return LifecycleTransitionDecision(
             event=LifecycleEvent.PUBLISH_FINISHED,
             from_stage=from_stage,
-            to_stage=LifecycleStage.VERIFYING,
-            graph_next="verify",
+            to_stage=LifecycleStage.FINALIZING,
+            graph_next="finalize",
             allowed=True,
-            reason="Publish finished without structured check failures; post-publish verification must review PR/commit/check evidence.",
+            reason="Publish finished without structured check failures; post-publish verification may finalize and refresh acceptance against publish evidence.",
             policy_decision=policy,
             facts=facts,
         )

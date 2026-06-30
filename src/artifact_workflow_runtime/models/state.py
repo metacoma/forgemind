@@ -5,6 +5,10 @@ from typing import Any, Mapping, TypedDict
 
 from pydantic import Field
 
+from artifact_workflow_runtime.done_contract import DoneContract
+from artifact_workflow_runtime.environment import EnvironmentPlan
+from artifact_workflow_runtime.qa import QAExecutionReport, QAPlan, QAReview
+
 from artifact_workflow_runtime.models.core import (
     ApprovalRequest,
     AcceptanceDecision,
@@ -49,14 +53,21 @@ class WorkflowStatus(str, Enum):
     OBSERVED = "observed"
     CONTEXT_BUILT = "context_built"
     OBLIGATIONS_SYNTHESIZED = "obligations_synthesized"
+    DONE_CONTRACT_BUILT = "done_contract_built"
     PLANNED = "planned"
+    WORKSPACE_PREPARED = "workspace_prepared"
     POLICY_CHECKED = "policy_checked"
     APPROVAL_RESOLVED = "approval_resolved"
     EXECUTED = "executed"
+    REVIEWED = "reviewed"
+    QA_PLANNED = "qa_planned"
+    QA_EXECUTED = "qa_executed"
+    QA_REVIEWED = "qa_reviewed"
     EXECUTION_REVIEWED = "execution_reviewed"
     REPAIRED = "repaired"
     PUBLISH_REVIEWED = "publish_reviewed"
     PUBLISHED = "published"
+    POST_PUBLISH_VERIFIED = "post_publish_verified"
     VERIFIED = "verified"
     ACCEPTANCE_EVALUATED = "acceptance_evaluated"
     COMPLETED = "completed"
@@ -121,6 +132,9 @@ class WorkflowStateSnapshot(RuntimeModel):
     obligation_request: LLMRequest | None = None
     obligation_result: LLMResult | None = None
     obligations: ObligationAnalysis | None = None
+    done_contract: DoneContract | None = None
+    workspace_branch: str | None = None
+    environment_plan: EnvironmentPlan | None = None
     plan_request: LLMRequest | None = None
     plan_result: LLMResult | None = None
     plan: ExecutionPlan | None = None
@@ -129,6 +143,10 @@ class WorkflowStateSnapshot(RuntimeModel):
     approval_request: ApprovalRequest | None = None
     execution_request: ExecutionRequest | None = None
     execution_result: ExecutionResult | None = None
+    review_result: QAReview | None = None
+    qa_plan: QAPlan | None = None
+    qa_execution_report: QAExecutionReport | None = None
+    qa_review_result: QAReview | None = None
     execution_review_decision: LifecycleTransitionDecision | None = None
     repair_requests: list[RepairRequest] = Field(default_factory=list)
     repair_results: list[RepairResult] = Field(default_factory=list)
@@ -199,6 +217,9 @@ class WorkflowState(TypedDict, total=False):
     obligation_request: JsonDict | None
     obligation_result: JsonDict | None
     obligations: JsonDict | None
+    done_contract: JsonDict | None
+    workspace_branch: str | None
+    environment_plan: JsonDict | None
     plan_request: JsonDict | None
     plan_result: JsonDict | None
     plan: JsonDict | None
@@ -207,6 +228,10 @@ class WorkflowState(TypedDict, total=False):
     approval_request: JsonDict | None
     execution_request: JsonDict | None
     execution_result: JsonDict | None
+    review_result: JsonDict | None
+    qa_plan: JsonDict | None
+    qa_execution_report: JsonDict | None
+    qa_review_result: JsonDict | None
     execution_review_decision: JsonDict | None
     repair_requests: list[JsonDict]
     repair_results: list[JsonDict]

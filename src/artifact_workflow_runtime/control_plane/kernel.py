@@ -166,14 +166,14 @@ class RuntimeKernel:
             return "finalize"
         if requires_approval:
             return "approval"
-        return "execute"
+        return "workspace_prepare"
 
     @staticmethod
     def next_after_approval(approval: ApprovalRequest | dict[str, object] | None) -> str:
         if approval is None:
             return "finalize"
         approved = approval.approved if isinstance(approval, ApprovalRequest) else approval.get("approved")
-        return "execute" if approved else "finalize"
+        return "workspace_prepare" if approved else "finalize"
 
     def next_after_execution(self, plan: ExecutionPlan, execution: ExecutionResult) -> str:
         # LangGraph no longer jumps from execute directly to publish/verify. The
@@ -911,6 +911,25 @@ def _environment_blocker(execution: ExecutionResult | None, verification: Verifi
                 missing_dependency=_guess_missing_dependency(summary),
                 required_for=required_for,
                 evidence_artifact_ids=list(getattr(blocker, "artifact_ids", []) or []),
+            )
+    if verification is not None:
+        inferred_items = [
+            *verification.missing_setup_steps,
+            *verification.missing_test_levels,
+            *verification.missing_obligations,
+            verification.summary,
+            *verification.missing_evidence,
+            *verification.checks_failed,
+        ]
+        inferred_text = " | ".join(str(item) for item in inferred_items if item).lower()
+        if any(marker in inferred_text for marker in ("install", "dependency", "bootstrap", "runtime prerequisite", "not installed", "docker", "freeplane", "x11", "display", "integration")):
+            blocker_kind = BlockerKind.INTEGRATION_ENVIRONMENT_UNAVAILABLE if any(marker in inferred_text for marker in ("freeplane", "x11", "display", "integration")) else BlockerKind.MISSING_ENVIRONMENT_DEPENDENCY
+            return EnvironmentBlocker(
+                kind=blocker_kind,
+                summary=f"verification: {verification.summary or 'missing environment/runtime prerequisite evidence'}",
+                missing_dependency=_guess_missing_dependency(inferred_text),
+                required_for=required_for,
+                evidence_artifact_ids=_evidence_artifact_ids(execution, verification, publish),
             )
     return None
 

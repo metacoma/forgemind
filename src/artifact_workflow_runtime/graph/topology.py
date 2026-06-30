@@ -14,28 +14,25 @@ PIPELINE_NODE_ORDER = (
     "observe",
     "build_context",
     "obligations",
+    "done_contract",
     "plan",
     "policy",
     "approval",
+    "workspace_prepare",
     "execute",
-    "execution_review",
-    "publish",
-    "publish_review",
+    "review",
+    "qa_plan",
+    "qa_execute",
+    "qa_review",
     "repair",
-    "verify",
     "acceptance",
+    "publish",
+    "post_publish_verify",
     "finalize",
 )
 
 
 def wire_workflow_graph(graph: Any, *, nodes: Mapping[str, NodeFn], routers: Mapping[str, RouteFn], end: object) -> Any:
-    """Register the canonical runtime topology on an already-created graph.
-
-    Stage implementations live in workflow/stage modules; this file owns the
-    logical graph shape. Keeping topology separate makes it easier to review
-    gates and re-entry edges without reading node business logic.
-    """
-
     for name in PIPELINE_NODE_ORDER:
         graph.add_node(name, nodes[name])
 
@@ -45,16 +42,20 @@ def wire_workflow_graph(graph: Any, *, nodes: Mapping[str, NodeFn], routers: Map
     graph.add_conditional_edges("research", routers["research"], {"observe": "observe", "build_context": "build_context", "finalize": "finalize"})
     graph.add_conditional_edges("observe", routers["observe"], {"build_context": "build_context", "finalize": "finalize"})
     graph.add_edge("build_context", "obligations")
-    graph.add_edge("obligations", "plan")
+    graph.add_edge("obligations", "done_contract")
+    graph.add_edge("done_contract", "plan")
     graph.add_edge("plan", "policy")
-    graph.add_conditional_edges("policy", routers["policy"], {"approval": "approval", "execute": "execute", "finalize": "finalize"})
-    graph.add_conditional_edges("approval", routers["approval"], {"execute": "execute", "finalize": "finalize"})
-    graph.add_conditional_edges("execute", routers["execute"], {"execution_review": "execution_review"})
-    graph.add_conditional_edges("execution_review", routers["execution_review"], {"publish": "publish", "verify": "verify", "acceptance": "acceptance", "finalize": "finalize"})
-    graph.add_edge("publish", "publish_review")
-    graph.add_conditional_edges("publish_review", routers["publish_review"], {"repair": "repair", "verify": "verify", "acceptance": "acceptance", "finalize": "finalize", "research": "research", "observe": "observe", "build_context": "build_context", "obligations": "obligations", "plan": "plan"})
-    graph.add_edge("repair", "execution_review")
-    graph.add_conditional_edges("verify", routers["verify"], {"acceptance": "acceptance", "research": "research", "observe": "observe", "build_context": "build_context", "obligations": "obligations", "plan": "plan", "finalize": "finalize"})
+    graph.add_conditional_edges("policy", routers["policy"], {"approval": "approval", "workspace_prepare": "workspace_prepare", "finalize": "finalize"})
+    graph.add_conditional_edges("approval", routers["approval"], {"workspace_prepare": "workspace_prepare", "finalize": "finalize"})
+    graph.add_edge("workspace_prepare", "execute")
+    graph.add_conditional_edges("execute", routers["execute"], {"review": "review"})
+    graph.add_conditional_edges("review", routers["review"], {"qa_plan": "qa_plan", "repair": "repair", "finalize": "finalize"})
+    graph.add_edge("qa_plan", "qa_execute")
+    graph.add_edge("qa_execute", "qa_review")
+    graph.add_conditional_edges("qa_review", routers["qa_review"], {"acceptance": "acceptance", "repair": "repair", "finalize": "finalize", "research": "research", "observe": "observe", "build_context": "build_context", "obligations": "obligations", "plan": "plan"})
+    graph.add_edge("repair", "review")
     graph.add_conditional_edges("acceptance", routers["acceptance"], {"publish": "publish", "finalize": "finalize", "research": "research", "observe": "observe", "build_context": "build_context", "obligations": "obligations", "plan": "plan"})
+    graph.add_edge("publish", "post_publish_verify")
+    graph.add_conditional_edges("post_publish_verify", routers["post_publish_verify"], {"repair": "repair", "finalize": "finalize"})
     graph.add_edge("finalize", end)
     return graph

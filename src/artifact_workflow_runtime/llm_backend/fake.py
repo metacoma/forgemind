@@ -94,4 +94,26 @@ class ScriptedLLMBackend:
                 "blocker_conditions": [],
                 "reasoning_summary": "No scripted obligation analysis was provided; using an empty test/publish obligation set for this test double.",
             }
+        if kind == "verification":
+            return {
+                "passed": True,
+                "summary": "No scripted verification payload was provided; treating existing evidence as sufficient for this test double.",
+                "checks_passed": [],
+                "checks_failed": [],
+                "missing_evidence": [],
+                "confidence": "medium",
+                "reasoning": "Fallback scripted verifier payload.",
+                "completion_status": "completed",
+            }
+        if kind == "verification_check":
+            return {
+                "passed": True,
+                "summary": "No scripted verification-check payload was provided; treating existing evidence as sufficient for this test double.",
+                "checks_passed": [],
+                "checks_failed": [],
+                "missing_evidence": [],
+                "confidence": "medium",
+                "reasoning": "Fallback scripted verification-check payload.",
+                "completion_status": "completed",
+            }
         return None
