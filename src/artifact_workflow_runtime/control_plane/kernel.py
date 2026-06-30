@@ -283,7 +283,7 @@ class RuntimeKernel:
         execute_git_push = _execute_git_push(execution) if execution is not None else False
         execute_git_commit = _execute_git_commit(execution) if execution is not None else False
         execution_status = _derive_execution_status(execution) if execution is not None else ExecutionStatus.FAILED
-        execution_has_blockers = bool(execution and execution.structured_evidence.blockers)
+        execution_has_blockers = bool(_non_deferred_blockers(execution.structured_evidence) if execution is not None else [])
         execution_stage_failed = bool(execution and execution.stage_failure is not None)
         publish_stage_failed = bool(publish and publish.stage_failure is not None)
         stage_failure_kind = None
@@ -705,7 +705,7 @@ class RuntimeKernel:
                 requires_world_check=False,
                 reason="Execution failed or returned unusable evidence; controller will use evidence guard verification.",
             )
-        if execution.evidence_bundle is not None and execution.evidence_bundle.structured.blockers:
+        if execution.evidence_bundle is not None and _non_deferred_blockers(execution.evidence_bundle.structured):
             env_blocker = _environment_blocker(execution, None, publish, required_for="verification")
             return VerificationStrategy(
                 mode=VerificationMode.EVIDENCE_REVIEW,
@@ -714,7 +714,7 @@ class RuntimeKernel:
                 reason=(
                     "Structured execution evidence contains an environment blocker; acceptance must classify needs_environment."
                     if env_blocker is not None
-                    else "Structured execution evidence contains blockers; evidence review should classify missing/failed requirements before finalization."
+                    else "Structured execution evidence contains non-publish blockers; evidence review should classify missing/failed requirements before finalization."
                 ),
             )
         verification_text = " ".join([*plan.verification_checks, *plan.required_test_levels, plan.execution_environment, *plan.required_setup_steps, *plan.environment_notes]).lower()
@@ -868,7 +868,7 @@ def _derive_execution_status(execution: ExecutionResult) -> ExecutionStatus:
         return execution.execution_status
     if not execution.ok:
         return ExecutionStatus.FAILED if execution.transport_error else ExecutionStatus.BLOCKED
-    blockers = execution.structured_evidence.blockers
+    blockers = _non_deferred_blockers(execution.structured_evidence)
     if blockers:
         return ExecutionStatus.PARTIAL if _has_mutation_evidence(execution) else ExecutionStatus.BLOCKED
     return ExecutionStatus.SUCCEEDED
@@ -1099,58 +1099,78 @@ def _contains_positive_side_effect(text: str, *, positive: tuple[str, ...], nega
 
 
 def _command_lines(result: object | None) -> list[str]:
+    """Return actual shell commands reported by the producer evidence.
+
+    Lifecycle side-effect detection must never scan prompts, acceptance
+    contracts, summaries, missing-evidence prose, or command output. Otherwise a
+    sentence like "push is forbidden" or "changes were not pushed" can be
+    misclassified as a real push. Only explicit commands from commands_run are
+    eligible for non-publish git/PR violations.
+    """
+
     evidence = getattr(result, "structured_evidence", None) if result is not None else None
     if evidence is None:
         return []
     lines: list[str] = []
     for item in getattr(evidence, "commands_run", []) or []:
         command = str(getattr(item, "command", "") or "").strip()
-        excerpt = str(getattr(item, "output_excerpt", "") or "").strip()
         if command:
             lines.append(command)
-        if excerpt:
-            lines.append(excerpt)
     return lines
 
 
+def _command_text(result: object | None) -> str:
+    return "\n".join(_command_lines(result)).lower()
+
+
 def _execute_pr_created(result: object | None) -> bool:
-    haystack = _result_text(result)
-    command_text = "\n".join(_command_lines(result)).lower()
+    command_text = _command_text(result)
     command_patterns = (
-        r"(^|\s)gh\s+pr\s+create\b",
-        r"(^|\s)gh\s+pr\s+edit\b",
-        r"(^|\s)hub\s+pull-request\b",
-        r"api\.github\.com/.*/pulls\b",
+        r"(^|[;&|()]|\s)gh\s+pr\s+create\b",
+        r"(^|[;&|()]|\s)hub\s+pull-request\b",
+        r"(^|[;&|()]|\s)curl\b[^\n;&|]*api\.github\.com[^\n;&|]*/pulls\b",
     )
-    if any(re.search(pattern, command_text) for pattern in command_patterns):
-        return True
-    return _contains_positive_side_effect(
-        haystack,
-        positive=("created pr", "opened pr", "created pull request", "opened pull request", "pull request created", "pr #", "/pull/"),
-        negative=("no pr", "no pull request", "not create pr", "not created pr", "did not create pr", "without creating pr", "pr not created"),
-    )
+    return any(re.search(pattern, command_text) for pattern in command_patterns)
 
 
 def _execute_git_push(result: object | None) -> bool:
-    command_text = "\n".join(_command_lines(result)).lower()
-    if re.search(r"(^|[;&|\s])git\s+push\b", command_text):
-        return True
-    return _contains_positive_side_effect(
-        _result_text(result),
-        positive=("pushed branch", "pushed to", "git push", "push succeeded", "pushed changes", "remote branch updated"),
-        negative=("not pushed", "did not push", "without pushing", "push not done", "push skipped", "was not pushed", "were not pushed"),
-    )
+    return bool(re.search(r"(^|[;&|()]|\s)git\s+push\b", _command_text(result)))
 
 
 def _execute_git_commit(result: object | None) -> bool:
-    command_text = "\n".join(_command_lines(result)).lower()
-    if re.search(r"(^|[;&|\s])git\s+commit\b", command_text):
-        return True
-    return _contains_positive_side_effect(
-        _result_text(result),
-        positive=("git commit", "created commit", "committed changes", "commit created", "new commit"),
-        negative=("not committed", "did not commit", "without committing", "commit not done", "commit skipped", "no commit"),
+    return bool(re.search(r"(^|[;&|()]|\s)git\s+commit\b", _command_text(result)))
+
+
+def _deferred_publish_blocker(summary: str) -> bool:
+    text = summary.lower()
+    if not text.strip():
+        return False
+    publish_terms = (
+        "commit",
+        "committed",
+        "push",
+        "pushed",
+        "pull request",
+        " pr",
+        "pr ",
+        "create_pr",
+        "open_pull_request",
+        "wait_pr_checks",
     )
+    deferral_terms = ("forbidden", "deferred", "publish", "publisher", "not been", "not run yet", "has not", "missing evidence")
+    return any(term in text for term in publish_terms) and any(term in text for term in deferral_terms)
+
+
+def _non_deferred_blockers(evidence: object | None) -> list[object]:
+    if evidence is None:
+        return []
+    blockers: list[object] = []
+    for item in getattr(evidence, "blockers", []) or []:
+        summary = str(getattr(item, "summary", "") or "")
+        if _deferred_publish_blocker(summary):
+            continue
+        blockers.append(item)
+    return blockers
 
 
 def _result_text(result: object | None) -> str:

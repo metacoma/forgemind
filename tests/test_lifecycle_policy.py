@@ -84,7 +84,22 @@ def _publish(text: str) -> PublishResult:
 def test_lifecycle_denies_execute_that_created_pr() -> None:
     kernel = RuntimeKernel()
     plan = _plan(publish=True)
-    execution = _execution("Changed src/client.cc. Ran unit tests: passed. Created PR #42 before publish.")
+    execution = _execution(
+        """{
+          "summary": "Changed src/client.cc and created a PR from execute.",
+          "structured_evidence": {
+            "commands_run": [
+              {"command": "pytest tests/test_client.py", "exit_code": 0, "output_excerpt": "1 passed"},
+              {"command": "gh pr create --fill --base main", "exit_code": 0, "output_excerpt": "https://github.com/acme/repo/pull/42"}
+            ],
+            "files_changed": [{"path": "src/client.cc", "action": "modified", "summary": "Implemented client"}],
+            "tests": [{"name": "pytest", "command": "pytest tests/test_client.py", "status": "passed", "passed": true}],
+            "blockers": [],
+            "mutation_summary": {"changed": true, "files_changed": ["src/client.cc"], "summary": "Changed code"},
+            "postcheck_summary": {"attempted": true, "summary": "Unit tests passed"}
+          }
+        }"""
+    )
 
     decision = kernel.review_execution(plan=plan, execution=execution, acceptance_contract=_contract(plan))
 
@@ -93,6 +108,40 @@ def test_lifecycle_denies_execute_that_created_pr() -> None:
     assert decision.to_stage == LifecycleStage.CONTROL_PLANE_VIOLATION
     assert decision.graph_next == "finalize"
     assert {violation.code for violation in decision.violations} == {"execute_created_pr", "execute_forbidden_action"}
+
+
+def test_execute_missing_publish_evidence_is_deferred_not_git_push() -> None:
+    kernel = RuntimeKernel()
+    plan = _plan(publish=True, integration=False)
+    execution = _execution(
+        """{
+          "summary": "Changed src/client.cc, ran unit tests, and deferred publication.",
+          "structured_evidence": {
+            "commands_run": [
+              {"command": "pytest tests/test_client.py", "exit_code": 0, "output_excerpt": "1 passed"},
+              {"command": "git status --short", "exit_code": 0, "output_excerpt": " M src/client.cc"}
+            ],
+            "files_changed": [{"path": "src/client.cc", "action": "modified", "summary": "Implemented client"}],
+            "tests": [{"name": "pytest", "command": "pytest tests/test_client.py", "status": "passed", "passed": true}],
+            "blockers": [
+              {"summary": "Missing evidence: changes have not been pushed to remote (forbidden by packet constraints)", "severity": "medium", "blocker_kind": "missing_evidence"},
+              {"summary": "Missing evidence: pull request has not been opened (forbidden by packet constraints)", "severity": "medium", "blocker_kind": "missing_evidence"}
+            ],
+            "mutation_summary": {"changed": true, "files_changed": ["src/client.cc"], "summary": "Changed code"},
+            "postcheck_summary": {"attempted": true, "summary": "Unit tests passed"}
+          }
+        }"""
+    )
+
+    facts = kernel.lifecycle_facts(plan=plan, execution=execution, acceptance_contract=_contract(plan))
+    decision = kernel.review_execution(plan=plan, execution=execution, acceptance_contract=_contract(plan))
+
+    assert facts.execute_git_push is False
+    assert facts.execute_pr_created is False
+    assert facts.execute_forbidden_action_detected is False
+    assert facts.execution_has_blockers is False
+    assert decision.allowed is True
+    assert decision.graph_next == "publish"
 
 
 def test_lifecycle_routes_mandatory_integration_to_verify_before_publish() -> None:
@@ -161,7 +210,18 @@ def test_lifecycle_allows_publish_after_only_publish_obligation_remains() -> Non
 def test_lifecycle_machine_dev_fallback_is_strict() -> None:
     machine = LifecycleMachine()
     plan = _plan(publish=True)
-    execution = _execution("Changed src/client.cc. git push origin feature-branch")
+    execution = _execution(
+        """{
+          "summary": "Changed src/client.cc and pushed from execute.",
+          "structured_evidence": {
+            "commands_run": [{"command": "git push origin feature-branch", "exit_code": 0, "output_excerpt": "pushed"}],
+            "files_changed": [{"path": "src/client.cc", "action": "modified", "summary": "Implemented client"}],
+            "blockers": [],
+            "mutation_summary": {"changed": true, "files_changed": ["src/client.cc"], "summary": "Changed code"},
+            "postcheck_summary": {"attempted": true, "summary": "No tests run"}
+          }
+        }"""
+    )
     facts = RuntimeKernel().lifecycle_facts(plan=plan, acceptance_contract=_contract(plan), execution=execution)
 
     decision = machine.transition(from_stage=LifecycleStage.EXECUTING, event=LifecycleEvent.EXECUTION_FINISHED, facts=facts)

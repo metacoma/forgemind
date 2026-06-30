@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .common import *
+from artifact_workflow_runtime.control_plane.stage_filters import execute_prompt_steps, execute_success_criteria as build_execute_success_criteria, execute_verification_commands
 
 
 class ExecutionStageMixin:
@@ -15,25 +16,27 @@ class ExecutionStageMixin:
             context_packet = ContextPacket.model_validate(state["context_packet"]) if state.get("context_packet") else None
             observation_text = (render_structured_evidence_summary(observation_result.structured_evidence) if observation_result else "No observation evidence was collected.")
             context_text = context_packet.text if context_packet else ""
+            execute_steps = execute_prompt_steps(plan)
+            execute_success = build_execute_success_criteria(plan)
             prompt = (
                 "You are executing an approved controller plan.\n"
                 "Use the environment as needed and make the requested changes.\n"
                 "Ground your work in the evidence below.\n"
-                "The original task intent is primary; do not silently degrade implementation work into analysis-only output.\n\n"
+                "The original task intent is primary; do not silently degrade implementation work into analysis-only output.\n"
+                "This is the execute stage only: edit files, install required local dependencies, and run build/unit/integration checks.\n"
+                "Repository publication is handled by a later publish stage. Do not commit, push, create a PR, wait for PR checks, or report missing publication as an execute blocker.\n\n"
                 f"Task: {task.description}\n\n"
                 f"ContextPacket:\n{context_text}\n\n"
                 f"Observation evidence:\n{observation_text}\n\n"
                 f"Plan summary: {plan.summary}\n"
-                "Steps:\n"
-                + "\n".join(f"- {step}" for step in plan.steps)
-                + "\n\nSuccess criteria:\n"
-                + "\n".join(f"- {item}" for item in plan.success_criteria)
+                "Execute-stage steps:\n"
+                + "\n".join(f"- {step}" for step in execute_steps)
+                + "\n\nExecute-stage success criteria:\n"
+                + "\n".join(f"- {item}" for item in execute_success)
                 + "\n\nThe environment is a Docker container. Install any dependencies required to run the required test levels inside the container.\n"
                 + f"Required setup steps: {plan.required_setup_steps}\n"
                 + f"Required test levels: {plan.required_test_levels}\n"
-                + f"Require commit: {plan.require_commit}\n"
-                + f"Require push: {plan.require_push}\n"
-                + "\nWhen finished, report concrete evidence: changed files, commands run, outputs, setup/install steps, test/build results, blockers."
+                + "\nWhen finished, report concrete evidence: changed files, commands run, outputs, setup/install steps, test/build results, blockers. Do not list deferred publication as a blocker."
             )
             request = ExecutionRequest(
                 task_id=task.id,
@@ -41,14 +44,14 @@ class ExecutionStageMixin:
                 capabilities=_execution_capabilities(plan),
                 prompt=prompt,
                 objective="execute approved controller plan",
-                plan_steps=list(plan.steps),
+                plan_steps=execute_steps,
                 expected_changes=list(plan.expected_repo_changes),
-                verification_commands=list(plan.verification_checks),
+                verification_commands=execute_verification_commands(plan),
                 scope_constraints=["do not choose next workflow step", "do not expand task scope", "collect structured evidence"],
                 plan_summary=plan.summary,
                 context_packet_id=context_packet.id if context_packet else None,
                 artifact_ids=list(state.get("artifact_ids") or []),
-                success_criteria=list(plan.success_criteria),
+                success_criteria=execute_success,
                 expected_outputs=["changed_files", "commands_run", "setup_steps", "test_results", "blockers"],
                 metadata={"evidence_required": True, "model_slot": "execute", "model_override": _openhands_model_for(services, "execute")},
             )

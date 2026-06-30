@@ -223,7 +223,7 @@ def build_verification_prompt(task: Task, context_packet: ContextPacket, plan: E
         "The execution environment is a Docker container unless evidence says otherwise.\n"
         "Check whether required setup/dependency installation happened before running build, unit, and integration tests.\n"
         "Check whether the performed test levels are sufficient for the change. Unit-only evidence is insufficient when the plan required integration tests.\n"
-        "Check whether commit/push obligations were fulfilled if they were required by the plan.\n"
+        "Check publish obligations only when publish evidence is present; before publish, missing commit/push/PR is deferred, not an execution failure.\n"
         "If publish evidence indicates that a PR exists, check whether the workflow waited for all PR checks to complete and whether all of them passed.\n"
         "If any PR checks failed, classify publish verification as failed/blocked and report the failing jobs as controller repair input; publisher must not fix CI inside publish.\n"
         "Return strict JSON matching this shape:\n"
@@ -233,8 +233,7 @@ def build_verification_prompt(task: Task, context_packet: ContextPacket, plan: E
         f"Plan summary: {plan.summary}\n"
         f"Required test levels: {plan.required_test_levels}\n"
         f"Required setup steps: {plan.required_setup_steps}\n"
-        f"Require commit: {plan.require_commit}\n"
-        f"Require push: {plan.require_push}\n"
+        f"Publish required later: {plan.require_commit or plan.require_push or bool(plan.publication_steps)}\n"
         f"Execution environment: {plan.execution_environment}\n"
         + "Success criteria:\n"
         + "\n".join(f"- {item}" for item in plan.success_criteria)
@@ -256,7 +255,7 @@ def build_verification_check_prompt(
     return (
         "Verify exactly one verification check using evidence only.\n"
         "You do not have live access to the world.\n"
-        "Judge only the named check below, but preserve global obligations such as required setup, required test levels, commit/push, and PR checks when they are relevant.\n"
+        "Judge only the named check below, preserving required setup and test levels. Treat commit/push/PR checks as publish-stage obligations unless publish evidence is present.\n"
         "Do not invent missing facts. If evidence is missing, say so explicitly.\n"
         "Return strict JSON matching this shape:\n"
         f"{json.dumps(VERIFICATION_SCHEMA_HINT, ensure_ascii=False, indent=2)}\n\n"
@@ -266,8 +265,7 @@ def build_verification_check_prompt(
         f"Plan summary: {plan.summary}\n"
         f"Required test levels: {plan.required_test_levels}\n"
         f"Required setup steps: {plan.required_setup_steps}\n"
-        f"Require commit: {plan.require_commit}\n"
-        f"Require push: {plan.require_push}\n"
+        f"Publish required later: {plan.require_commit or plan.require_push or bool(plan.publication_steps)}\n"
         f"Execution environment: {plan.execution_environment}\n"
         + "Success criteria:\n"
         + "\n".join(f"- {item}" for item in plan.success_criteria)
