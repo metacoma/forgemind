@@ -104,24 +104,31 @@ async def test_fetch_final_text_fallback_ignores_json_wrapped_openhands_html(mon
     assert await client.fetch_final_text_fallback(start) == ""
 
 
-async def test_refresh_app_conversation_start_metadata_keeps_dataclass_compatible(fake_openhands_server) -> None:
-    client = OpenHandsClient(fake_openhands_server.endpoint)
+async def test_refresh_metadata_supports_dataclass_conversation(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = OpenHandsClient("http://openhands")
     start = AppConversationStart(
-        conversation_id=fake_openhands_server.conversation_id,
-        conversation_url="http://stale/conversation",
-        agent_server_url=None,
-        session_api_key=None,
+        conversation_id="conv-1",
+        agent_server_url="http://old-agent",
+        conversation_url="http://old/app/api/conversations/conv-1",
+        session_api_key="old-session",
     )
+
+    async def fake_get_app_conversation(conversation_id: str):
+        assert conversation_id == "conv-1"
+        return {
+            "conversation_url": "http://new/app/api/conversations/conv-1",
+            "agent_server_url": "http://new-agent",
+            "session_api_key": "new-session",
+            "sandbox_id": "sb-1",
+        }
+
+    monkeypatch.setattr(client, "get_app_conversation", fake_get_app_conversation)
 
     refreshed = await client._refresh_app_conversation_start_metadata(start)
 
     assert refreshed is not start
-    assert refreshed.conversation_id == start.conversation_id
-    assert refreshed.sandbox_id == start.sandbox_id
-    assert refreshed.conversation_url == (
-        f"{fake_openhands_server.endpoint}/api/conversations/"
-        f"{fake_openhands_server.conversation_id}"
-    )
-    assert refreshed.agent_server_url == fake_openhands_server.endpoint
-    assert refreshed.session_api_key == "fake-session-key"
-    assert refreshed.raw_conversation is not None
+    assert refreshed.conversation_id == "conv-1"
+    assert refreshed.conversation_url == "http://new/app/api/conversations/conv-1"
+    assert refreshed.agent_server_url == "http://new-agent"
+    assert refreshed.session_api_key == "new-session"
+    assert refreshed.raw_conversation["sandbox_id"] == "sb-1"
