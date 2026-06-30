@@ -64,7 +64,7 @@ class PlanningPolicyStageMixin:
             obligations = ObligationAnalysis.model_validate(obligations_raw)
             done_contract = state.get("done_contract")
             done_contract_text = json.dumps(done_contract, ensure_ascii=False, indent=2) if done_contract is not None else "{}"
-            strategy_update = _record_strategy_checkpoint(services, state, checkpoint_stage="plan")
+            strategy_update = await _record_strategy_checkpoint(services, state, checkpoint_stage="plan")
             strategy_state = dict(state)
             strategy_state.update(strategy_update)
             strategy_block = _active_strategy_prompt_block(services, strategy_state)

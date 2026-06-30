@@ -9,6 +9,7 @@ from artifact_workflow_runtime.model_routing import ModelRoutingConfig, load_mod
 from artifact_workflow_runtime.openhands_adapter import OpenHandsAdapter, OpenHandsInstance
 from artifact_workflow_runtime.policy import StaticApprovalProvider
 from artifact_workflow_runtime.runtime_events import EventSink
+from artifact_workflow_runtime.strategy import StrategySelectionMode
 
 
 def build_controller(
@@ -26,6 +27,7 @@ def build_controller(
     auto_approve: bool,
     config_path: str | None = None,
     event_sink: EventSink | None = None,
+    strategy_selection_mode: StrategySelectionMode | str = StrategySelectionMode.RULE_BASED,
 ) -> WorkflowController:
     artifact_store = ArtifactStore(artifact_dir)
     model_routing: ModelRoutingConfig | None = load_model_routing_config(config_path)

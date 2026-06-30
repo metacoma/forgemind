@@ -120,7 +120,7 @@ class ExecutionStageMixin:
             if (not decision.allowed) or (not execution.ok) or execution.stage_failure is not None or execution.structured_evidence.blockers:
                 strategy_state = dict(state)
                 strategy_state.update(update)
-                strategy_update = _record_strategy_checkpoint(services, strategy_state, checkpoint_stage="execution_review")
+                strategy_update = await _record_strategy_checkpoint(services, strategy_state, checkpoint_stage="execution_review")
                 update = _merge_strategy_update(update, strategy_update)
             await _emit(services, "stage_completed", "execution_review", "Lifecycle transition reviewed", allowed=decision.allowed, next_stage=decision.graph_next, violations=[item.code for item in decision.violations])
             return update
@@ -141,6 +141,10 @@ class ExecutionStageMixin:
             execution = ExecutionResult.model_validate(state["execution_result"])
             publish = PublishResult.model_validate(state["publish_result"]) if state.get("publish_result") else None
             context_packet = ContextPacket.model_validate(state["context_packet"]) if state.get("context_packet") else None
+            strategy_update = await _record_strategy_checkpoint(services, state, checkpoint_stage="repair")
+            strategy_state = dict(state)
+            strategy_state.update(strategy_update)
+            strategy_block = _active_strategy_prompt_block(services, strategy_state)
             attempt = len(state.get("repair_results") or []) + 1
             if publish is not None:
                 failed_checks = _publish_failed_check_names(publish)
@@ -158,6 +162,7 @@ class ExecutionStageMixin:
                 "Do not commit, push, create or update PRs, wait PR checks, or choose the next workflow step.\n"
                 "Make only the smallest source/test changes needed to address the controller-provided failed checks, then run the relevant local checks and return structured evidence.\n\n"
                 f"Task: {task.description}\n\n"
+                f"{strategy_block}\n\n"
                 f"Failed checks: {failed_checks}\n"
                 f"Publish blockers: {blocker_summaries}\n"
                 f"Previous execution summary: {execution.summary}\n"
@@ -180,16 +185,21 @@ class ExecutionStageMixin:
                 expected_changes=list(plan.expected_repo_changes),
                 scope_constraints=["do not choose next workflow step", "do not expand task scope", "do not commit/push/create PR", "repair only controller-provided failures"],
                 context_packet_id=context_packet.id if context_packet else None,
-                artifact_ids=list(state.get("artifact_ids") or []),
-                metadata={"model_slot": "execute", "model_override": _openhands_model_for(services, "execute"), "repair_attempt": attempt},
+                artifact_ids=list(strategy_state.get("artifact_ids") or []),
+                metadata={
+                    "model_slot": "execute",
+                    "model_override": _openhands_model_for(services, "execute"),
+                    "repair_attempt": attempt,
+                    **_strategy_metadata(services, strategy_state),
+                },
             )
             result = await services.openhands_adapter.repair(request)
-            artifact_ids = list(state.get("artifact_ids") or [])
+            artifact_ids = list(strategy_state.get("artifact_ids") or [])
             artifact_ids.extend(artifact.id for artifact in result.execution_result.artifacts)
             repair_requests = [*(state.get("repair_requests") or []), request.model_dump(mode="json")]
             repair_results = [*(state.get("repair_results") or []), result.model_dump(mode="json")]
             await _emit(services, "stage_completed", "repair", "Repair packet completed", ok=result.ok, attempt=attempt, artifact_ids=[artifact.id for artifact in result.execution_result.artifacts])
-            return {
+            update = {
                 "repair_requests": repair_requests,
                 "repair_results": repair_results,
                 "execution_result": result.execution_result.model_dump(mode="json"),
@@ -204,5 +214,6 @@ class ExecutionStageMixin:
                 "artifact_ids": artifact_ids,
                 "status": "repaired",
                 "transitions": _append_transition(state, "repair", "repaired", "Bounded repair packet finished; lifecycle requires review before continuing", [artifact.id for artifact in result.execution_result.artifacts]),
-                "controller_decisions": _append_controller_decision(state, (services.runtime_kernel or RuntimeKernel()).controller_decision(stage="repair", selected_next_stage="review", reason="Repair completed; review must re-evaluate the candidate revision before QA.")),
+                "controller_decisions": _append_controller_decision(strategy_state, (services.runtime_kernel or RuntimeKernel()).controller_decision(stage="repair", selected_next_stage="review", reason="Repair completed; review must re-evaluate the candidate revision before QA.")),
             }
+            return _merge_strategy_update(update, strategy_update)

@@ -17,7 +17,7 @@ from artifact_workflow_runtime.qa import DeterministicQARunner, QAPlanner
 from artifact_workflow_runtime.reports import FinalReportBuilder
 from artifact_workflow_runtime.runtime_events import EventSink
 from artifact_workflow_runtime.state.checkpoints import WorkflowCheckpointRecorder
-from artifact_workflow_runtime.strategy import StrategyGovernor
+from artifact_workflow_runtime.strategy import LLMStrategyAdvisor, StrategyArbitrator, StrategyGovernor, StrategySelectionMode
 
 
 @dataclass
@@ -40,3 +40,6 @@ class WorkflowServices:
     runtime_kernel: RuntimeKernel | None = None
     checkpoint_recorder: WorkflowCheckpointRecorder | None = None
     strategy_governor: StrategyGovernor | None = None
+    strategy_selection_mode: StrategySelectionMode = StrategySelectionMode.RULE_BASED
+    strategy_advisor: LLMStrategyAdvisor | None = None
+    strategy_arbitrator: StrategyArbitrator | None = None

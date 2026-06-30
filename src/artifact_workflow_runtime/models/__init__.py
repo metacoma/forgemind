@@ -103,10 +103,15 @@ from .report import (
     FinalReport,
 )
 from artifact_workflow_runtime.strategy.models import (
+    LLMStrategyRecommendation,
+    StrategyAdvisorContext,
+    StrategyAdvisorStatus,
     StrategyCheckpointSignals,
     StrategyDecision,
     StrategyDefinition,
     StrategyId,
+    StrategySelectionMode,
+    StrategyValidationResult,
 )
 
 __all__ = [
@@ -176,8 +181,13 @@ __all__ = [
     "VerificationRequest",
     "VerificationResult",
     "FinalReport",
+    "LLMStrategyRecommendation",
+    "StrategyAdvisorContext",
+    "StrategyAdvisorStatus",
     "StrategyCheckpointSignals",
     "StrategyDecision",
     "StrategyDefinition",
     "StrategyId",
+    "StrategySelectionMode",
+    "StrategyValidationResult",
 ]

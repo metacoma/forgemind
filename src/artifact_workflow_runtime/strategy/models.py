@@ -30,6 +30,31 @@ class StrategyId(str, Enum):
         raise ValueError(f"Unknown strategy id: {value!r}")
 
 
+class StrategySelectionMode(str, Enum):
+    RULE_BASED = "rule_based"
+    LLM_ASSISTED = "llm_assisted"
+    HYBRID = "hybrid"
+
+    @classmethod
+    def coerce(cls, value: object) -> "StrategySelectionMode":
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower().replace("-", "_")
+            for item in cls:
+                if item.value == normalized:
+                    return item
+        return cls.RULE_BASED
+
+
+class StrategyAdvisorStatus(str, Enum):
+    SUCCESS = "success"
+    DISABLED = "disabled"
+    INVALID_JSON = "invalid_json"
+    INVALID_STRATEGY = "invalid_strategy"
+    BACKEND_ERROR = "backend_error"
+
+
 class StrategyDefinition(RuntimeModel):
     id: StrategyId
     description: str
@@ -94,3 +119,73 @@ class StrategyCheckpointSignals(RuntimeModel):
     @property
     def has_blockers(self) -> bool:
         return bool(self.blockers)
+
+
+class StrategyAdvisorContext(RuntimeModel):
+    task_summary: str
+    current_stage: str
+    active_strategy: StrategyId | None = None
+    previous_strategy_decisions: list[JsonDict] = Field(default_factory=list)
+    available_strategies: list[StrategyDefinition] = Field(default_factory=list)
+    checkpoint_signals: StrategyCheckpointSignals
+    missing_evidence: list[str] = Field(default_factory=list)
+    failed_checks: list[str] = Field(default_factory=list)
+    blockers: list[str] = Field(default_factory=list)
+    execution_status: str | None = None
+    verification_status: str | None = None
+    acceptance_status: str | None = None
+    repair_count: int = 0
+    changed_files_summary: list[str] = Field(default_factory=list)
+    known_constraints: list[str] = Field(default_factory=list)
+    current_bounded_packet_summary: str | None = None
+
+    @field_validator("active_strategy", mode="before")
+    @classmethod
+    def _coerce_active(cls, value: object) -> StrategyId | None:
+        if value in (None, ""):
+            return None
+        return StrategyId.coerce(value)
+
+
+class LLMStrategyRecommendation(RuntimeModel):
+    selected_strategy: str | None = None
+    reason: str = ""
+    confidence: float = 0.0
+    signals_used: list[str] = Field(default_factory=list)
+    constraints: list[str] = Field(default_factory=list)
+    raw_response_artifact_id: str | None = None
+    advisor_status: StrategyAdvisorStatus = StrategyAdvisorStatus.SUCCESS
+    error: str | None = None
+
+    @field_validator("advisor_status", mode="before")
+    @classmethod
+    def _coerce_status(cls, value: object) -> StrategyAdvisorStatus:
+        if isinstance(value, StrategyAdvisorStatus):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            for item in StrategyAdvisorStatus:
+                if item.value == normalized:
+                    return item
+        return StrategyAdvisorStatus.BACKEND_ERROR
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _coerce_confidence(cls, value: object) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+
+class StrategyValidationResult(RuntimeModel):
+    accepted: bool
+    final_strategy: StrategyId
+    rejection_reason: str | None = None
+    fallback_strategy: StrategyId
+    policy_notes: list[str] = Field(default_factory=list)
+
+    @field_validator("final_strategy", "fallback_strategy", mode="before")
+    @classmethod
+    def _coerce_strategy(cls, value: object) -> StrategyId:
+        return StrategyId.coerce(value)

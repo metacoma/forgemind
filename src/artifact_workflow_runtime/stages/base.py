@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from artifact_workflow_runtime.graph.services import WorkflowServices
+from typing import Any
+
 from artifact_workflow_runtime.graph.stage_gates import StageReadinessGate
 
 
 class BaseWorkflowStageNodes:
-    def __init__(self, services: WorkflowServices) -> None:
+    def __init__(self, services: Any) -> None:
         self.services = services
         self.readiness_gate = StageReadinessGate()

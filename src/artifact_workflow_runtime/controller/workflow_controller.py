@@ -19,11 +19,11 @@ from artifact_workflow_runtime.reports import FinalReportBuilder
 from artifact_workflow_runtime.runtime_events import EventSink
 from artifact_workflow_runtime.model_routing import ModelRoutingConfig
 from artifact_workflow_runtime.state import WorkflowCheckpointRecorder
-from artifact_workflow_runtime.strategy import StrategyGovernor
+from artifact_workflow_runtime.strategy import StrategyArbitrator, StrategyGovernor, StrategySelectionMode
 
 
 class WorkflowController:
-    def __init__(self, *, llm_backend, openhands_adapter, artifact_root: str | Path, approval_provider: ApprovalProvider | None = None, event_sink: EventSink | None = None, model_routing: ModelRoutingConfig | None = None) -> None:
+    def __init__(self, *, llm_backend, openhands_adapter, artifact_root: str | Path, approval_provider: ApprovalProvider | None = None, event_sink: EventSink | None = None, model_routing: ModelRoutingConfig | None = None, strategy_selection_mode: StrategySelectionMode | str = StrategySelectionMode.RULE_BASED) -> None:
         adapter_store = getattr(openhands_adapter, "artifact_store", None)
         self.artifact_store = adapter_store if isinstance(adapter_store, ArtifactStore) else ArtifactStore(artifact_root)
         self.services = WorkflowServices(
@@ -45,6 +45,8 @@ class WorkflowController:
             runtime_kernel=RuntimeKernel(),
             checkpoint_recorder=WorkflowCheckpointRecorder(self.artifact_store),
             strategy_governor=StrategyGovernor(),
+            strategy_selection_mode=StrategySelectionMode.coerce(strategy_selection_mode),
+            strategy_arbitrator=StrategyArbitrator(),
         )
         if self.services.approval_provider is None:
             from artifact_workflow_runtime.policy import StaticApprovalProvider

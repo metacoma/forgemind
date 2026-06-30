@@ -49,7 +49,7 @@ from artifact_workflow_runtime.lifecycle import PipelineLoopDecision, PipelineRe
 from artifact_workflow_runtime.strategy import (
     active_strategy_prompt_block as _active_strategy_prompt_block,
     merge_strategy_update as _merge_strategy_update,
-    record_strategy_checkpoint as _record_strategy_checkpoint,
+    record_strategy_checkpoint_async as _record_strategy_checkpoint,
     strategy_metadata as _strategy_metadata,
 )
 from artifact_workflow_runtime.model_routing import normalize_verification_check_slot

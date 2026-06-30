@@ -62,7 +62,7 @@ class ReviewQAStageMixin:
         if status != "pass" or missing:
             strategy_state = dict(state)
             strategy_state.update(update)
-            strategy_update = _record_strategy_checkpoint(services, strategy_state, checkpoint_stage="review")
+            strategy_update = await _record_strategy_checkpoint(services, strategy_state, checkpoint_stage="review")
             update = _merge_strategy_update(update, strategy_update)
         return update
 
@@ -252,7 +252,7 @@ class ReviewQAStageMixin:
         if review.status != "pass" or result.missing_evidence or result.checks_failed or result.missing_test_levels or result.missing_obligations:
             strategy_state = dict(state)
             strategy_state.update(update)
-            strategy_update = _record_strategy_checkpoint(services, strategy_state, checkpoint_stage="qa_review")
+            strategy_update = await _record_strategy_checkpoint(services, strategy_state, checkpoint_stage="qa_review")
             update = _merge_strategy_update(update, strategy_update)
         return update
 

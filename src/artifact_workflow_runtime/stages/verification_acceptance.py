@@ -252,7 +252,7 @@ class VerificationAcceptanceStageMixin:
             if selected_next != "acceptance" or result.missing_evidence or result.checks_failed or result.missing_test_levels or result.missing_obligations or result.passed is False:
                 strategy_state = dict(state)
                 strategy_state.update(update)
-                strategy_update = _record_strategy_checkpoint(services, strategy_state, checkpoint_stage="verify")
+                strategy_update = await _record_strategy_checkpoint(services, strategy_state, checkpoint_stage="verify")
                 update = _merge_strategy_update(update, strategy_update)
             return update
 
@@ -335,7 +335,7 @@ class VerificationAcceptanceStageMixin:
             if reentry_target is not None or not decision.accepted:
                 strategy_state = dict(state)
                 strategy_state.update(update)
-                strategy_update = _record_strategy_checkpoint(services, strategy_state, checkpoint_stage="acceptance")
+                strategy_update = await _record_strategy_checkpoint(services, strategy_state, checkpoint_stage="acceptance")
                 update = _merge_strategy_update(update, strategy_update)
             return update
 
