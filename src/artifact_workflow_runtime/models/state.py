@@ -33,6 +33,7 @@ from artifact_workflow_runtime.models.core import (
     VerificationResult,
     utc_now,
 )
+from artifact_workflow_runtime.lifecycle.models import LifecycleTransitionDecision
 
 JsonDict = dict[str, Any]
 
@@ -50,6 +51,7 @@ class WorkflowStatus(str, Enum):
     POLICY_CHECKED = "policy_checked"
     APPROVAL_RESOLVED = "approval_resolved"
     EXECUTED = "executed"
+    EXECUTION_REVIEWED = "execution_reviewed"
     PUBLISHED = "published"
     VERIFIED = "verified"
     ACCEPTANCE_EVALUATED = "acceptance_evaluated"
@@ -123,6 +125,7 @@ class WorkflowStateSnapshot(RuntimeModel):
     approval_request: ApprovalRequest | None = None
     execution_request: ExecutionRequest | None = None
     execution_result: ExecutionResult | None = None
+    execution_review_decision: LifecycleTransitionDecision | None = None
     publish_request: PublishRequest | None = None
     publish_result: PublishResult | None = None
     verification_request: VerificationRequest | None = None
@@ -131,6 +134,7 @@ class WorkflowStateSnapshot(RuntimeModel):
     verification_result: VerificationResult | None = None
     acceptance_decision: AcceptanceDecision | None = None
     final_report: FinalReport | None = None
+    lifecycle_decisions: list[LifecycleTransitionDecision] = Field(default_factory=list)
     controller_decisions: list[ControllerDecision] = Field(default_factory=list)
     transitions: list[StageTransition] = Field(default_factory=list)
     artifact_ids: list[str] = Field(default_factory=list)
@@ -195,6 +199,7 @@ class WorkflowState(TypedDict, total=False):
     approval_request: JsonDict | None
     execution_request: JsonDict | None
     execution_result: JsonDict | None
+    execution_review_decision: JsonDict | None
     publish_request: JsonDict | None
     publish_result: JsonDict | None
     verification_request: JsonDict | None
@@ -203,6 +208,7 @@ class WorkflowState(TypedDict, total=False):
     verification_result: JsonDict | None
     acceptance_decision: JsonDict | None
     final_report: JsonDict | None
+    lifecycle_decisions: list[JsonDict]
     controller_decisions: list[JsonDict]
     transitions: list[JsonDict]
     artifact_ids: list[str]

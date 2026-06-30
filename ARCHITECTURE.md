@@ -8,7 +8,8 @@ This project is an artifact-backed engineering runtime. It approximates a modern
 User task
   -> WorkflowController
   -> RuntimeKernel decisions
-  -> LangGraph state machine
+  -> LifecycleMachine / OPA policy gates
+  -> LangGraph executor graph
   -> Direct LLM text reasoning
   -> OpenHands bounded world packets
   -> ArtifactStore / WorkflowState source of truth
@@ -33,15 +34,22 @@ It does not delegate global workflow ownership to OpenHands. It starts the graph
 - after research: observe or build context
 - after policy: approval, execute, or finalize
 - after approval: execute or finalize
-- after execution: publish or verify
+- after execution: execution review, verification, acceptance, publish, or finalize via lifecycle transition decisions
+- lifecycle/policy gate evaluation before publish/finalize transitions
 - policy gate evaluation before OpenHands execution
 - verification strategy selection: Direct LLM evidence review vs bounded OpenHands world check
 
 LangGraph executes these decisions; OpenHands does not make them.
 
+### LifecycleMachine / OPA policy gates
+
+`lifecycle.LifecycleMachine` is the strict transition layer. It receives typed `LifecycleFacts` from `RuntimeKernel` and returns `LifecycleTransitionDecision` records. The graph may execute a node only after this layer selects the legal next graph stage.
+
+`lifecycle.OpaPolicyEvaluator` evaluates publish/finalize/execute-exit gates through `src/artifact_workflow_runtime/lifecycle/policies/runtime.rego` when the `opa` binary is available. When OPA is absent, the fallback evaluator enforces the same non-negotiable invariants in-process: execute cannot commit/push/create PR, publish requires clean execution and satisfied mandatory verification, and completed finalization requires accepted acceptance.
+
 ### LangGraph
 
-`graph.workflow` defines the concrete state machine and node implementations. It is the runtime/orchestration layer, not the reasoning backend.
+`graph.workflow` defines the concrete executor graph and node implementations. It is the runtime/orchestration layer, not the reasoning backend and not the policy engine.
 
 When the optional `langgraph` dependency is unavailable, `graph.compat` provides a minimal async state graph for tests and local development.
 
@@ -70,6 +78,7 @@ Direct LLM stages include classification, route analysis, obligation synthesis, 
 
 - `observe(ObservationRequest)`
 - `execute(ExecutionRequest)`
+- `publish(PublishRequest)`
 - `verify(VerificationRequest)`
 
 The adapter rejects incompatible work packet kinds. It persists every returned evidence payload as an artifact. Transport garbage such as HTML fallback pages is classified as unusable evidence instead of being treated as successful execution.
@@ -79,12 +88,13 @@ The adapter rejects incompatible work packet kinds. It persists every returned e
 Typed request contracts now carry backend/work-packet boundaries:
 
 - `ObservationRequest.work_packet_kind = observe | research`
-- `ExecutionRequest.work_packet_kind = execute | publish`
+- `ExecutionRequest.work_packet_kind = execute`
+- `PublishRequest.work_packet_kind = publish`
 - `VerificationRequest.work_packet_kind = verify`
 
 Requests also declare objectives, allowed actions, forbidden actions, expected outputs, capabilities, scope constraints, and metadata. This makes backend boundaries explicit instead of hiding them only inside prompt prose.
 
-`OpenHandsAdapter` validates those contracts: observation packets cannot allow mutation, execution packets must forbid workflow-decision changes, and `verify()` accepts only `backend=openhands` + `mode=world_check`.
+`OpenHandsAdapter` validates those contracts: observation packets cannot allow mutation, execution packets must forbid workflow-decision changes plus commit/push/create_pr/open_pull_request/publish, `execute()` rejects publish packets, `publish()` is the only adapter path for commits/pushes/PRs, and `verify()` accepts only `backend=openhands` + `mode=world_check`.
 
 ## State and artifacts
 
@@ -167,10 +177,24 @@ The runtime now separates execution, verification, acceptance, and final workflo
 
 `RuntimeKernel.evaluate_acceptance()` evaluates those obligations against structured execution/publish/verification evidence. Environment failures are not treated as notes. A missing required dependency, runtime prerequisite, or unavailable integration environment becomes a typed `EnvironmentBlocker` and prevents `completed` finalization.
 
-The graph flow is now:
+The graph flow is now lifecycle-gated:
 
 ```text
-execute -> publish? -> verify -> acceptance -> finalize
+execute -> execution_review -> verify -> acceptance -> publish? -> verify -> acceptance -> finalize
 ```
 
-For mutation tasks, verification is mandatory and finalization depends on `AcceptanceDecision`, not on raw OpenHands prose or a permissive verification summary.
+For mutation tasks, verification is mandatory and finalization depends on `AcceptanceDecision`, not on raw OpenHands prose or a permissive verification summary. Publish is blocked by default until lifecycle/OPA policy sees clean execution and satisfied mandatory verification/acceptance obligations. If execute creates a PR, pushes, or commits, the lifecycle layer emits a control-plane violation and routes directly to finalization with non-success status.
+
+
+## Lifecycle / policy hardening update
+
+Closed in this pass:
+
+- Added `lifecycle/` with `LifecycleMachine`, `LifecycleFacts`, `LifecycleTransitionDecision`, `PolicyViolation`, and `OpaPolicyEvaluator`.
+- Added reference Rego policy in `lifecycle/policies/runtime.rego` plus deterministic fallback for environments without the `opa` binary.
+- Added `python-statemachine` as the preferred lifecycle dependency while keeping tests runnable without the external package.
+- Replaced direct `execute -> publish` routing with `execute -> execution_review`; lifecycle guards now decide whether the only legal next step is verify, publish, acceptance, finalize, or control-plane violation.
+- Split publish from execute at the adapter boundary. `OpenHandsAdapter.execute()` accepts only execute packets; `publish()` is a separate bounded packet.
+- Execution requests now explicitly forbid commit, push, PR creation, publish, and waiting for PR checks.
+- Publish no longer performs hidden CI repair loops or feature reimplementation; it reports blockers/check failures for controller-owned repair decisions.
+- Fixed missing-evidence/test-run logic so `not run` and `missing evidence` cannot satisfy “tests were run”.

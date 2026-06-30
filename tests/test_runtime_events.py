@@ -88,6 +88,7 @@ async def test_controller_emits_stage_events(tmp_path):
                 "Repository tree and existing clients inspected.",
             ],
             "execute": ["Changed files: cpp/client.cpp\nCommands run: cmake --build ."],
+            "verify": ["Integration tests passed successfully."],
         },
     )
 

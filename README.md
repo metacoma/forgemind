@@ -5,7 +5,8 @@
 The current codebase is no longer organized around roles. It is organized around typed stage contracts and bounded backend responsibilities:
 
 - **WorkflowController / RuntimeKernel** owns workflow decisions.
-- **LangGraph** runs the state machine.
+- **LifecycleMachine + OPA/Rego policy gates** decide whether state transitions are legal.
+- **LangGraph** runs the executor/orchestration graph.
 - **Direct LLM backend** receives text-only `LLMRequest` packets.
 - **OpenHands backend** receives bounded `observe`, `research`, `execute`, `publish`, or `verify` work packets.
 - **ArtifactStore + typed WorkflowStateSnapshot** are the source of truth.
@@ -18,8 +19,9 @@ The current codebase is no longer organized around roles. It is organized around
 ```text
 src/artifact_workflow_runtime/
   controller/          # public WorkflowController entrypoint
-  control_plane/       # RuntimeKernel: next-step and policy gate decisions
-  graph/               # LangGraph workflow + offline compat state graph
+  control_plane/       # RuntimeKernel: builds lifecycle facts and controller decisions
+  lifecycle/           # python-statemachine lifecycle + OPA/Rego/fallback policy gates
+  graph/               # LangGraph executor graph + offline compat graph
   models/              # Pydantic typed contracts and WorkflowState
   artifacts/           # file-backed ArtifactStore and index
   evidence/            # raw OpenHands text -> structured evidence bundles
@@ -44,7 +46,23 @@ src/artifact_workflow_runtime/
 8. `RuntimeKernel` + `EvidenceGate` + `PolicyEngine` decide whether execution is blocked, allowed, or approval-gated.
 9. OpenHands executes only after policy/approval and receives an explicit bounded `ExecutionRequest`.
 10. Optional publish obligations are handled as a separate bounded packet.
-11. Direct LLM verifies evidence from artifacts; final status is assembled by `FinalReportBuilder`.
+11. The lifecycle/policy gate reviews execute/verify/acceptance facts before publish/finalize transitions.
+12. Direct LLM verifies evidence from artifacts; final status is assembled by `FinalReportBuilder`.
+
+
+## Lifecycle and policy gates
+
+The runtime now has a dedicated `lifecycle/` layer. LangGraph still runs nodes, but transitions such as `execute -> publish`, `acceptance -> publish`, and `acceptance -> finalize` are mediated by `LifecycleMachine` and `OpaPolicyEvaluator` over typed `LifecycleFacts`.
+
+Hard invariants are enforced before the graph can advance:
+
+- `execute` must not commit, push, or create/open PRs.
+- `publish` is a separate bounded OpenHands packet, not a second `execute()` call.
+- mutation tasks require verification/acceptance before publish unless policy explicitly allows otherwise.
+- environment blockers such as missing Freeplane integration runtime prevent publish/completed finalization.
+- `completed` requires an accepted `AcceptanceDecision`; useful execution alone is not success.
+
+`python-statemachine` is the preferred lifecycle dependency. The repository also includes a strict in-process fallback so tests and offline tarballs remain runnable when the package is not installed. OPA/Rego policy is stored in `src/artifact_workflow_runtime/lifecycle/policies/runtime.rego`; if the `opa` binary is unavailable, the Python fallback enforces the same hard control-plane invariants.
 
 ## Backend invariants
 
@@ -54,7 +72,7 @@ The Direct LLM gets only text. `LLMRequest` now carries explicit `task_text`, `i
 
 ### OpenHands
 
-OpenHands is not the workflow brain. It receives bounded work packets and returns evidence/artifacts/blockers. The adapter validates observe/execute/world-verification packet kinds, rejects mutating observation contracts, and stores raw plus structured evidence artifacts. It does not decide the next graph step.
+OpenHands is not the workflow brain. It receives bounded work packets and returns evidence/artifacts/blockers. The adapter validates observe/execute/publish/world-verification packet kinds, rejects mutating observation contracts, rejects publish packets passed through `execute()`, and stores raw plus structured evidence artifacts. It does not decide the next graph step.
 
 ### Artifacts, evidence, and state
 
@@ -123,7 +141,7 @@ Legacy `roles:` configs are rejected.
 python -m pytest -q
 ```
 
-The current test suite covers capability normalization, typed state validation, structured evidence extraction, per-stage and per-verification-check model routing, OpenHands transport fallback, sandbox reuse, runtime events, policy gating, research/observation routing, publish obligations, and verification behavior.
+The current test suite covers capability normalization, typed state validation, structured evidence extraction, per-stage and per-verification-check model routing, OpenHands transport fallback, sandbox reuse, runtime events, lifecycle/policy transition guards, research/observation routing, publish obligations, and verification behavior.
 
 ## Acceptance gate hardening
 

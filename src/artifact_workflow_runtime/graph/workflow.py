@@ -120,6 +120,10 @@ def _append_transition(state: WorkflowState, stage: str, to_status: str, reason:
 def _append_controller_decision(state: WorkflowState, decision: ControllerDecision) -> list[dict[str, Any]]:
     return [*(state.get("controller_decisions") or []), decision.model_dump(mode="json")]
 
+
+def _append_lifecycle_decision(state: WorkflowState, decision: Any) -> list[dict[str, Any]]:
+    return [*(state.get("lifecycle_decisions") or []), decision.model_dump(mode="json")]
+
 def _unique(items: list[str]) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
@@ -700,7 +704,7 @@ def build_workflow_graph(services: WorkflowServices):
         request = ExecutionRequest(
             task_id=task.id,
             execution_family=plan.execution_family,
-            capabilities=plan.capabilities,
+            capabilities=_execution_capabilities(plan),
             prompt=prompt,
             objective="execute approved controller plan",
             plan_steps=list(plan.steps),
@@ -735,7 +739,7 @@ def build_workflow_graph(services: WorkflowServices):
             "artifact_ids": artifact_ids,
             "status": "executed",
             "transitions": _append_transition(state, "execute", "executed", "Bounded OpenHands execution packet finished", [artifact.id for artifact in result.artifacts]),
-            "controller_decisions": _append_controller_decision(state, (services.runtime_kernel or RuntimeKernel()).controller_decision(stage="execute", selected_next_stage=(services.runtime_kernel or RuntimeKernel()).next_after_execution(plan, result), reason="Execution result controls publish-vs-verify routing.")),
+            "controller_decisions": _append_controller_decision(state, (services.runtime_kernel or RuntimeKernel()).controller_decision(stage="execute", selected_next_stage="execution_review", reason="Execution completed; lifecycle machine must review transition before publish/verify.")),
         }
 
     def execute_next(state: WorkflowState) -> str:
@@ -743,6 +747,36 @@ def build_workflow_graph(services: WorkflowServices):
         execution = ExecutionResult.model_validate(state["execution_result"])
         kernel = services.runtime_kernel or RuntimeKernel()
         return kernel.next_after_execution(plan, execution)
+
+    async def execution_review_node(state: WorkflowState) -> dict[str, Any]:
+        task = Task.model_validate(state["task"])
+        plan = ExecutionPlan.model_validate(state["plan"])
+        execution = ExecutionResult.model_validate(state["execution_result"])
+        contract = TaskAcceptanceContract.model_validate(state["acceptance_contract"]) if state.get("acceptance_contract") else None
+        kernel = services.runtime_kernel or RuntimeKernel()
+        await _emit(services, "stage_started", "execution_review", "Reviewing lifecycle transition after execute", task_id=task.id)
+        decision = kernel.review_execution(plan=plan, execution=execution, acceptance_contract=contract)
+        artifact = services.artifact_store.add_json("lifecycle_transition_decision", decision.model_dump(mode="json"), metadata={"task_id": task.id, "event": decision.event.value})
+        update: dict[str, Any] = {
+            "execution_review_decision": decision.model_dump(mode="json"),
+            "artifact_ids": _append_artifact_id(state.get("artifact_ids"), artifact.id),
+            "status": "execution_reviewed",
+            "lifecycle_decisions": _append_lifecycle_decision(state, decision),
+            "transitions": _append_transition(state, "execution_review", "execution_reviewed", decision.reason, [artifact.id]),
+            "controller_decisions": _append_controller_decision(state, kernel.controller_decision(stage="execution_review", selected_next_stage=decision.graph_next, reason=decision.reason)),
+        }
+        if not decision.allowed and contract is not None:
+            acceptance = kernel.acceptance_from_lifecycle_violation(contract=contract, execution=execution, decision=decision)
+            acceptance_artifact = services.artifact_store.add_json("acceptance_decision", acceptance.model_dump(mode="json"), metadata={"task_id": task.id, "source": "lifecycle_violation"})
+            update["acceptance_decision"] = acceptance.model_dump(mode="json")
+            update["artifact_ids"] = _append_artifact_id(update["artifact_ids"], acceptance_artifact.id)
+        await _emit(services, "stage_completed", "execution_review", "Lifecycle transition reviewed", allowed=decision.allowed, next_stage=decision.graph_next, violations=[item.code for item in decision.violations])
+        return update
+
+    def execution_review_next(state: WorkflowState) -> str:
+        decision = (state.get("execution_review_decision") or {})
+        next_stage = str(decision.get("graph_next") or "verify") if isinstance(decision, dict) else "verify"
+        return next_stage if next_stage in {"verify", "publish", "acceptance", "finalize"} else "verify"
 
     async def publish_node(state: WorkflowState) -> dict[str, Any]:
         task = Task.model_validate(state["task"])
@@ -753,7 +787,7 @@ def build_workflow_graph(services: WorkflowServices):
             "You are performing repository completion steps after implementation.\n"
             "You are running inside a Docker container.\n"
             "Use the existing workspace, credentials, git remote configuration, and GitHub token or CLI authentication if available.\n"
-            "Do not re-implement the feature unless fixing PR/CI failures requires a focused follow-up patch.\n"
+            "Do not re-implement or repair the feature in publish; report failing checks as structured blockers for the controller repair loop.\n"
             "Repository completion is not finished until commit/push obligations are satisfied and, if a PR exists or is created, its checks are fully assessed.\n\n"
             f"Task: {task.description}\n\n"
             f"Require commit: {plan.require_commit}\n"
@@ -765,9 +799,8 @@ def build_workflow_graph(services: WorkflowServices):
             "- push the branch/changes if required and remote credentials allow it\n"
             "- if a PR exists already or is created/updated by this push, identify the PR number/URL\n"
             "- wait for all PR checks and GitHub Actions/jobs for the current PR head SHA to finish\n"
-            "- if checks fail, inspect the failing jobs/logs, identify the root cause, apply the smallest necessary fix, install any missing build/test/integration dependencies inside Docker, rerun relevant local checks, commit, push, and wait for PR checks again\n"
-            "- perform at most 2 CI-fix iterations in this publish step\n"
-            "- report exact commands, commit hashes, branch names, PR number/URL, check names and statuses, whether checks were waited to completion, fix iterations performed, and any remaining blockers\n"
+            "- if checks fail, report exact failing jobs/log pointers and blockers; do not patch or run a CI repair loop in publish\n"
+            "- report exact commands, commit hashes, branch names, PR number/URL, check names and statuses, whether checks were waited to completion, and any remaining blockers\n"
             "- if no PR exists and none is needed, state that explicitly\n"
         )
         request = PublishRequest(
@@ -779,41 +812,10 @@ def build_workflow_graph(services: WorkflowServices):
             artifact_ids=list(state.get("artifact_ids") or []),
             metadata={"mode": "repo_completion", "execution_environment": plan.execution_environment},
         )
-        run = await services.openhands_adapter.execute(
-            ExecutionRequest(
-                task_id=task.id,
-                execution_family=plan.execution_family,
-                work_packet_kind=WorkPacketKind.PUBLISH,
-                capabilities=_publish_capabilities(plan),
-                prompt=prompt,
-                objective="complete commit/push/PR obligations only",
-                plan_steps=list(plan.publication_steps),
-                expected_changes=[],
-                verification_commands=list(plan.verification_checks),
-                scope_constraints=["do not choose next workflow step", "do not reimplement except minimal CI repair", "do not expand task scope"],
-                plan_summary="publish obligations",
-                context_packet_id=state.get("context_packet", {}).get("id") if isinstance(state.get("context_packet"), dict) else None,
-                artifact_ids=list(state.get("artifact_ids") or []),
-                expected_outputs=["git_status", "commit_hashes", "push_result", "pr_url", "check_statuses", "blockers"],
-                metadata={"mode": "publish", "require_commit": plan.require_commit, "require_push": plan.require_push, "model_slot": "publish", "model_override": _openhands_model_for(services, "publish")},
-            )
-        )
+        run = await services.openhands_adapter.publish(request)
         artifact_ids = list(state.get("artifact_ids") or [])
         artifact_ids.extend(artifact.id for artifact in run.artifacts)
-        result = PublishResult(
-            request_id=request.id,
-            ok=run.ok,
-            summary=run.summary,
-            evidence_text=run.evidence_text,
-            artifacts=run.artifacts,
-            structured_evidence=run.structured_evidence,
-            evidence_bundle=run.evidence_bundle,
-            primary_evidence_artifact_ids=list(run.primary_evidence_artifact_ids),
-            raw_evidence_artifact_id=run.raw_evidence_artifact_id,
-            conversation_id=run.conversation_id,
-            transport_error=run.transport_error,
-            evidence_kind=run.evidence_kind,
-        )
+        result = run
         await _emit(
             services,
             "stage_completed",
@@ -1086,14 +1088,35 @@ def build_workflow_graph(services: WorkflowServices):
             blocking_results=[item.model_dump(mode="json") for item in decision.obligation_results if item.status.value != "passed"],
             artifact_id=artifact.id,
         )
+        kernel = services.runtime_kernel or RuntimeKernel()
+        plan = ExecutionPlan.model_validate(state["plan"]) if state.get("plan") else None
+        lifecycle_decision = kernel.next_after_acceptance(
+            plan=plan,
+            acceptance=decision,
+            execution=execution,
+            verification=verification,
+            publish=publish,
+            acceptance_contract=contract,
+        ) if plan is not None else None
+        selected_next = lifecycle_decision.graph_next if lifecycle_decision is not None else "finalize"
         return {
             "acceptance_decision": decision.model_dump(mode="json"),
             **({"verification_result": updated_verification.model_dump(mode="json")} if updated_verification is not None else {}),
             "artifact_ids": _append_artifact_id(state.get("artifact_ids"), artifact.id),
             "status": "acceptance_evaluated",
             "transitions": _append_transition(state, "acceptance", "acceptance_evaluated", f"Acceptance gate resolved as {decision.status.value}", [artifact.id]),
-            "controller_decisions": _append_controller_decision(state, (services.runtime_kernel or RuntimeKernel()).controller_decision(stage="acceptance", selected_next_stage="finalize", reason=decision.summary)),
+            **({"lifecycle_decisions": _append_lifecycle_decision(state, lifecycle_decision)} if lifecycle_decision is not None else {}),
+            "controller_decisions": _append_controller_decision(state, kernel.controller_decision(stage="acceptance", selected_next_stage=selected_next, reason=(lifecycle_decision.reason if lifecycle_decision is not None else decision.summary))),
         }
+
+    def acceptance_next(state: WorkflowState) -> str:
+        decisions = state.get("lifecycle_decisions") or []
+        if decisions:
+            last = decisions[-1]
+            if isinstance(last, dict) and last.get("event") == "acceptance_evaluated":
+                next_stage = str(last.get("graph_next") or "finalize")
+                return next_stage if next_stage in {"publish", "finalize"} else "finalize"
+        return "finalize"
 
     async def finalize_node(state: WorkflowState) -> dict[str, Any]:
         task = Task.model_validate(state["task"])
@@ -1136,6 +1159,7 @@ def build_workflow_graph(services: WorkflowServices):
     graph.add_node("policy", policy_node)
     graph.add_node("approval", approval_node)
     graph.add_node("execute", execute_node)
+    graph.add_node("execution_review", execution_review_node)
     graph.add_node("publish", publish_node)
     graph.add_node("verify", verify_node)
     graph.add_node("acceptance", acceptance_node)
@@ -1152,9 +1176,10 @@ def build_workflow_graph(services: WorkflowServices):
     graph.add_edge("plan", "policy")
     graph.add_conditional_edges("policy", policy_next, {"approval": "approval", "execute": "execute", "finalize": "finalize"})
     graph.add_conditional_edges("approval", approval_next, {"execute": "execute", "finalize": "finalize"})
-    graph.add_conditional_edges("execute", execute_next, {"publish": "publish", "verify": "verify"})
+    graph.add_conditional_edges("execute", execute_next, {"execution_review": "execution_review"})
+    graph.add_conditional_edges("execution_review", execution_review_next, {"publish": "publish", "verify": "verify", "acceptance": "acceptance", "finalize": "finalize"})
     graph.add_edge("publish", "verify")
     graph.add_edge("verify", "acceptance")
-    graph.add_edge("acceptance", "finalize")
+    graph.add_conditional_edges("acceptance", acceptance_next, {"publish": "publish", "finalize": "finalize"})
     graph.add_edge("finalize", END)
     return graph.compile()

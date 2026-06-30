@@ -289,6 +289,7 @@ async def test_route_analysis_can_require_repo_observation_even_if_classifier_sa
         scripts={
             "observe": ["Found existing ruby/rust/python/nodejs clients and proto definitions in repo."],
             "execute": ["Added cpp client files src/cpp/client.cc and build changes CMakeLists.txt; cmake build succeeded; pytest unit tests passed; integration tests passed."],
+            "verify": ["Integration tests passed successfully."],
         },
     )
     controller = WorkflowController(
@@ -379,6 +380,7 @@ async def test_route_analysis_can_require_fresh_external_research_before_plannin
                 "Repository evidence: found existing ruby/rust/python/nodejs clients and build files.",
             ],
             "execute": ["Implemented cpp client files src/cpp/client.cc and build integration CMakeLists.txt; build passed; pytest unit tests passed; integration tests passed."],
+            "verify": ["Integration tests passed successfully."],
         },
     )
     controller = WorkflowController(
@@ -608,10 +610,9 @@ async def test_repository_change_marks_incomplete_when_integration_and_push_obli
         scripts={
             "observe": ["Observed existing clients and integration harness files in the repository."],
             "execute": [
-                "Implemented the cpp client, updated build files, and ran unit tests only.",
-                "Checked git status in Docker container; changes remain uncommitted and nothing was pushed.",
+                "Changed src/cpp/client.cc and CMakeLists.txt. Ran unit tests only; integration tests not run and changes were not pushed.",
             ],
-            "verify": ["unused in evidence-backed verification"],
+            "verify": ["Integration tests not run; missing integration test evidence."],
         },
     )
     controller = WorkflowController(
@@ -621,13 +622,12 @@ async def test_repository_change_marks_incomplete_when_integration_and_push_obli
         approval_provider=StaticApprovalProvider(approve=True, reviewer="test"),
     )
     report = await controller.run(Task(description="Add a C++ gRPC client in the repository and leave the change pushed and fully tested"))
-    assert report.status == "partially_completed"
-    assert report.publish is not None
+    assert report.status == "needs_environment"
+    assert report.publish is None
     assert report.verification is not None
-    assert report.verification.missing_test_levels == ["integration"]
-    assert report.verification.push_required is True
-    assert report.verification.push_done is False
-    assert len(openhands.calls["execute"]) == 2
+    assert report.verification.passed is False
+    assert len(openhands.calls["execute"]) == 1
+    assert len(openhands.calls["publish"]) == 0
 
 
 async def test_publish_step_runs_for_pr_capability_and_prompt_requires_waiting_for_pr_checks(tmp_path) -> None:
@@ -691,6 +691,21 @@ async def test_publish_step_runs_for_pr_capability_and_prompt_requires_waiting_f
                     "pr_checks_failed": [],
                     "pr_checks_pending": [],
                     "completion_status": "completed",
+                },
+                {
+                    "passed": True,
+                    "summary": "PR checks were awaited and passed after publish.",
+                    "checks_passed": ["feature implemented", "PR checks green"],
+                    "checks_failed": [],
+                    "missing_evidence": [],
+                    "confidence": "high",
+                    "reasoning": "Publish evidence showed PR checks completed successfully.",
+                    "pr_detected": True,
+                    "pr_checks_waited": True,
+                    "pr_checks_passed": ["build", "integration"],
+                    "pr_checks_failed": [],
+                    "pr_checks_pending": [],
+                    "completion_status": "completed",
                 }
             ],
         }
@@ -700,8 +715,10 @@ async def test_publish_step_runs_for_pr_capability_and_prompt_requires_waiting_f
         scripts={
             "observe": ["Repository observed."],
             "execute": [
-                "Implemented the change.",
-                "Created PR #7, waited for checks, fixed a failure if needed, and all PR checks passed.",
+                "Changed src/app.py and ran unit tests passed.",
+            ],
+            "publish": [
+                "Created PR #7 and waited for all PR checks; PR checks passed.",
             ],
         },
     )
@@ -714,10 +731,11 @@ async def test_publish_step_runs_for_pr_capability_and_prompt_requires_waiting_f
     report = await controller.run(Task(description="Implement the change and open a PR"))
     assert report.status == "completed"
     assert report.publish is not None
-    assert len(openhands.calls["execute"]) == 2
-    publish_request = openhands.calls["execute"][1]
+    assert len(openhands.calls["execute"]) == 1
+    assert len(openhands.calls["publish"]) == 1
+    publish_request = openhands.calls["publish"][0]
     assert "wait for all PR checks" in publish_request.prompt
-    assert "if checks fail" in publish_request.prompt
+    assert "do not patch or run a CI repair loop" in publish_request.prompt
 
 
 async def test_verification_checks_use_per_check_model_routing(tmp_path) -> None:
@@ -765,8 +783,8 @@ async def test_verification_checks_use_per_check_model_routing(tmp_path) -> None
                     "execution_family": ExecutionFamily.REPOSITORY_CHANGE.value,
                     "task_intent": "modify",
                     "deliverable_kind": "repository_changes",
-                    "capabilities": [Capability.REPO_WRITE.value, Capability.GIT_WRITE.value],
-                    "steps": ["edit code", "run unit tests", "wait PR checks"],
+                    "capabilities": [Capability.REPO_WRITE.value, Capability.REPO_CREATE_PR.value],
+                    "steps": ["edit code", "run unit tests", "publish PR and wait checks"],
                     "success_criteria": ["unit tests pass", "PR checks are green"],
                     "verification_checks": ["run unit tests", "wait for GitHub Actions PR checks"],
                     "requires_mutation": True,
@@ -820,6 +838,34 @@ async def test_verification_checks_use_per_check_model_routing(tmp_path) -> None
                     "push_required": False,
                     "completion_status": "completed",
                 },
+                {
+                    "passed": True,
+                    "summary": "Unit test evidence is present after publish.",
+                    "checks_passed": ["run unit tests"],
+                    "checks_failed": [],
+                    "missing_evidence": [],
+                    "confidence": "high",
+                    "reasoning": "Unit test evidence remains present after publish.",
+                    "performed_test_levels": ["unit"],
+                    "commit_required": False,
+                    "push_required": False,
+                    "completion_status": "completed",
+                },
+                {
+                    "passed": True,
+                    "summary": "PR check evidence is present after publish.",
+                    "checks_passed": ["wait for GitHub Actions PR checks"],
+                    "checks_failed": [],
+                    "missing_evidence": [],
+                    "confidence": "medium",
+                    "reasoning": "Publish evidence says PR checks passed.",
+                    "pr_detected": True,
+                    "pr_checks_waited": True,
+                    "pr_checks_passed": ["ci/test"],
+                    "commit_required": False,
+                    "push_required": False,
+                    "completion_status": "completed",
+                },
             ],
         }
     )
@@ -827,7 +873,8 @@ async def test_verification_checks_use_per_check_model_routing(tmp_path) -> None
         artifact_store,
         scripts={
             "observe": ["Repo observed."],
-            "execute": ["Changed src/app.py. Ran pytest tests/test_app.py: passed. PR #1 checks ci/test passed."],
+            "execute": ["Changed src/app.py. Ran pytest tests/test_app.py: passed."],
+            "publish": ["Created PR #1 and waited for PR checks ci/test passed."],
         },
     )
     routing = ModelRoutingConfig(
@@ -851,6 +898,7 @@ async def test_verification_checks_use_per_check_model_routing(tmp_path) -> None
     assert report.verification.checks_passed[:2] == ["run unit tests", "wait for GitHub Actions PR checks"]
     assert len(llm.calls["verification_check"]) == 3
     assert len(llm.calls["verification"]) == 0
+    assert len(openhands.calls["publish"]) == 1
     assert llm.calls["verification_check"][0].metadata["model_override"] == "openai/qwen36-27b"
     assert llm.calls["verification_check"][1].metadata["model_override"] == "openai/qwen36-35b"
     assert llm.calls["verification_check"][0].metadata["verification_check"] == "unit_tests"

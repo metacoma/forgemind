@@ -13,6 +13,7 @@ dependencies = [
   "httpx>=0.27",
   "websockets>=13,<16",
   "PyYAML>=6.0",
+  "python-statemachine>=2.2",
 ]
 
 [project.optional-dependencies]

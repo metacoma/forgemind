@@ -649,8 +649,8 @@ class ExecutionRequest(RuntimeModel):
     plan_summary: str | None = None
     context_packet_id: str | None = None
     artifact_ids: list[str] = Field(default_factory=list)
-    allowed_actions: list[str] = Field(default_factory=lambda: ["edit_files", "run_commands", "run_tests", "use_git_when_requested", "collect_evidence"] )
-    forbidden_actions: list[str] = Field(default_factory=lambda: ["change_workflow_decision", "skip_required_evidence", "act_outside_capabilities"] )
+    allowed_actions: list[str] = Field(default_factory=lambda: ["edit_files", "run_commands", "run_tests", "inspect_git_read_only", "collect_evidence"] )
+    forbidden_actions: list[str] = Field(default_factory=lambda: ["change_workflow_decision", "skip_required_evidence", "act_outside_capabilities", "commit", "push", "create_pr", "open_pull_request", "publish", "wait_pr_checks"] )
     expected_outputs: list[str] = Field(default_factory=lambda: ["changed_files", "commands_run", "test_results", "blockers"] )
     success_criteria: list[str] = Field(default_factory=list)
     evidence_requirements: EvidenceRequirements = Field(default_factory=lambda: EvidenceRequirements(require_commands=True, require_files=True, require_tests=True, require_blockers=True, required_sections=["commands_run", "files_changed", "tests", "blockers", "mutation_summary", "postcheck_summary"]))
@@ -714,8 +714,8 @@ class PublishRequest(RuntimeModel):
     work_packet_kind: WorkPacketKind = WorkPacketKind.PUBLISH
     prompt: str
     objective: str = "complete repository publication obligations"
-    allowed_actions: list[str] = Field(default_factory=lambda: ["inspect_git", "commit_when_required", "push_when_required", "inspect_pr_checks", "collect_evidence"] )
-    forbidden_actions: list[str] = Field(default_factory=lambda: ["change_workflow_decision", "expand_task_scope", "skip_required_pr_checks"] )
+    allowed_actions: list[str] = Field(default_factory=lambda: ["inspect_git", "commit_when_required", "push_when_required", "create_pr_when_required", "inspect_pr_checks", "collect_evidence"] )
+    forbidden_actions: list[str] = Field(default_factory=lambda: ["change_workflow_decision", "expand_task_scope", "reimplement_feature", "apply_feature_changes", "fix_ci_after_publish", "skip_required_pr_checks"] )
     require_commit: bool = False
     require_push: bool = False
     artifact_ids: list[str] = Field(default_factory=list)

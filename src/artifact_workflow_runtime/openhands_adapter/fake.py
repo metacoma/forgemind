@@ -13,13 +13,15 @@ from artifact_workflow_runtime.models import (
     ExecutionStatus,
     ObservationRequest,
     ObservationResult,
+    PublishRequest,
+    PublishResult,
     VerificationMode,
     VerificationRequest,
     VerificationResult,
     WorkPacketKind,
 )
 
-from .adapter import _classify_run_text, _execution_status_from_bundle
+from .adapter import _classify_run_text, _execution_status_from_bundle, _verification_passed_from_bundle
 
 
 class FakeOpenHandsAdapter:
@@ -104,7 +106,7 @@ class FakeOpenHandsAdapter:
             summary=summary,
             evidence_kind=evidence_kind,
             work_packet_kind=request.work_packet_kind,
-            changed_default=request.work_packet_kind == WorkPacketKind.EXECUTE,
+            changed_default=False,
         )
         return ExecutionResult(
             request_id=request.id,
@@ -118,6 +120,37 @@ class FakeOpenHandsAdapter:
             primary_evidence_artifact_ids=[bundle_artifact.id],
             raw_evidence_artifact_id=artifact.id,
             conversation_id="fake-execute",
+            transport_error=transport_error,
+            evidence_kind=evidence_kind,
+        )
+
+    async def publish(self, request: PublishRequest) -> PublishResult:
+        self.calls["publish"].append(request)
+        text = self._next("publish")
+        transport_error, evidence_kind = _classify_run_text(text)
+        ok = bool(text.strip()) and not transport_error
+        artifact = self.artifact_store.add_text("publish_evidence", text, metadata={"request_id": request.id, "evidence_kind": evidence_kind})
+        summary = text[:400] if not transport_error else "OpenHands did not return usable publish evidence."
+        bundle, bundle_artifact = self._bundle(
+            text=text,
+            raw_artifact_id=artifact.id,
+            request_id=request.id,
+            ok=ok,
+            summary=summary,
+            evidence_kind=evidence_kind,
+            work_packet_kind=WorkPacketKind.PUBLISH,
+        )
+        return PublishResult(
+            request_id=request.id,
+            ok=ok,
+            summary=summary,
+            evidence_text=text,
+            artifacts=[artifact, bundle_artifact],
+            structured_evidence=bundle.structured,
+            evidence_bundle=bundle,
+            primary_evidence_artifact_ids=[bundle_artifact.id],
+            raw_evidence_artifact_id=artifact.id,
+            conversation_id="fake-publish",
             transport_error=transport_error,
             evidence_kind=evidence_kind,
         )
@@ -138,7 +171,7 @@ class FakeOpenHandsAdapter:
             evidence_kind=evidence_kind,
             work_packet_kind=WorkPacketKind.VERIFY,
         )
-        passed = ok
+        passed = _verification_passed_from_bundle(text=text, ok=ok, transport_error=transport_error, bundle=bundle)
         return VerificationResult(
             request_id=request.id,
             passed=passed,

@@ -28,6 +28,14 @@ from artifact_workflow_runtime.models import (
     VerificationResult,
 )
 from artifact_workflow_runtime.models.state import ControllerDecision, WorkflowStateSnapshot
+from artifact_workflow_runtime.lifecycle import (
+    LifecycleEvent,
+    LifecycleFacts,
+    LifecycleMachine,
+    LifecycleStage,
+    LifecycleTransitionDecision,
+    PolicyViolation,
+)
 from artifact_workflow_runtime.policy import PolicyEngine
 from artifact_workflow_runtime.policy.evidence import EvidenceGate
 
@@ -55,8 +63,9 @@ class RuntimeKernel:
     return hints/evidence, but this kernel decides which workflow edge is taken.
     """
 
-    def __init__(self, *, evidence_gate: EvidenceGate | None = None) -> None:
+    def __init__(self, *, evidence_gate: EvidenceGate | None = None, lifecycle_machine: LifecycleMachine | None = None) -> None:
         self.evidence_gate = evidence_gate or EvidenceGate()
+        self.lifecycle_machine = lifecycle_machine or LifecycleMachine()
 
 
     def fact_readiness(self, snapshot: WorkflowStateSnapshot) -> StateReadiness:
@@ -160,13 +169,142 @@ class RuntimeKernel:
         approved = approval.approved if isinstance(approval, ApprovalRequest) else approval.get("approved")
         return "execute" if approved else "finalize"
 
-    @staticmethod
-    def next_after_execution(plan: ExecutionPlan, execution: ExecutionResult) -> str:
-        # Publication is a controller decision derived from plan obligations and
-        # execution result. OpenHands may report hints, but it cannot choose the edge.
-        if execution.ok and _publish_required(plan):
-            return "publish"
-        return "verify"
+    def next_after_execution(self, plan: ExecutionPlan, execution: ExecutionResult) -> str:
+        # LangGraph no longer jumps from execute directly to publish/verify. The
+        # lifecycle machine must review execute evidence and policy guards first.
+        return "execution_review"
+
+    def review_execution(
+        self,
+        *,
+        plan: ExecutionPlan,
+        execution: ExecutionResult,
+        acceptance_contract: TaskAcceptanceContract | None = None,
+    ) -> LifecycleTransitionDecision:
+        facts = self.lifecycle_facts(
+            plan=plan,
+            execution=execution,
+            acceptance_contract=acceptance_contract,
+        )
+        return self.lifecycle_machine.transition(
+            from_stage=LifecycleStage.EXECUTING,
+            event=LifecycleEvent.EXECUTION_FINISHED,
+            facts=facts,
+        )
+
+    def next_after_execution_review(self, decision: LifecycleTransitionDecision) -> str:
+        return decision.graph_next
+
+    def next_after_acceptance(
+        self,
+        *,
+        plan: ExecutionPlan,
+        acceptance: AcceptanceDecision,
+        execution: ExecutionResult | None,
+        verification: VerificationResult | None,
+        publish: PublishResult | None,
+        acceptance_contract: TaskAcceptanceContract | None = None,
+    ) -> LifecycleTransitionDecision:
+        facts = self.lifecycle_facts(
+            plan=plan,
+            execution=execution,
+            verification=verification,
+            publish=publish,
+            acceptance=acceptance,
+            acceptance_contract=acceptance_contract,
+        )
+        return self.lifecycle_machine.transition(
+            from_stage=LifecycleStage.ACCEPTANCE,
+            event=LifecycleEvent.ACCEPTANCE_EVALUATED,
+            facts=facts,
+        )
+
+    def lifecycle_facts(
+        self,
+        *,
+        plan: ExecutionPlan | None = None,
+        acceptance_contract: TaskAcceptanceContract | None = None,
+        execution: ExecutionResult | None = None,
+        verification: VerificationResult | None = None,
+        publish: PublishResult | None = None,
+        acceptance: AcceptanceDecision | None = None,
+    ) -> LifecycleFacts:
+        publish_required = _publish_required(plan) if plan is not None else False
+        mutation_task = bool(plan and (plan.requires_mutation or plan.must_change_world or plan.expected_repo_changes))
+        mandatory_verification_required = mutation_task or _requires_integration_verification(plan)
+        environment_blocked = _environment_blocker(execution, verification, publish, required_for="lifecycle") is not None
+        verification_ran, verification_passed, verification_failed = _check_status(execution, verification, publish, _verification_terms(plan))
+        mandatory_verification_satisfied = bool(verification_passed and not verification_failed) if mandatory_verification_required else True
+        if acceptance is not None and _acceptance_has_only_publish_obligation_missing(acceptance):
+            mandatory_verification_satisfied = True
+        text = _result_text(execution).lower() if execution is not None else ""
+        execute_pr_created = _contains_any(text, ("pull request", "pr #", "created pr", "opened pr", "github.com/", "/pull/"))
+        execute_git_push = _contains_any(text, ("git push", "pushed branch", "pushed to", "origin/"))
+        execute_git_commit = _contains_any(text, ("git commit", "commit ", "committed"))
+        execution_status = _derive_execution_status(execution) if execution is not None else ExecutionStatus.FAILED
+        execution_has_blockers = bool(execution and execution.structured_evidence.blockers)
+        execution_succeeded = bool(execution and execution.ok and execution_status == ExecutionStatus.SUCCEEDED and not execution_has_blockers)
+        return LifecycleFacts(
+            plan=plan,
+            acceptance_contract=acceptance_contract,
+            execution=execution,
+            verification=verification,
+            publish=publish,
+            acceptance=acceptance,
+            publish_required=publish_required,
+            publish_done=publish is not None and publish.ok,
+            mutation_task=mutation_task,
+            mandatory_verification_required=mandatory_verification_required,
+            mandatory_verification_satisfied=mandatory_verification_satisfied,
+            mandatory_verification_blocked=environment_blocked,
+            mandatory_verification_missing=mandatory_verification_required and not verification_ran,
+            environment_blocked=environment_blocked,
+            execution_succeeded=execution_succeeded,
+            execution_blocked=execution_status in {ExecutionStatus.BLOCKED, ExecutionStatus.FAILED},
+            execution_has_blockers=execution_has_blockers,
+            execute_pr_created=execute_pr_created,
+            execute_git_push=execute_git_push,
+            execute_git_commit=execute_git_commit,
+            execute_forbidden_action_detected=execute_pr_created or execute_git_push or execute_git_commit,
+        )
+
+    def acceptance_from_lifecycle_violation(
+        self,
+        *,
+        contract: TaskAcceptanceContract,
+        execution: ExecutionResult | None,
+        decision: LifecycleTransitionDecision,
+    ) -> AcceptanceDecision:
+        results = [
+            VerificationObligationResult(
+                obligation_id=f"lifecycle_{idx}",
+                obligation_name=violation.code,
+                kind=AcceptanceObligationKind.REQUIRED_EVIDENCE_PRESENT,
+                status=AcceptanceObligationStatus.BLOCKED,
+                reason=violation.message,
+                evidence_artifact_ids=violation.evidence_artifact_ids,
+                blocker_kind=violation.blocker_kind or BlockerKind.POLICY_BLOCKED,
+            )
+            for idx, violation in enumerate(decision.violations or [])
+        ] or [
+            VerificationObligationResult(
+                obligation_id="lifecycle_transition_denied",
+                obligation_name="Lifecycle transition denied",
+                kind=AcceptanceObligationKind.REQUIRED_EVIDENCE_PRESENT,
+                status=AcceptanceObligationStatus.BLOCKED,
+                reason=decision.reason,
+                blocker_kind=BlockerKind.POLICY_BLOCKED,
+            )
+        ]
+        return AcceptanceDecision(
+            contract_id=contract.id,
+            status=AcceptanceStatus.NEEDS_HUMAN_REVIEW,
+            accepted=False,
+            execution_status=_derive_execution_status(execution) if execution is not None else ExecutionStatus.FAILED,
+            final_workflow_status="control_plane_violation",
+            summary=decision.reason,
+            obligation_results=results,
+        )
 
     def build_acceptance_contract(
         self,
@@ -391,16 +529,21 @@ class RuntimeKernel:
                 reason="Execution failed or returned unusable evidence; controller will use evidence guard verification.",
             )
         if execution.evidence_bundle is not None and execution.evidence_bundle.structured.blockers:
+            env_blocker = _environment_blocker(execution, None, publish, required_for="verification")
             return VerificationStrategy(
                 mode=VerificationMode.EVIDENCE_REVIEW,
                 per_check=False,
                 requires_world_check=False,
-                reason="Structured execution evidence contains blockers; evidence review should classify missing/failed requirements before finalization.",
+                reason=(
+                    "Structured execution evidence contains an environment blocker; acceptance must classify needs_environment."
+                    if env_blocker is not None
+                    else "Structured execution evidence contains blockers; evidence review should classify missing/failed requirements before finalization."
+                ),
             )
-        verification_text = " ".join([*plan.verification_checks, *plan.required_test_levels, plan.execution_environment]).lower()
+        verification_text = " ".join([*plan.verification_checks, *plan.required_test_levels, plan.execution_environment, *plan.required_setup_steps, *plan.environment_notes]).lower()
         requires_world_check = any(
             marker in verification_text
-            for marker in ("world_check", "real_world", "postcheck_in_environment", "cluster live", "host live", "kubectl live", "ansible live", "ssh live")
+            for marker in ("world_check", "real_world", "postcheck_in_environment", "cluster live", "host live", "kubectl live", "ansible live", "ssh live", "integration", "e2e", "end-to-end", "freeplane", "grpc smoke")
         ) and publish is None
         if requires_world_check:
             return VerificationStrategy(
@@ -569,9 +712,11 @@ def _check_status(execution: ExecutionResult | None, verification: VerificationR
                 observed.append((str(name).lower(), "missing"))
     if terms:
         observed = [(name, status) for name, status in observed if any(term in name for term in terms)]
-    ran = bool(observed)
-    failed = any(status in {"failed", "blocked", "missing", "not_run"} for _name, status in observed)
-    passed = ran and not failed and any(status == "passed" for _name, status in observed)
+    run_statuses = {"passed", "failed", "blocked", "success", "succeeded", "ok", "error"}
+    missing_statuses = {"missing", "not_run", "not run", "unknown"}
+    ran = any(status in run_statuses for _name, status in observed)
+    failed = any(status in {"failed", "blocked", "error"} for _name, status in observed) or (not ran and any(status in missing_statuses for _name, status in observed))
+    passed = ran and not failed and any(status in {"passed", "success", "succeeded", "ok"} for _name, status in observed)
     return ran, passed, failed
 
 
@@ -629,3 +774,37 @@ def _check_result(obligation: AcceptanceObligation, ran: bool, passed: bool, fai
         evidence_artifact_ids=artifact_ids,
         blocker_kind=None if passed else BlockerKind.MISSING_EVIDENCE,
     )
+
+
+def _contains_any(text: str, markers: tuple[str, ...]) -> bool:
+    return any(marker in text for marker in markers)
+
+
+def _result_text(result: object | None) -> str:
+    if result is None:
+        return ""
+    parts = [str(getattr(result, "summary", "") or ""), str(getattr(result, "evidence_text", "") or "")]
+    evidence = getattr(result, "structured_evidence", None)
+    if evidence is not None:
+        parts.extend(item.summary for item in evidence.blockers)
+        parts.extend((item.summary or item.path) for item in evidence.files_changed)
+        parts.extend(item.name for item in evidence.tests)
+    return "\n".join(parts)
+
+
+def _requires_integration_verification(plan: ExecutionPlan | None) -> bool:
+    if plan is None:
+        return False
+    text = _lower_join([*plan.required_test_levels, *plan.verification_checks, *plan.success_criteria, *plan.required_setup_steps, *plan.environment_notes])
+    return any(marker in text for marker in ("integration", "e2e", "end-to-end", "freeplane", "grpc smoke", "x11", "display"))
+
+
+def _verification_terms(plan: ExecutionPlan | None) -> tuple[str, ...]:
+    if _requires_integration_verification(plan):
+        return ("integration", "e2e", "end-to-end", "freeplane", "grpc smoke", "x11", "display")
+    return ()
+
+
+def _acceptance_has_only_publish_obligation_missing(acceptance: AcceptanceDecision) -> bool:
+    blocking = [item for item in acceptance.obligation_results if item.status != AcceptanceObligationStatus.PASSED]
+    return bool(blocking) and all(item.kind == AcceptanceObligationKind.PUBLISH_OBLIGATIONS_SATISFIED for item in blocking)

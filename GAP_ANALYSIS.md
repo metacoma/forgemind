@@ -98,3 +98,24 @@ Remaining debt:
 1. Acceptance obligation derivation is deterministic and typed, but still heuristic. Future iterations can make obligations first-class planner output validated by policy.
 2. Repair loops are still not first-class: failed/blocked acceptance stops safely, but does not yet create a typed repair request.
 3. OpenHands should eventually emit strict JSON evidence with blocker kinds directly instead of relying on fallback blocker normalization.
+
+
+## Lifecycle / policy engine pass
+
+Closed in this pass:
+
+- Added a dedicated lifecycle state-transition layer instead of continuing to encode publish/finalize decisions as ad hoc `if execution.ok` graph routing.
+- Added OPA/Rego policy gates for lifecycle decisions with a strict Python fallback. This keeps the runtime deterministic even when external OPA is not installed.
+- Added typed lifecycle facts/events/transition decisions and persisted them in workflow state/artifacts.
+- Closed the PR capability leak: `execute` now receives execution-only capabilities and forbids commit/push/create_pr/open_pull_request/publish/wait_pr_checks.
+- Split `publish` from `execute` at the adapter API. Tests now expect `calls["publish"]`, not a second `execute()` call.
+- Added `execution_review` before publish. A PR created during execute is a control-plane violation, not an acceptable publish shortcut.
+- Fixed verification accounting so `missing_evidence` and `not_run` no longer count as a successful run.
+- Stopped optimistic mutation evidence from treating arbitrary path mentions as changed files.
+
+Remaining debt:
+
+1. The lifecycle fallback currently mirrors only the hard P0 invariants. More Rego rules should gradually move from Python helper logic into policy modules.
+2. A first-class typed repair loop is still missing. Publish now reports blockers instead of repairing, but the controller does not yet generate a bounded `RepairRequest`.
+3. Durable resume/replay still needs to restore lifecycle decisions from artifacts and continue from a safe stage.
+4. The optional OPA invocation should be hardened for production deployment conventions, bundle loading, and policy test fixtures.

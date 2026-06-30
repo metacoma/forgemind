@@ -12,6 +12,8 @@ from artifact_workflow_runtime.models import (
     ExecutionStatus,
     ObservationRequest,
     ObservationResult,
+    PublishRequest,
+    PublishResult,
     VerificationMode,
     VerificationRequest,
     VerificationResult,
@@ -49,6 +51,20 @@ def _execution_status_from_bundle(*, ok: bool, transport_error: bool, bundle: Ev
     return ExecutionStatus.SUCCEEDED
 
 
+def _verification_passed_from_bundle(*, text: str, ok: bool, transport_error: bool, bundle: EvidenceBundle) -> bool:
+    if not ok or transport_error:
+        return False
+    if bundle.structured.blockers:
+        return False
+    if bundle.structured.tests:
+        statuses = {str(item.status).lower() for item in bundle.structured.tests}
+        return bool(statuses) and statuses <= {"passed", "success", "succeeded", "ok"}
+    lowered = text.lower()
+    negative = ("not run", "not executed", "missing", "blocked", "failed", "failure", "error", "unable", "cannot")
+    positive = ("passed", "success", "successful", "ok", "green")
+    return any(marker in lowered for marker in positive) and not any(marker in lowered for marker in negative)
+
+
 class OpenHandsAdapter:
     def __init__(self, instance: OpenHandsInstance, artifact_store: ArtifactStore, model_routing: ModelRoutingConfig | None = None) -> None:
         self.instance = instance
@@ -82,14 +98,33 @@ class OpenHandsAdapter:
 
     @staticmethod
     def _validate_execution_contract(request: ExecutionRequest) -> None:
-        if request.work_packet_kind not in {WorkPacketKind.EXECUTE, WorkPacketKind.PUBLISH}:
-            raise ValueError(f"OpenHands execute() only accepts execute/publish packets, got {request.work_packet_kind}")
+        if request.work_packet_kind != WorkPacketKind.EXECUTE:
+            raise ValueError(f"OpenHands execute() only accepts execute packets; publish packets must use publish() (not execute/publish packets), got {request.work_packet_kind}")
         if not request.expected_outputs:
             raise ValueError("Execution packets must declare expected_outputs")
-        if "change_workflow_decision" not in {item.strip().lower() for item in request.forbidden_actions}:
+        forbidden = {item.strip().lower() for item in request.forbidden_actions}
+        if "change_workflow_decision" not in forbidden:
             raise ValueError("Execution packets must forbid changing workflow decisions")
+        missing_publish_guards = {"commit", "push", "create_pr", "open_pull_request", "publish"} - forbidden
+        if missing_publish_guards:
+            raise ValueError(f"Execution packets must explicitly forbid publish actions: {sorted(missing_publish_guards)}")
         if request.evidence_requirements.require_structured is not True:
             raise ValueError("Execution packets must require structured evidence as the operational output")
+
+
+    @staticmethod
+    def _validate_publish_contract(request: PublishRequest) -> None:
+        if request.work_packet_kind != WorkPacketKind.PUBLISH:
+            raise ValueError(f"OpenHands publish() only accepts publish packets, got {request.work_packet_kind}")
+        if not request.expected_outputs:
+            raise ValueError("Publish packets must declare expected_outputs")
+        forbidden = {item.strip().lower() for item in request.forbidden_actions}
+        if "change_workflow_decision" not in forbidden:
+            raise ValueError("Publish packets must forbid changing workflow decisions")
+        if "reimplement_feature" not in forbidden or "expand_task_scope" not in forbidden:
+            raise ValueError("Publish packets must forbid reimplementation and scope expansion")
+        if request.evidence_requirements.require_structured is not True:
+            raise ValueError("Publish packets must require structured evidence as the operational output")
 
     @staticmethod
     def _validate_world_verification_contract(request: VerificationRequest) -> None:
@@ -169,7 +204,7 @@ class OpenHandsAdapter:
 
     async def execute(self, request: ExecutionRequest) -> ExecutionResult:
         self._validate_execution_contract(request)
-        slot = "publish" if request.work_packet_kind == WorkPacketKind.PUBLISH or request.metadata.get("mode") == "publish" else "execute"
+        slot = "execute"
         run = await self.instance.run(
             prompt=request.compiled_prompt(),
             model=self._resolve_stage_model(request.metadata, slot),
@@ -191,12 +226,51 @@ class OpenHandsAdapter:
             summary=summary,
             evidence_kind=evidence_kind,
             work_packet_kind=request.work_packet_kind,
-            changed_default=request.work_packet_kind == WorkPacketKind.EXECUTE,
+            changed_default=False,
         )
         return ExecutionResult(
             request_id=request.id,
             ok=ok,
             execution_status=_execution_status_from_bundle(ok=ok, transport_error=transport_error, bundle=bundle),
+            summary=summary,
+            evidence_text=run.text,
+            artifacts=[artifact, bundle_artifact],
+            structured_evidence=bundle.structured,
+            evidence_bundle=bundle,
+            primary_evidence_artifact_ids=[bundle_artifact.id],
+            raw_evidence_artifact_id=artifact.id,
+            conversation_id=run.conversation_id,
+            transport_error=transport_error,
+            evidence_kind=evidence_kind,
+        )
+
+    async def publish(self, request: PublishRequest) -> PublishResult:
+        self._validate_publish_contract(request)
+        run = await self.instance.run(
+            prompt=request.compiled_prompt(),
+            model=self._resolve_stage_model(request.metadata, "publish"),
+            title=f"publish:{request.task_id}",
+        )
+        transport_error, evidence_kind = _classify_run_text(run.text)
+        ok = bool(run.text.strip()) and not transport_error
+        artifact = self.artifact_store.add_text(
+            "publish_evidence",
+            run.text,
+            metadata={"conversation_id": run.conversation_id, "request_id": request.id, "evidence_kind": evidence_kind},
+        )
+        summary = run.text.strip()[:400] if not transport_error else "OpenHands did not return usable publish evidence."
+        bundle, bundle_artifact = self._evidence_bundle(
+            text=run.text,
+            raw_artifact_id=artifact.id,
+            request_id=request.id,
+            ok=ok,
+            summary=summary,
+            evidence_kind=evidence_kind,
+            work_packet_kind=WorkPacketKind.PUBLISH,
+        )
+        return PublishResult(
+            request_id=request.id,
+            ok=ok,
             summary=summary,
             evidence_text=run.text,
             artifacts=[artifact, bundle_artifact],
@@ -217,8 +291,6 @@ class OpenHandsAdapter:
             title="verify",
         )
         transport_error, evidence_kind = _classify_run_text(run.text)
-        text_lower = run.text.lower()
-        passed = ("pass" in text_lower or "ok" in text_lower or "success" in text_lower) and not transport_error
         ok = bool(run.text.strip()) and not transport_error
         artifact = self.artifact_store.add_text(
             "world_verification_evidence",
@@ -235,6 +307,7 @@ class OpenHandsAdapter:
             evidence_kind=evidence_kind,
             work_packet_kind=WorkPacketKind.VERIFY,
         )
+        passed = _verification_passed_from_bundle(text=run.text, ok=ok, transport_error=transport_error, bundle=bundle)
         checks_passed = request.checks if passed else []
         checks_failed = [] if passed else list(request.checks)
         missing_evidence = ["usable verification evidence"] if transport_error or not run.text.strip() else []

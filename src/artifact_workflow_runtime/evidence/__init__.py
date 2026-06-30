@@ -23,7 +23,8 @@ _PATH_RE = re.compile(r"(?P<path>(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+|[A-Za-z0-9
 _TEST_RE = re.compile(r"\b(?P<name>pytest|go test|npm test|pnpm test|yarn test|cargo test|cmake|make test|gradle|mvn test|tox|ruff|mypy|semgrep|trivy|integration tests?|e2e tests?|github actions|pr checks?)\b", re.IGNORECASE)
 _PASS_RE = re.compile(r"\b(pass(?:ed|es)?|success(?:ful)?|ok|green|0 failed)\b", re.IGNORECASE)
 _FAIL_RE = re.compile(r"\b(fail(?:ed|ure)?|error|red|non-zero|nonzero|blocked|timeout|exception)\b", re.IGNORECASE)
-_CHANGED_RE = re.compile(r"\b(changed|modified|created|updated|deleted|wrote|patched|implemented|added)\b", re.IGNORECASE)
+_NOT_RUN_RE = re.compile(r"\b(not run|not executed|did not run|was not run|were not run|skipped|not launched|not performed|no .*run evidence)\b", re.IGNORECASE)
+_CHANGED_RE = re.compile(r"\b(changed|modified|created|updated|deleted|wrote|patched|implemented|added|applied fix|fixed|edited)\b", re.IGNORECASE)
 _OBSERVED_RE = re.compile(r"\b(read|observed|inspected|found|located)\b", re.IGNORECASE)
 _FACT_RE = re.compile(r"^\s*(?:fact|finding|found|observed)\s*[:=-]\s*(?P<fact>.+)$", re.IGNORECASE)
 _BLOCKER_RE = re.compile(r"\b(blocker|blocked|cannot|can't|unable|permission denied|not found|missing|failed|error|timeout)\b", re.IGNORECASE)
@@ -117,8 +118,12 @@ class EvidenceExtractor:
                 name = _TEST_RE.search(stripped).group("name")  # type: ignore[union-attr]
                 key = f"{name}:{stripped[:120]}"
                 if key not in seen_tests:
-                    passed = True if _PASS_RE.search(stripped) else (False if _FAIL_RE.search(stripped) else None)
-                    status = "passed" if passed is True else ("failed" if passed is False else "unknown")
+                    if _NOT_RUN_RE.search(stripped):
+                        passed = None
+                        status = "not_run"
+                    else:
+                        passed = True if _PASS_RE.search(stripped) else (False if _FAIL_RE.search(stripped) else None)
+                        status = "passed" if passed is True else ("failed" if passed is False else "unknown")
                     tests.append(TestCheckEvidence(name=name, passed=passed, status=status, output_excerpt=self._clip(stripped), artifact_ids=artifact_ids))
                     seen_tests.add(key)
             if _DIFF_RE.search(stripped):
