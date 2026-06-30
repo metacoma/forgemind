@@ -186,7 +186,7 @@ def _contract_repair_prompt(*, stage: str, response_contract: StructuredResponse
     json_schema = _json_schema_for_response_contract(response_contract)
     lines = [
         f"Return JSON only. This is the machine-readable handoff for the {stage} stage.",
-        "Your output MUST validate against the JSON Schema below.",
+        "Your output MUST validate against the exact JSON Schema between BEGIN_JSON_SCHEMA and END_JSON_SCHEMA.",
         "Do not perform any new repository, shell, git, network, or environment actions.",
         "Do not edit files, run commands, rerun tests, install dependencies, commit, push, create PRs, or change workflow decisions.",
         "Use only the work and observations that already happened in this conversation.",
@@ -198,8 +198,10 @@ def _contract_repair_prompt(*, stage: str, response_contract: StructuredResponse
         "If a required field has no data, return an empty value of the appropriate type and explain the gap in blockers or missing_evidence.",
         "Human-readable contract summary:",
         response_contract.render(),
-        "JSON Schema:",
+        "Machine JSON Schema:",
+        "BEGIN_JSON_SCHEMA",
         json_schema,
+        "END_JSON_SCHEMA",
     ]
     if evidence_requirements is not None:
         render = getattr(evidence_requirements, "render", None)

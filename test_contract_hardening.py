@@ -145,9 +145,11 @@ def test_openhands_json_handoff_prompt_includes_runtime_json_schema() -> None:
         evidence_requirements=request.evidence_requirements,
     )
 
-    assert "Your output MUST validate against the JSON Schema below." in prompt
+    assert "Your output MUST validate against the exact JSON Schema" in prompt
     assert "Do not infer new facts" in prompt
-    assert "JSON Schema:" in prompt
+    assert "Machine JSON Schema:" in prompt
+    assert "BEGIN_JSON_SCHEMA" in prompt
+    assert "END_JSON_SCHEMA" in prompt
     assert schema["additionalProperties"] is False
     assert schema["required"] == ["summary", "structured_evidence", "blockers"]
     assert "structured_evidence" in schema["properties"]
