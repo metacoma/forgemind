@@ -17,6 +17,7 @@ from artifact_workflow_runtime.qa import DeterministicQARunner, QAPlanner
 from artifact_workflow_runtime.reports import FinalReportBuilder
 from artifact_workflow_runtime.runtime_events import EventSink
 from artifact_workflow_runtime.state.checkpoints import WorkflowCheckpointRecorder
+from artifact_workflow_runtime.strategy import StrategyGovernor
 
 
 @dataclass
@@ -38,3 +39,4 @@ class WorkflowServices:
     model_routing: ModelRoutingConfig | None = None
     runtime_kernel: RuntimeKernel | None = None
     checkpoint_recorder: WorkflowCheckpointRecorder | None = None
+    strategy_governor: StrategyGovernor | None = None

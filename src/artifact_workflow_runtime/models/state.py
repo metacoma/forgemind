@@ -40,6 +40,7 @@ from artifact_workflow_runtime.models.core import (
     utc_now,
 )
 from artifact_workflow_runtime.lifecycle.models import LifecycleTransitionDecision, PipelineLoopDecision
+from artifact_workflow_runtime.strategy.models import StrategyDecision, StrategyId
 
 JsonDict = dict[str, Any]
 
@@ -312,6 +313,8 @@ class WorkflowStateSnapshot(RuntimeModel):
     lifecycle_decisions: list[LifecycleTransitionDecision] = Field(default_factory=list)
     pipeline_loop_decisions: list[PipelineLoopDecision] = Field(default_factory=list)
     controller_decisions: list[ControllerDecision] = Field(default_factory=list)
+    active_strategy: StrategyId | None = None
+    strategy_decisions: list[StrategyDecision] = Field(default_factory=list)
     transitions: list[StageTransition] = Field(default_factory=list)
     artifact_ids: list[str] = Field(default_factory=list)
     status: WorkflowStatus = WorkflowStatus.CREATED
@@ -451,6 +454,8 @@ class WorkflowState(TypedDict, total=False):
     lifecycle_decisions: list[JsonDict]
     pipeline_loop_decisions: list[JsonDict]
     controller_decisions: list[JsonDict]
+    active_strategy: str | None
+    strategy_decisions: list[JsonDict]
     transitions: list[JsonDict]
     artifact_ids: list[str]
     status: str

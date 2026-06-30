@@ -17,6 +17,7 @@ class ExecutionStageMixin:
             context_packet = ContextPacket.model_validate(state["context_packet"]) if state.get("context_packet") else None
             observation_text = (render_structured_evidence_summary(observation_result.structured_evidence) if observation_result else "No observation evidence was collected.")
             context_text = context_packet.text if context_packet else ""
+            strategy_block = _active_strategy_prompt_block(services, state)
             execute_steps = execute_prompt_steps(plan)
             execute_success = build_execute_success_criteria(plan)
             prompt = (
@@ -29,6 +30,7 @@ class ExecutionStageMixin:
                 f"Task: {task.description}\n\n"
                 f"ContextPacket:\n{context_text}\n\n"
                 f"Observation evidence:\n{observation_text}\n\n"
+                f"{strategy_block}\n\n"
                 f"Plan summary: {plan.summary}\n"
                 "Execute-stage steps:\n"
                 + "\n".join(f"- {step}" for step in execute_steps)
@@ -54,7 +56,7 @@ class ExecutionStageMixin:
                 artifact_ids=list(state.get("artifact_ids") or []),
                 success_criteria=execute_success,
                 expected_outputs=["changed_files", "commands_run", "setup_steps", "test_results", "blockers"],
-                metadata={"evidence_required": True, "model_slot": "execute", "model_override": _openhands_model_for(services, "execute")},
+                metadata={"evidence_required": True, "model_slot": "execute", "model_override": _openhands_model_for(services, "execute"), **_strategy_metadata(services, state)},
             )
             await _emit(services, "execution_request", "execute", "Execution request created", execution_family=request.execution_family.value, capability_count=len(request.capabilities))
             result = await services.openhands_adapter.execute(request)
@@ -115,6 +117,11 @@ class ExecutionStageMixin:
                 acceptance_artifact = services.artifact_store.add_json("acceptance_decision", acceptance.model_dump(mode="json"), metadata={"task_id": task.id, "source": "lifecycle_violation"})
                 update["acceptance_decision"] = acceptance.model_dump(mode="json")
                 update["artifact_ids"] = _append_artifact_id(update["artifact_ids"], acceptance_artifact.id)
+            if (not decision.allowed) or (not execution.ok) or execution.stage_failure is not None or execution.structured_evidence.blockers:
+                strategy_state = dict(state)
+                strategy_state.update(update)
+                strategy_update = _record_strategy_checkpoint(services, strategy_state, checkpoint_stage="execution_review")
+                update = _merge_strategy_update(update, strategy_update)
             await _emit(services, "stage_completed", "execution_review", "Lifecycle transition reviewed", allowed=decision.allowed, next_stage=decision.graph_next, violations=[item.code for item in decision.violations])
             return update
 

@@ -19,6 +19,7 @@ from artifact_workflow_runtime.reports import FinalReportBuilder
 from artifact_workflow_runtime.runtime_events import EventSink
 from artifact_workflow_runtime.model_routing import ModelRoutingConfig
 from artifact_workflow_runtime.state import WorkflowCheckpointRecorder
+from artifact_workflow_runtime.strategy import StrategyGovernor
 
 
 class WorkflowController:
@@ -43,6 +44,7 @@ class WorkflowController:
             model_routing=model_routing,
             runtime_kernel=RuntimeKernel(),
             checkpoint_recorder=WorkflowCheckpointRecorder(self.artifact_store),
+            strategy_governor=StrategyGovernor(),
         )
         if self.services.approval_provider is None:
             from artifact_workflow_runtime.policy import StaticApprovalProvider

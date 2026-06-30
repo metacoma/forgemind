@@ -102,6 +102,12 @@ from .verification import (
 from .report import (
     FinalReport,
 )
+from artifact_workflow_runtime.strategy.models import (
+    StrategyCheckpointSignals,
+    StrategyDecision,
+    StrategyDefinition,
+    StrategyId,
+)
 
 __all__ = [
     "JsonDict",
@@ -170,4 +176,8 @@ __all__ = [
     "VerificationRequest",
     "VerificationResult",
     "FinalReport",
+    "StrategyCheckpointSignals",
+    "StrategyDecision",
+    "StrategyDefinition",
+    "StrategyId",
 ]

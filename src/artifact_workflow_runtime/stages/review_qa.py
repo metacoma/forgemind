@@ -59,6 +59,11 @@ class ReviewQAStageMixin:
             acceptance_artifact = services.artifact_store.add_json("acceptance_decision", acceptance.model_dump(mode="json"), metadata={"task_id": task.id, "source": "review_lifecycle_violation"})
             update["acceptance_decision"] = acceptance.model_dump(mode="json")
             update["artifact_ids"] = _append_artifact_id(update["artifact_ids"], acceptance_artifact.id)
+        if status != "pass" or missing:
+            strategy_state = dict(state)
+            strategy_state.update(update)
+            strategy_update = _record_strategy_checkpoint(services, strategy_state, checkpoint_stage="review")
+            update = _merge_strategy_update(update, strategy_update)
         return update
 
     def review_next(self, state: WorkflowState) -> str:
@@ -244,6 +249,11 @@ class ReviewQAStageMixin:
         }
         if reentry_target is not None:
             update.update(_clear_for_reentry(reentry_target))
+        if review.status != "pass" or result.missing_evidence or result.checks_failed or result.missing_test_levels or result.missing_obligations:
+            strategy_state = dict(state)
+            strategy_state.update(update)
+            strategy_update = _record_strategy_checkpoint(services, strategy_state, checkpoint_stage="qa_review")
+            update = _merge_strategy_update(update, strategy_update)
         return update
 
     def qa_review_next(self, state: WorkflowState) -> str:

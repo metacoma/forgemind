@@ -64,15 +64,19 @@ class PlanningPolicyStageMixin:
             obligations = ObligationAnalysis.model_validate(obligations_raw)
             done_contract = state.get("done_contract")
             done_contract_text = json.dumps(done_contract, ensure_ascii=False, indent=2) if done_contract is not None else "{}"
+            strategy_update = _record_strategy_checkpoint(services, state, checkpoint_stage="plan")
+            strategy_state = dict(state)
+            strategy_state.update(strategy_update)
+            strategy_block = _active_strategy_prompt_block(services, strategy_state)
             request = LLMRequest(
                 kind="planning",
-                prompt=build_plan_prompt(task, context_packet, _effective_task_intent(classification), obligations) + "\n\nDoneContract:\n" + done_contract_text,
+                prompt=build_plan_prompt(task, context_packet, _effective_task_intent(classification), obligations) + "\n\nDoneContract:\n" + done_contract_text + "\n\n" + strategy_block,
                 task_id=task.id,
                 task_text=task.description,
                 context_packet_id=context_packet.id,
                 input_artifact_ids=list(context_packet.artifact_ids),
-                instructions=["plan from typed obligations and context packet", "do not assume unobserved world facts"],
-                metadata={"model_slot": "plan", "model_override": _llm_model_for(services, "plan")},
+                instructions=["plan from typed obligations and context packet", "do not assume unobserved world facts", "apply active strategy metadata without changing graph topology"],
+                metadata={"model_slot": "plan", "model_override": _llm_model_for(services, "plan"), **_strategy_metadata(services, strategy_state)},
             )
             result, parsed = await services.llm_backend.complete_json(request, ExecutionPlan)
             parsed = _merge_plan_with_obligations(parsed, obligations)
@@ -98,15 +102,17 @@ class PlanningPolicyStageMixin:
                 artifact_id=artifact.id,
                 acceptance_artifact_id=acceptance_artifact.id,
             )
-            return {
+            artifact_ids = [*_append_artifact_id(strategy_update.get("artifact_ids", state.get("artifact_ids")), artifact.id), acceptance_artifact.id]
+            update = {
                 "plan_request": request.model_dump(mode="json"),
                 "plan_result": result.model_dump(mode="json"),
                 "plan": parsed.model_dump(mode="json"),
                 "acceptance_contract": acceptance_contract.model_dump(mode="json"),
-                "artifact_ids": [*_append_artifact_id(state.get("artifact_ids"), artifact.id), acceptance_artifact.id],
+                "artifact_ids": artifact_ids,
                 "status": "planned",
-                "transitions": _append_transition(state, "plan", "planned", "Execution plan and acceptance contract generated from ContextPacket and obligations", [artifact.id, acceptance_artifact.id]),
+                "transitions": _append_transition(strategy_state, "plan", "planned", "Execution plan and acceptance contract generated from ContextPacket, obligations, and active strategy", [artifact.id, acceptance_artifact.id]),
             }
+            return _merge_strategy_update(update, strategy_update)
 
     async def policy_node(self, state: WorkflowState) -> dict[str, Any]:
             services = self.services

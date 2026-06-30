@@ -44,8 +44,14 @@ from artifact_workflow_runtime.models import (
     VerificationResult,
     WorkPacketKind,
 )
-from artifact_workflow_runtime.models.state import ControllerDecision, StageTransition, WorkflowState, WorkflowStatus
+from artifact_workflow_runtime.models.state import ControllerDecision, StageTransition, WorkflowState, WorkflowStateSnapshot, WorkflowStatus
 from artifact_workflow_runtime.lifecycle import PipelineLoopDecision, PipelineReentryTarget
+from artifact_workflow_runtime.strategy import (
+    active_strategy_prompt_block as _active_strategy_prompt_block,
+    merge_strategy_update as _merge_strategy_update,
+    record_strategy_checkpoint as _record_strategy_checkpoint,
+    strategy_metadata as _strategy_metadata,
+)
 from artifact_workflow_runtime.model_routing import normalize_verification_check_slot
 from artifact_workflow_runtime.runtime_events import emit_event
 from artifact_workflow_runtime.graph.contracts import (
@@ -98,6 +104,7 @@ def _append_transition(state: WorkflowState, stage: str, to_status: str, reason:
 
 def _append_controller_decision(state: WorkflowState, decision: ControllerDecision) -> list[dict[str, Any]]:
     return [*(state.get("controller_decisions") or []), decision.model_dump(mode="json")]
+
 
 
 def _append_lifecycle_decision(state: WorkflowState, decision: Any) -> list[dict[str, Any]]:
