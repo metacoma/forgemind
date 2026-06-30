@@ -37,6 +37,7 @@ PLAN_SCHEMA_HINT = {
     "deliverable_kind": "repository_changes|host_changes|cluster_changes|network_findings|documentation|analysis",
     "capabilities": ALLOWED_CAPABILITY_VALUES[:1],
     "steps": ["string"],
+    "publication_steps": ["string"],
     "success_criteria": ["string"],
     "verification_checks": ["string"],
     "requires_mutation": "boolean",

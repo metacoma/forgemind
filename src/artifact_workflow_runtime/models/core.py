@@ -210,6 +210,7 @@ class ExecutionPlan(RuntimeModel):
     deliverable_kind: str = "analysis"
     capabilities: list[Capability] = Field(default_factory=list)
     steps: list[str] = Field(default_factory=list)
+    publication_steps: list[str] = Field(default_factory=list)
     success_criteria: list[str] = Field(default_factory=list)
     verification_checks: list[str] = Field(default_factory=list)
     requires_mutation: bool = False

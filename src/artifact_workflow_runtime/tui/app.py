@@ -161,8 +161,15 @@ class ForgeMindTUI(App[None]):
     #transport-last-event {
         margin: 0;
     }
+    #artifact-filter-bar {
+        height: auto;
+        margin: 0 0 1 0;
+    }
+    #artifact-filter-bar Button {
+        margin: 0 1 0 0;
+    }
     #artifact-header {
-        height: 10;
+        height: 11;
         margin: 0 0 1 0;
     }
     #artifact-summary, #artifact-meta {
@@ -222,6 +229,9 @@ class ForgeMindTUI(App[None]):
         self.stage_started_at: dict[str, str] = {stage: "" for stage in STAGES}
         self.stage_payloads: dict[str, dict[str, Any]] = {stage: {} for stage in STAGES}
         self.artifact_rows: list[dict[str, Any]] = []
+        self.visible_artifact_indexes: list[int] = []
+        self.artifact_filter: str = "all"
+        self.selected_artifact_index: int | None = None
         self.conversation_rows: list[dict[str, Any]] = []
         self.browser_conversation_rows: list[dict[str, Any]] = []
         self.selected_conversation_id: str | None = None
@@ -299,6 +309,14 @@ class ForgeMindTUI(App[None]):
                     yield RichLog(id="transport-log", highlight=True, markup=False, wrap=True)
             with TabPane("Evidence", id="artifacts"):
                 with Vertical(id="artifacts-pane"):
+                    yield Label("Evidence inspector", classes="section-title")
+                    with Horizontal(id="artifact-filter-bar"):
+                        yield Button("All", id="artifact-filter-all", variant="primary")
+                        yield Button("Observe", id="artifact-filter-observe")
+                        yield Button("Execute", id="artifact-filter-execute")
+                        yield Button("Publish", id="artifact-filter-publish")
+                        yield Button("Verify", id="artifact-filter-verify")
+                        yield Button("Other", id="artifact-filter-other")
                     with Horizontal(id="artifact-header"):
                         yield Static(id="artifact-summary")
                         yield Static(id="artifact-meta")
@@ -332,7 +350,7 @@ class ForgeMindTUI(App[None]):
         stage_table.add_columns("Stage", "Status", "Last update", "Message")
         self._rebuild_stage_table()
         artifact_table = self.query_one("#artifacts-table", DataTable)
-        artifact_table.add_columns("Stage", "Kind", "Artifact", "Backing", "Summary")
+        artifact_table.add_columns("Stage", "Kind", "Storage", "What it proves")
         conversation_table = self.query_one("#conversation-table", DataTable)
         conversation_table.add_columns("When", "Mode", "Conversation", "Sandbox", "WebSocket", "Status")
         conversation_browser_table = self.query_one("#conversation-browser-table", DataTable)
@@ -349,8 +367,9 @@ class ForgeMindTUI(App[None]):
         self._set_static_text("#pipeline-progress-view", self._pipeline_progress_text())
         self._set_static_text("#workflow-path-view", self._workflow_path_text())
         self._set_static_text("#completion-reason-view", self._completion_reason_text())
+        self._refresh_artifact_filter_buttons()
         self._set_static_text("#artifact-summary", self._artifact_summary_text())
-        self._set_static_text("#artifact-meta", "Select an evidence item to inspect why it exists, where it came from, and what it contains.")
+        self._set_static_text("#artifact-meta", "Select an evidence item to inspect why it exists, what stage produced it, and whether it is stored inline or as a file.")
         self.query_one("#evidence-view", TextArea).text = "Select an evidence item to inspect its body, file contents, metadata and run context."
         self._set_static_text("#conversation-meta", "No conversation selected")
         self._show_stage_by_name("intake")
@@ -384,6 +403,9 @@ class ForgeMindTUI(App[None]):
         self.last_error = None
         self.error_history.clear()
         self.artifact_rows.clear()
+        self.visible_artifact_indexes.clear()
+        self.selected_artifact_index = None
+        self.artifact_filter = "all"
         self.conversation_rows.clear()
         self.transport_state.update({
             "mode": "idle",
@@ -398,6 +420,7 @@ class ForgeMindTUI(App[None]):
             "last_message": "",
         })
         self.query_one("#artifacts-table", DataTable).clear(columns=False)
+        self._refresh_artifact_filter_buttons()
         self.query_one("#conversation-table", DataTable).clear(columns=False)
         self.browser_conversation_rows.clear()
         self.selected_conversation_id = None
@@ -458,6 +481,56 @@ class ForgeMindTUI(App[None]):
             conversation_id = self.selected_conversation_id
             if conversation_id:
                 self.run_worker(self._load_conversation_detail(conversation_id), exclusive=False, thread=False)
+    def _set_artifact_filter(self, value: str) -> None:
+        self.artifact_filter = value
+        self._refresh_artifact_filter_buttons()
+        self._rebuild_artifact_table()
+        self._set_static_text("#artifact-summary", self._artifact_summary_text())
+        if self.visible_artifact_indexes:
+            preferred = self.selected_artifact_index if self.selected_artifact_index in self.visible_artifact_indexes else self.visible_artifact_indexes[-1]
+            self._show_artifact_by_index(preferred)
+        else:
+            self._set_static_text("#artifact-meta", "No evidence matches the current filter.")
+            self.query_one("#evidence-view", TextArea).text = "No evidence matches the current filter. Try switching the filter buttons above."
+
+    def _refresh_artifact_filter_buttons(self) -> None:
+        mapping = {
+            "all": "#artifact-filter-all",
+            "observe": "#artifact-filter-observe",
+            "execute": "#artifact-filter-execute",
+            "publish": "#artifact-filter-publish",
+            "verify": "#artifact-filter-verify",
+            "other": "#artifact-filter-other",
+        }
+        for name, selector in mapping.items():
+            button = self.query_one(selector, Button)
+            button.variant = "primary" if self.artifact_filter == name else "default"
+
+    def _artifact_matches_filter(self, row: dict[str, Any]) -> bool:
+        if self.artifact_filter == "all":
+            return True
+        stage = self._artifact_stage(row)
+        if self.artifact_filter == "other":
+            return stage not in {"observe", "research", "execute", "publish", "verify"}
+        return stage == self.artifact_filter
+
+    def _rebuild_artifact_table(self) -> None:
+        table = self.query_one("#artifacts-table", DataTable)
+        table.clear(columns=False)
+        self.visible_artifact_indexes = []
+        for real_index, row in enumerate(self.artifact_rows):
+            if not self._artifact_matches_filter(row):
+                continue
+            visible_index = len(self.visible_artifact_indexes)
+            self.visible_artifact_indexes.append(real_index)
+            table.add_row(
+                self._artifact_stage(row),
+                str(row.get("kind") or "artifact"),
+                self._artifact_backing(row),
+                self._artifact_summary_line(row),
+                key=str(visible_index),
+            )
+
     def _artifact_dir(self) -> Path:
         return Path(self.query_one("#artifact-dir", Input).value or "run-artifacts")
 
@@ -493,7 +566,9 @@ class ForgeMindTUI(App[None]):
             return "publish"
         if "verification" in kind or "verify" in kind:
             return "verify"
-        if "observation" in kind or "observe" in kind or request_id.startswith("observe") or request_id.startswith("research"):
+        if "research" in kind or request_id.startswith("research"):
+            return "research"
+        if "observation" in kind or "observe" in kind or request_id.startswith("observe"):
             return "observe"
         if "execution" in kind or "exec" in kind or request_id.startswith("exec"):
             return "execute"
@@ -555,15 +630,15 @@ class ForgeMindTUI(App[None]):
         lines = [
             "Selected evidence",
             "",
-            f"stage: {self._artifact_stage(row)}",
-            f"kind: {row.get('kind', '')}",
-            f"artifact_id: {row.get('id', '')}",
-            f"storage: {self._artifact_backing(row)}",
-            f"media_type: {row.get('media_type', 'text/plain')}",
-            f"created_at: {row.get('created_at', '')}",
-            f"path: {raw_path or '<inline only>'}",
+            f"what stage produced it: {self._artifact_stage(row)}",
+            f"what kind of evidence it is: {row.get('kind', '')}",
+            f"artifact id: {row.get('id', '')}",
+            f"how it is stored: {self._artifact_backing(row)}",
+            f"media type: {row.get('media_type', 'text/plain')}",
+            f"created at: {row.get('created_at', '')}",
+            f"resolved path: {raw_path or '<inline only>'}",
             "",
-            f"summary: {self._artifact_summary_line(row)}",
+            f"why it matters: {self._artifact_summary_line(row)}",
         ]
         if metadata:
             lines += ["", "Metadata:"]
@@ -608,11 +683,16 @@ class ForgeMindTUI(App[None]):
 
     def _show_artifact_by_index(self, row_index: int) -> None:
         if 0 <= row_index < len(self.artifact_rows):
+            self.selected_artifact_index = row_index
             row = self.artifact_rows[row_index]
             self._set_static_text("#artifact-meta", self._artifact_meta_text(row))
             self.query_one("#evidence-view", TextArea).text = self._artifact_display_text(row)
             self.query_one("#workflow-tabs", TabbedContent).active = "artifacts"
             self.call_after_refresh(lambda: self.query_one("#evidence-view", TextArea).focus())
+
+    def _show_visible_artifact(self, visible_row_index: int) -> None:
+        if 0 <= visible_row_index < len(self.visible_artifact_indexes):
+            self._show_artifact_by_index(self.visible_artifact_indexes[visible_row_index])
     def _stage_detail_text(self, stage: str) -> str:
         parts = [
             f"Stage: {stage}",
@@ -676,17 +756,42 @@ class ForgeMindTUI(App[None]):
     def _show_stage_by_name(self, stage: str) -> None:
         if stage in STAGES:
             self.query_one("#stage-detail-view", TextArea).text = self._stage_detail_text(stage)
+    @on(Button.Pressed, "#artifact-filter-all")
+    def _artifact_filter_all(self) -> None:
+        self._set_artifact_filter("all")
+
+    @on(Button.Pressed, "#artifact-filter-observe")
+    def _artifact_filter_observe(self) -> None:
+        self._set_artifact_filter("observe")
+
+    @on(Button.Pressed, "#artifact-filter-execute")
+    def _artifact_filter_execute(self) -> None:
+        self._set_artifact_filter("execute")
+
+    @on(Button.Pressed, "#artifact-filter-publish")
+    def _artifact_filter_publish(self) -> None:
+        self._set_artifact_filter("publish")
+
+    @on(Button.Pressed, "#artifact-filter-verify")
+    def _artifact_filter_verify(self) -> None:
+        self._set_artifact_filter("verify")
+
+    @on(Button.Pressed, "#artifact-filter-other")
+    def _artifact_filter_other(self) -> None:
+        self._set_artifact_filter("other")
+
     @on(DataTable.RowSelected, "#artifacts-table")
     def _on_artifact_selected(self, event: DataTable.RowSelected) -> None:
         try:
             row_index = int(str(getattr(event.row_key, "value", event.row_key)))
         except Exception:
             return
-        self._show_artifact_by_index(row_index)
+        self._show_visible_artifact(row_index)
+
     @on(DataTable.CellSelected, "#artifacts-table")
     def _on_artifact_cell_selected(self, event: DataTable.CellSelected) -> None:
         try:
-            self._show_artifact_by_index(int(event.coordinate.row))
+            self._show_visible_artifact(int(event.coordinate.row))
         except Exception as exc:  # pragma: no cover - interactive path
             self.post_message(InternalErrorMessage("artifact_select", self._format_exception(exc)))
     @on(DataTable.RowSelected, "#stage-table")
@@ -982,7 +1087,6 @@ class ForgeMindTUI(App[None]):
     def _add_artifact_row(self, artifact_id: str, kind: str, path: str, preview: str, *, media_type: str = "text/plain", created_at: str = "", metadata: dict[str, Any] | None = None) -> None:
         if any(row["id"] == artifact_id and row["path"] == path for row in self.artifact_rows):
             return
-        row_index = len(self.artifact_rows)
         row = {
             "id": artifact_id,
             "kind": kind,
@@ -993,14 +1097,7 @@ class ForgeMindTUI(App[None]):
             "metadata": metadata or {},
         }
         self.artifact_rows.append(row)
-        self.query_one("#artifacts-table", DataTable).add_row(
-            self._artifact_stage(row),
-            kind,
-            artifact_id,
-            self._artifact_backing(row),
-            self._artifact_summary_line(row),
-            key=str(row_index),
-        )
+        self._rebuild_artifact_table()
 
     def _add_conversation_row(self, *, when: str, mode: str, conversation_id: str, sandbox_id: str, websocket_url: str, status: str) -> None:
         if conversation_id and any(row["conversation_id"] == conversation_id and row["status"] == status for row in self.conversation_rows):

@@ -107,7 +107,26 @@ def _append_artifact_id(state: WorkflowState, artifact_id: str) -> list[str]:
 
 
 def _publish_required(plan: ExecutionPlan) -> bool:
-    return bool(plan.require_commit or plan.require_push or Capability.REPO_CREATE_PR in plan.capabilities)
+    return bool(plan.require_commit or plan.require_push or Capability.REPO_CREATE_PR in plan.capabilities or plan.publication_steps)
+
+
+def _execution_capabilities(plan: ExecutionPlan) -> list[Capability]:
+    return [cap for cap in plan.capabilities if cap is not Capability.REPO_CREATE_PR]
+
+
+def _publish_capabilities(plan: ExecutionPlan) -> list[Capability]:
+    caps = list(_execution_capabilities(plan))
+    if (plan.require_commit or plan.require_push or plan.publication_steps or Capability.REPO_CREATE_PR in plan.capabilities) and Capability.GIT_WRITE not in caps:
+        caps.append(Capability.GIT_WRITE)
+    if (plan.publication_steps or Capability.REPO_CREATE_PR in plan.capabilities) and Capability.REPO_CREATE_PR not in caps:
+        caps.append(Capability.REPO_CREATE_PR)
+    return caps
+
+
+def _render_steps(title: str, steps: list[str]) -> str:
+    if not steps:
+        return f"{title}: none specified\n"
+    return title + ":\n" + "\n".join(f"- {step}" for step in steps) + "\n"
 
 
 def _normalized_completion_status(parsed: EvidenceVerification) -> str:
@@ -514,7 +533,7 @@ def build_workflow_graph(services: WorkflowServices):
             ExecutionRequest(
                 task_id=task.id,
                 execution_family=plan.execution_family,
-                capabilities=plan.capabilities,
+                capabilities=_publish_capabilities(plan),
                 prompt=prompt,
                 plan_summary="publish obligations",
                 metadata={"mode": "publish", "require_commit": plan.require_commit, "require_push": plan.require_push},
