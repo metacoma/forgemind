@@ -103,6 +103,7 @@ class WorkPacketKind(str, Enum):
     EXECUTE = "execute"
     PUBLISH = "publish"
     VERIFY = "verify"
+    REPAIR = "repair"
 
 
 class VerificationMode(str, Enum):
@@ -142,6 +143,11 @@ class AcceptanceObligationKind(str, Enum):
     INTEGRATION_TESTS_RUN = "integration_tests_run"
     INTEGRATION_TESTS_PASSED = "integration_tests_passed"
     ENVIRONMENT_PREREQUISITES_SATISFIED = "environment_prerequisites_satisfied"
+    DOCUMENTATION_UPDATED = "documentation_updated"
+    EXAMPLES_UPDATED = "examples_updated"
+    CI_OR_BUILD_UPDATED = "ci_or_build_updated"
+    CODEGEN_OR_TOOLING_UPDATED = "codegen_or_tooling_updated"
+    WORK_SURFACE_COMPLETE = "work_surface_complete"
     PUBLISH_OBLIGATIONS_SATISFIED = "publish_obligations_satisfied"
     REQUIRED_EVIDENCE_PRESENT = "required_evidence_present"
 
@@ -163,6 +169,36 @@ class EnvironmentBlocker(RuntimeModel):
     missing_dependency: str | None = None
     required_for: str | None = None
     evidence_artifact_ids: list[str] = Field(default_factory=list)
+
+class DiscoveredImpactKind(str, Enum):
+    CODE = "code"
+    TEST = "test"
+    INTEGRATION = "integration"
+    SETUP = "setup"
+    DOCUMENTATION = "documentation"
+    EXAMPLES = "examples"
+    CI_BUILD = "ci_build"
+    CODEGEN_TOOLING = "codegen_tooling"
+    PUBLISH = "publish"
+    RESEARCH = "research"
+    OBSERVATION = "observation"
+
+
+class DiscoveredImpact(RuntimeModel):
+    kind: DiscoveredImpactKind
+    summary: str
+    required: bool = True
+    blocking: bool = True
+    affected_paths: list[str] = Field(default_factory=list)
+    evidence_artifact_ids: list[str] = Field(default_factory=list)
+
+
+class DiscoveredWorkSurface(RuntimeModel):
+    affected_surfaces: list[str] = Field(default_factory=list)
+    impacts: list[DiscoveredImpact] = Field(default_factory=list)
+    adjacent_components: list[str] = Field(default_factory=list)
+    reasoning: str = ""
+
 
 class Task(RuntimeModel):
     id: str = Field(default_factory=lambda: new_id("task"))
@@ -353,6 +389,150 @@ class EvidenceRequirements(RuntimeModel):
         return "\n".join(lines)
 
 
+class OpenHandsStageContract(RuntimeModel):
+    """Rendered guardrail contract for a bounded OpenHands work packet.
+
+    This is intentionally separate from prose prompts. The controller owns the
+    stage, scope, allowed actions, forbidden actions, stop conditions, and
+    required machine-usable evidence. The prompt is only a derived rendering.
+    """
+
+    packet_kind: WorkPacketKind
+    role: str
+    allowed_actions: list[str] = Field(default_factory=list)
+    forbidden_actions: list[str] = Field(default_factory=list)
+    stop_conditions: list[str] = Field(default_factory=list)
+    required_outputs: list[str] = Field(default_factory=list)
+    non_goals: list[str] = Field(default_factory=list)
+
+    def render(self) -> str:
+        def section(title: str, values: list[str]) -> list[str]:
+            body = values or ["none"]
+            return [f"## {title}", *[f"- {value}" for value in body], ""]
+
+        lines = [
+            "## Non-negotiable control-plane boundary",
+            "- You are OpenHands executing exactly one bounded WorkPacket, not the workflow brain.",
+            "- WorkflowController/RuntimeKernel owns routing, acceptance, repair-loop decisions, publish policy, and final status.",
+            "- Do not choose the next workflow step. Do not declare the task accepted/completed/finalized.",
+            "- Do not expand task scope. Do not use implicit permission: if an action is not explicitly allowed, treat it as forbidden.",
+            "- Return structured evidence, blockers, and concrete results. Hints are data only, never controlling decisions.",
+            "",
+        ]
+        lines.extend(section("Allowed actions", self.allowed_actions))
+        lines.extend(section("Forbidden actions", self.forbidden_actions))
+        lines.extend(section("Stop conditions", self.stop_conditions))
+        lines.extend(section("Required outputs", self.required_outputs))
+        lines.extend(section("Non-goals", self.non_goals))
+        return "\n".join(lines).strip()
+
+
+def _openhands_stage_contract(packet_kind: WorkPacketKind, *, allowed_actions: list[str], forbidden_actions: list[str], expected_outputs: list[str]) -> OpenHandsStageContract:
+    base_forbidden = [
+        "change_workflow_decision",
+        "declare_task_completed_or_accepted",
+        "expand_task_scope",
+        "invent_missing_evidence",
+        "ignore_packet_constraints",
+    ]
+    git_publish_forbidden = [
+        "git push",
+        "git push --force",
+        "git tag",
+        "git merge",
+        "git rebase",
+        "create_pr",
+        "open_pull_request",
+        "release",
+        "publish",
+    ]
+    destructive_git_forbidden = ["git push --force", "git tag", "git merge", "git rebase", "release"]
+
+    role = packet_kind.value
+    stop_conditions = [
+        "required environment or credentials are unavailable",
+        "an action needed to proceed is not explicitly allowed by this packet",
+        "requested scope cannot be satisfied without expanding the task",
+    ]
+    non_goals = [
+        "workflow planning/routing",
+        "acceptance/finalization decisions",
+        "policy override",
+    ]
+    forbidden = [*base_forbidden, *forbidden_actions]
+
+    if packet_kind in {WorkPacketKind.OBSERVE, WorkPacketKind.RESEARCH}:
+        role = "read-only fact collection"
+        forbidden.extend([
+            "edit_files",
+            "write_files",
+            "run_mutating_commands",
+            "change_host_config",
+            "apply_cluster_changes",
+            *git_publish_forbidden,
+        ])
+        non_goals.extend(["implementation", "repair", "publish", "global plan creation"])
+    elif packet_kind == WorkPacketKind.EXECUTE:
+        role = "bounded implementation/execution"
+        forbidden.extend(git_publish_forbidden)
+        non_goals.extend(["commit/push/PR publication", "verification acceptance", "CI repair after publish"])
+    elif packet_kind == WorkPacketKind.VERIFY:
+        role = "bounded world verification"
+        forbidden.extend([
+            "edit_files",
+            "write_files",
+            "fix_code",
+            "repair",
+            *git_publish_forbidden,
+        ])
+        non_goals.extend(["implementation", "repair", "publish", "final acceptance decision"])
+    elif packet_kind == WorkPacketKind.PUBLISH:
+        role = "bounded repository publication"
+        forbidden.extend([
+            "reimplement_feature",
+            "apply_feature_changes",
+            "fix_ci_after_publish",
+            "edit_source_files",
+            "repair",
+            *destructive_git_forbidden,
+        ])
+        stop_conditions.extend([
+            "PR checks fail or are blocked",
+            "publication would require source/test changes",
+            "credentials are unavailable",
+        ])
+        non_goals.extend(["feature implementation", "CI repair", "scope expansion", "acceptance decision"])
+    elif packet_kind == WorkPacketKind.REPAIR:
+        role = "bounded repair"
+        forbidden.extend(git_publish_forbidden)
+        stop_conditions.extend([
+            "repair would require changing unrelated scope",
+            "repair would require commit/push/PR/publish",
+        ])
+        non_goals.extend(["publish", "PR check waiting", "workflow routing", "unrelated refactor"])
+
+    def unique(values: list[str]) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = str(value).strip()
+            key = text.lower()
+            if text and key not in seen:
+                seen.add(key)
+                out.append(text)
+        return out
+
+    return OpenHandsStageContract(
+        packet_kind=packet_kind,
+        role=role,
+        allowed_actions=unique(allowed_actions),
+        forbidden_actions=unique(forbidden),
+        stop_conditions=unique(stop_conditions),
+        required_outputs=unique(expected_outputs),
+        non_goals=unique(non_goals),
+    )
+
+
 def _render_compiled_contract(*, title: str, fields: dict[str, object], narrative: str) -> str:
     lines = [f"# {title}", "", "## Typed contract"]
     for key, value in fields.items():
@@ -362,6 +542,25 @@ def _render_compiled_contract(*, title: str, fields: dict[str, object], narrativ
     if narrative.strip():
         lines.extend(["", "## Compiled narrative instructions", narrative.strip()])
     return "\n".join(lines).strip()
+
+
+def _render_openhands_compiled_contract(*, title: str, packet_kind: WorkPacketKind, fields: dict[str, object], narrative: str, allowed_actions: list[str], forbidden_actions: list[str], expected_outputs: list[str]) -> str:
+    stage_contract = _openhands_stage_contract(
+        packet_kind,
+        allowed_actions=allowed_actions,
+        forbidden_actions=forbidden_actions,
+        expected_outputs=expected_outputs,
+    )
+    fields = {
+        "packet_kind": packet_kind.value,
+        "stage_role": stage_contract.role,
+        **fields,
+        "allowed_actions": stage_contract.allowed_actions,
+        "forbidden_actions": stage_contract.forbidden_actions,
+        "expected_outputs": stage_contract.required_outputs,
+        "stage_contract": "\n" + stage_contract.render(),
+    }
+    return _render_compiled_contract(title=title, fields=fields, narrative=narrative)
 
 
 class ContextSection(RuntimeModel):
@@ -415,6 +614,14 @@ class ObligationAnalysis(RuntimeModel):
     required_test_levels: list[str] = Field(default_factory=list)
     required_setup_steps: list[str] = Field(default_factory=list)
     required_environment_conditions: list[str] = Field(default_factory=list)
+    required_documentation_updates: list[str] = Field(default_factory=list)
+    required_examples_updates: list[str] = Field(default_factory=list)
+    required_ci_updates: list[str] = Field(default_factory=list)
+    required_codegen_or_build_updates: list[str] = Field(default_factory=list)
+    affected_surfaces: list[str] = Field(default_factory=list)
+    adjacent_components: list[str] = Field(default_factory=list)
+    discovered_impacts: list[DiscoveredImpact] = Field(default_factory=list)
+    work_surface: DiscoveredWorkSurface | None = None
     required_publish_actions: list[str] = Field(default_factory=list)
     completion_requirements: list[str] = Field(default_factory=list)
     blocker_conditions: list[str] = Field(default_factory=list)
@@ -481,17 +688,20 @@ class ObservationRequest(RuntimeModel):
     required_facts: list[str] = Field(default_factory=list)
     scope_constraints: list[str] = Field(default_factory=list)
     allowed_actions: list[str] = Field(default_factory=lambda: ["read_files", "run_read_only_commands", "inspect_repo", "inspect_runtime_state"] )
-    forbidden_actions: list[str] = Field(default_factory=lambda: ["edit_files", "commit", "push", "apply_cluster_changes", "change_host_config"] )
+    forbidden_actions: list[str] = Field(default_factory=lambda: ["edit_files", "write_files", "run_mutating_commands", "commit", "push", "git push", "git push --force", "git tag", "git merge", "git rebase", "create_pr", "open_pull_request", "publish", "release", "apply_cluster_changes", "change_host_config", "change_workflow_decision", "declare_task_completed_or_accepted"] )
     expected_outputs: list[str] = Field(default_factory=lambda: ["facts", "commands_run", "outputs", "blockers", "unknowns"] )
     evidence_requirements: EvidenceRequirements = Field(default_factory=lambda: EvidenceRequirements(require_facts=True, require_commands=True, required_sections=["facts", "commands_run", "files_observed", "blockers", "unknowns"]))
     response_contract: StructuredResponseContract = Field(default_factory=lambda: StructuredResponseContract.for_fields("summary", "structured_evidence", "blockers", notes=["OpenHands may include raw text, but structured_evidence is the operational output."]))
     metadata: JsonDict = Field(default_factory=dict)
 
     def compiled_prompt(self) -> str:
-        return _render_compiled_contract(
+        return _render_openhands_compiled_contract(
             title="Bounded OpenHands observation packet",
+            packet_kind=self.work_packet_kind,
+            allowed_actions=self.allowed_actions,
+            forbidden_actions=self.forbidden_actions,
+            expected_outputs=self.expected_outputs,
             fields={
-                "packet_kind": self.work_packet_kind.value,
                 "task_id": self.task_id,
                 "objective": self.objective,
                 "execution_family": self.execution_family.value,
@@ -650,7 +860,7 @@ class ExecutionRequest(RuntimeModel):
     context_packet_id: str | None = None
     artifact_ids: list[str] = Field(default_factory=list)
     allowed_actions: list[str] = Field(default_factory=lambda: ["edit_files", "run_commands", "run_tests", "inspect_git_read_only", "collect_evidence"] )
-    forbidden_actions: list[str] = Field(default_factory=lambda: ["change_workflow_decision", "skip_required_evidence", "act_outside_capabilities", "commit", "push", "create_pr", "open_pull_request", "publish", "wait_pr_checks"] )
+    forbidden_actions: list[str] = Field(default_factory=lambda: ["change_workflow_decision", "declare_task_completed_or_accepted", "skip_required_evidence", "act_outside_capabilities", "commit", "push", "git push", "git push --force", "git tag", "git merge", "git rebase", "create_pr", "open_pull_request", "publish", "release", "wait_pr_checks"] )
     expected_outputs: list[str] = Field(default_factory=lambda: ["changed_files", "commands_run", "test_results", "blockers"] )
     success_criteria: list[str] = Field(default_factory=list)
     evidence_requirements: EvidenceRequirements = Field(default_factory=lambda: EvidenceRequirements(require_commands=True, require_files=True, require_tests=True, require_blockers=True, required_sections=["commands_run", "files_changed", "tests", "blockers", "mutation_summary", "postcheck_summary"]))
@@ -658,10 +868,13 @@ class ExecutionRequest(RuntimeModel):
     metadata: JsonDict = Field(default_factory=dict)
 
     def compiled_prompt(self) -> str:
-        return _render_compiled_contract(
+        return _render_openhands_compiled_contract(
             title="Bounded OpenHands execution packet",
+            packet_kind=self.work_packet_kind,
+            allowed_actions=self.allowed_actions,
+            forbidden_actions=self.forbidden_actions,
+            expected_outputs=self.expected_outputs,
             fields={
-                "packet_kind": self.work_packet_kind.value,
                 "task_id": self.task_id,
                 "objective": self.objective,
                 "execution_family": self.execution_family.value,
@@ -715,7 +928,7 @@ class PublishRequest(RuntimeModel):
     prompt: str
     objective: str = "complete repository publication obligations"
     allowed_actions: list[str] = Field(default_factory=lambda: ["inspect_git", "commit_when_required", "push_when_required", "create_pr_when_required", "inspect_pr_checks", "collect_evidence"] )
-    forbidden_actions: list[str] = Field(default_factory=lambda: ["change_workflow_decision", "expand_task_scope", "reimplement_feature", "apply_feature_changes", "fix_ci_after_publish", "skip_required_pr_checks"] )
+    forbidden_actions: list[str] = Field(default_factory=lambda: ["change_workflow_decision", "declare_task_completed_or_accepted", "expand_task_scope", "reimplement_feature", "apply_feature_changes", "edit_source_files", "fix_ci_after_publish", "repair", "skip_required_pr_checks", "git push --force", "git tag", "git merge", "git rebase", "release"] )
     require_commit: bool = False
     require_push: bool = False
     artifact_ids: list[str] = Field(default_factory=list)
@@ -725,10 +938,13 @@ class PublishRequest(RuntimeModel):
     metadata: JsonDict = Field(default_factory=dict)
 
     def compiled_prompt(self) -> str:
-        return _render_compiled_contract(
+        return _render_openhands_compiled_contract(
             title="Bounded OpenHands publish packet",
+            packet_kind=self.work_packet_kind,
+            allowed_actions=self.allowed_actions,
+            forbidden_actions=self.forbidden_actions,
+            expected_outputs=self.expected_outputs,
             fields={
-                "packet_kind": self.work_packet_kind.value,
                 "task_id": self.task_id,
                 "execution_result_id": self.execution_result_id,
                 "objective": self.objective,
@@ -759,6 +975,73 @@ class PublishResult(RuntimeModel):
     conversation_id: str | None = None
     transport_error: bool = False
     evidence_kind: str = "agent_text"
+    created_at: str = Field(default_factory=utc_now)
+
+
+class RepairRequest(RuntimeModel):
+    id: str = Field(default_factory=lambda: new_id("repair_req"))
+    task_id: str
+    execution_result_id: str
+    publish_result_id: str | None = None
+    attempt: int = 1
+    max_attempts: int = 2
+    execution_family: ExecutionFamily
+    work_packet_kind: WorkPacketKind = WorkPacketKind.REPAIR
+    prompt: str
+    objective: str = "repair controller-approved failed verification/publish evidence"
+    failed_checks: list[str] = Field(default_factory=list)
+    blocker_summaries: list[str] = Field(default_factory=list)
+    plan_steps: list[str] = Field(default_factory=list)
+    expected_changes: list[str] = Field(default_factory=list)
+    scope_constraints: list[str] = Field(default_factory=list)
+    context_packet_id: str | None = None
+    artifact_ids: list[str] = Field(default_factory=list)
+    allowed_actions: list[str] = Field(default_factory=lambda: ["edit_files", "run_commands", "run_tests", "inspect_git_read_only", "collect_evidence"])
+    forbidden_actions: list[str] = Field(default_factory=lambda: ["change_workflow_decision", "declare_task_completed_or_accepted", "skip_required_evidence", "act_outside_capabilities", "commit", "push", "git push", "git push --force", "git tag", "git merge", "git rebase", "create_pr", "open_pull_request", "publish", "release", "wait_pr_checks"])
+    expected_outputs: list[str] = Field(default_factory=lambda: ["changed_files", "commands_run", "test_results", "blockers", "repair_summary"])
+    evidence_requirements: EvidenceRequirements = Field(default_factory=lambda: EvidenceRequirements(require_commands=True, require_files=True, require_tests=True, require_blockers=True, required_sections=["commands_run", "files_changed", "tests", "blockers", "mutation_summary", "postcheck_summary", "repair_summary"]))
+    response_contract: StructuredResponseContract = Field(default_factory=lambda: StructuredResponseContract.for_fields("summary", "structured_evidence", "mutation_summary", "postcheck_summary", "blockers", "repair_summary"))
+    metadata: JsonDict = Field(default_factory=dict)
+
+    def compiled_prompt(self) -> str:
+        return _render_openhands_compiled_contract(
+            title="Bounded OpenHands repair packet",
+            packet_kind=self.work_packet_kind,
+            allowed_actions=self.allowed_actions,
+            forbidden_actions=self.forbidden_actions,
+            expected_outputs=self.expected_outputs,
+            fields={
+                "task_id": self.task_id,
+                "execution_result_id": self.execution_result_id,
+                "publish_result_id": self.publish_result_id,
+                "attempt": self.attempt,
+                "max_attempts": self.max_attempts,
+                "objective": self.objective,
+                "execution_family": self.execution_family.value,
+                "failed_checks": self.failed_checks,
+                "blocker_summaries": self.blocker_summaries,
+                "plan_steps": self.plan_steps,
+                "expected_changes": self.expected_changes,
+                "context_packet_id": self.context_packet_id,
+                "artifact_ids": self.artifact_ids,
+                "scope_constraints": self.scope_constraints,
+                "allowed_actions": self.allowed_actions,
+                "forbidden_actions": self.forbidden_actions,
+                "expected_outputs": self.expected_outputs,
+                "evidence_requirements": "\n" + self.evidence_requirements.render(),
+                "response_contract": "\n" + self.response_contract.render(),
+            },
+            narrative=self.prompt,
+        )
+
+
+class RepairResult(RuntimeModel):
+    id: str = Field(default_factory=lambda: new_id("repair_res"))
+    request_id: str
+    attempt: int
+    ok: bool
+    summary: str
+    execution_result: ExecutionResult
     created_at: str = Field(default_factory=utc_now)
 
 
@@ -834,24 +1117,31 @@ class VerificationRequest(RuntimeModel):
     metadata: JsonDict = Field(default_factory=dict)
 
     def compiled_prompt(self) -> str:
-        return _render_compiled_contract(
-            title="Verification request",
-            fields={
-                "packet_kind": self.work_packet_kind.value,
-                "execution_result_id": self.execution_result_id,
-                "execution_family": self.execution_family.value,
-                "backend": self.backend.value,
-                "mode": self.mode.value,
-                "artifact_ids": self.artifact_ids,
-                "checks": self.checks,
-                "allowed_inputs": self.allowed_inputs,
-                "forbidden_inputs": self.forbidden_inputs,
-                "expected_outputs": self.expected_outputs,
-                "evidence_requirements": "\n" + self.evidence_requirements.render(),
-                "response_contract": "\n" + self.response_contract.render(),
-            },
-            narrative=self.prompt,
-        )
+        fields = {
+            "execution_result_id": self.execution_result_id,
+            "execution_family": self.execution_family.value,
+            "backend": self.backend.value,
+            "mode": self.mode.value,
+            "artifact_ids": self.artifact_ids,
+            "checks": self.checks,
+            "allowed_inputs": self.allowed_inputs,
+            "forbidden_inputs": self.forbidden_inputs,
+            "expected_outputs": self.expected_outputs,
+            "evidence_requirements": "\n" + self.evidence_requirements.render(),
+            "response_contract": "\n" + self.response_contract.render(),
+        }
+        if self.backend == BackendKind.OPENHANDS or self.mode == VerificationMode.WORLD_CHECK:
+            return _render_openhands_compiled_contract(
+                title="Bounded OpenHands verification packet",
+                packet_kind=self.work_packet_kind,
+                allowed_actions=self.allowed_inputs,
+                forbidden_actions=self.forbidden_inputs,
+                expected_outputs=self.expected_outputs,
+                fields=fields,
+                narrative=self.prompt,
+            )
+        return _render_compiled_contract(title="Verification request", fields={"packet_kind": self.work_packet_kind.value, **fields}, narrative=self.prompt)
+
 
 
 class EvidenceVerification(RuntimeModel):
@@ -934,6 +1224,7 @@ class FinalReport(RuntimeModel):
     observation: ObservationResult | None = None
     execution: ExecutionResult | None = None
     publish: PublishResult | None = None
+    repair_results: list[RepairResult] = Field(default_factory=list)
     verification: VerificationResult | None = None
     artifact_ids: list[str] = Field(default_factory=list)
     created_at: str = Field(default_factory=utc_now)

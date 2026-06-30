@@ -903,3 +903,100 @@ async def test_verification_checks_use_per_check_model_routing(tmp_path) -> None
     assert llm.calls["verification_check"][1].metadata["model_override"] == "openai/qwen36-35b"
     assert llm.calls["verification_check"][0].metadata["verification_check"] == "unit_tests"
     assert llm.calls["verification_check"][1].metadata["verification_check"] == "pr_checks"
+
+
+async def test_failed_publish_checks_route_to_repair_review_and_republish(tmp_path) -> None:
+    artifact_store = ArtifactStore(tmp_path / "artifacts")
+    llm = ScriptedLLMBackend(
+        {
+            "classification": [
+                {
+                    "normalized_task": "Implement change and publish PR",
+                    "needs_world_facts": True,
+                    "execution_family": ExecutionFamily.REPOSITORY_CHANGE.value,
+                    "task_intent": "implement",
+                    "capabilities": [Capability.REPO_READ.value, Capability.REPO_WRITE.value, Capability.REPO_CREATE_PR.value],
+                    "observation_focus": ["inspect repo"],
+                    "reasoning": "Need repo change and PR publication.",
+                    "risk_level": "medium",
+                }
+            ],
+            "route_analysis": [
+                {
+                    "needs_repository_observation": True,
+                    "needs_world_observation": False,
+                    "needs_fresh_external_research": False,
+                    "can_plan_immediately": False,
+                    "required_evidence_types": ["repo_structure"],
+                    "research_targets": [],
+                    "observation_focus": ["inspect repo"],
+                    "reasoning": "Need repository context.",
+                }
+            ],
+            "planning": [
+                {
+                    "summary": "Implement the change and publish a PR",
+                    "execution_family": ExecutionFamily.REPOSITORY_CHANGE.value,
+                    "task_intent": "implement",
+                    "deliverable_kind": "repository_changes",
+                    "capabilities": [Capability.REPO_WRITE.value, Capability.REPO_CREATE_PR.value],
+                    "steps": ["edit code", "run unit tests", "publish PR"],
+                    "success_criteria": ["unit tests pass", "PR checks green"],
+                    "verification_checks": ["unit tests pass", "PR checks green"],
+                    "requires_mutation": True,
+                    "must_change_world": True,
+                    "expected_repo_changes": ["src/app.py updated"],
+                    "reasoning": "The change must be published and checks must pass.",
+                }
+            ],
+            "verification": [
+                {
+                    "passed": True,
+                    "summary": "Final publish evidence shows PR checks passed after repair.",
+                    "checks_passed": ["unit tests pass", "PR checks green"],
+                    "checks_failed": [],
+                    "missing_evidence": [],
+                    "confidence": "high",
+                    "reasoning": "Repair evidence and second publish evidence are sufficient.",
+                    "pr_detected": True,
+                    "pr_checks_waited": True,
+                    "pr_checks_passed": ["ci/test"],
+                    "pr_checks_failed": [],
+                    "pr_checks_pending": [],
+                    "completion_status": "completed",
+                }
+            ],
+        }
+    )
+    openhands = FakeOpenHandsAdapter(
+        artifact_store,
+        scripts={
+            "observe": ["Repository observed."],
+            "execute": ["Changed src/app.py and ran pytest tests/test_app.py passed."],
+            "publish": [
+                "Created PR #7 and waited for PR checks. PR checks failed: ci/test failed.",
+                "Updated PR #7 and waited for PR checks. PR checks passed: ci/test passed.",
+            ],
+            "repair": ["Applied fix in src/app.py and ran pytest tests/test_app.py passed."],
+        },
+    )
+    controller = WorkflowController(
+        llm_backend=llm,
+        openhands_adapter=openhands,
+        artifact_root=tmp_path / "artifacts",
+        approval_provider=StaticApprovalProvider(approve=True, reviewer="test"),
+    )
+
+    report = await controller.run(Task(description="Implement the change, open a PR, and ensure PR checks are green"))
+
+    assert report.status == "completed"
+    assert len(openhands.calls["execute"]) == 1
+    assert len(openhands.calls["repair"]) == 1
+    assert len(openhands.calls["publish"]) == 2
+    repair_request = openhands.calls["repair"][0]
+    assert "commit" in repair_request.forbidden_actions
+    assert "push" in repair_request.forbidden_actions
+    assert "create_pr" in repair_request.forbidden_actions
+    assert report.repair_results and report.repair_results[0].attempt == 1
+    # Durable state transitions are stored as artifacts; the observable adapter calls prove the controller-owned loop:
+    # initial execute -> publish failure -> bounded repair -> second publish -> verification/acceptance.

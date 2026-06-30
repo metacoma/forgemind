@@ -14,6 +14,8 @@ from artifact_workflow_runtime.models import (
     ObservationResult,
     PublishRequest,
     PublishResult,
+    RepairRequest,
+    RepairResult,
     VerificationMode,
     VerificationRequest,
     VerificationResult,
@@ -24,8 +26,11 @@ from .instance import OpenHandsInstance
 
 
 HTML_MARKERS = ("<!doctype html", "<html", "reactrouter", "window.__reactroutercontext", "let&#x27;s start building")
-_MUTATING_OBSERVE_ACTIONS = {"edit_files", "commit", "push", "apply_cluster_changes", "change_host_config", "run_write_commands"}
+_MUTATING_OBSERVE_ACTIONS = {"edit_files", "write_files", "commit", "push", "git push", "apply_cluster_changes", "change_host_config", "run_write_commands"}
 _DIRECT_VERIFY_FORBIDDEN_ACTIONS = {"filesystem", "shell", "git", "hosts", "kubernetes", "network_runtime_state"}
+_READ_ONLY_CAPABILITY_VALUES = {"document_read", "repo_read", "shell_read", "git_read", "k8s_read", "network_diagnostics"}
+_NON_PUBLISH_GIT_GUARDS = {"commit", "push", "git push", "git push --force", "git tag", "git merge", "git rebase", "create_pr", "open_pull_request", "publish", "release"}
+_DESTRUCTIVE_PUBLISH_GUARDS = {"git push --force", "git tag", "git merge", "git rebase", "release", "fix_ci_after_publish", "reimplement_feature", "apply_feature_changes", "edit_source_files", "repair"}
 
 
 def _classify_run_text(text: str) -> tuple[bool, str]:
@@ -83,18 +88,52 @@ class OpenHandsAdapter:
         return self.model_routing.resolve_openhands(slot, default_model) if self.model_routing else default_model
 
     @staticmethod
+    def _forbidden_set(request: object) -> set[str]:
+        values = [*getattr(request, "forbidden_actions", []), *getattr(request, "forbidden_inputs", [])]
+        return {str(item).strip().lower() for item in values}
+
+    @staticmethod
+    def _allowed_set(request: object) -> set[str]:
+        values = [*getattr(request, "allowed_actions", []), *getattr(request, "allowed_inputs", [])]
+        return {str(item).strip().lower() for item in values}
+
+    @staticmethod
+    def _require_forbidden_actions(request: object, required: set[str], label: str) -> None:
+        forbidden = OpenHandsAdapter._forbidden_set(request)
+        missing = required - forbidden
+        if missing:
+            raise ValueError(f"{label} packets must explicitly forbid: {sorted(missing)}")
+
+    @staticmethod
+    def _validate_compiled_prompt_contains_contract(request: object, *, label: str) -> None:
+        prompt = request.compiled_prompt()
+        required_markers = (
+            "## Non-negotiable control-plane boundary",
+            "## Allowed actions",
+            "## Forbidden actions",
+            "## Stop conditions",
+            "## Required outputs",
+            "Do not choose the next workflow step",
+            "if an action is not explicitly allowed, treat it as forbidden",
+        )
+        missing = [marker for marker in required_markers if marker not in prompt]
+        if missing:
+            raise ValueError(f"{label} compiled prompt is missing stage-contract sections: {missing}")
+
+    @staticmethod
     def _validate_observation_contract(request: ObservationRequest) -> None:
         if request.work_packet_kind not in {WorkPacketKind.OBSERVE, WorkPacketKind.RESEARCH}:
             raise ValueError(f"OpenHands observe() only accepts observe/research packets, got {request.work_packet_kind}")
-        allowed = {item.strip().lower() for item in request.allowed_actions}
+        allowed = OpenHandsAdapter._allowed_set(request)
         if allowed & _MUTATING_OBSERVE_ACTIONS:
             raise ValueError(f"Observation packets cannot allow mutating actions: {sorted(allowed & _MUTATING_OBSERVE_ACTIONS)}")
-        forbidden = {item.strip().lower() for item in request.forbidden_actions}
-        missing_guards = {"edit_files", "commit", "push"} - forbidden
-        if missing_guards:
-            raise ValueError(f"Observation packets must explicitly forbid mutation guards: {sorted(missing_guards)}")
+        mutating_capabilities = {cap.value for cap in request.capabilities if cap.value not in _READ_ONLY_CAPABILITY_VALUES}
+        if mutating_capabilities:
+            raise ValueError(f"Observation packets cannot carry mutating capabilities: {sorted(mutating_capabilities)}")
+        OpenHandsAdapter._require_forbidden_actions(request, {"edit_files", "write_files", "commit", "push", "git push", "create_pr", "open_pull_request", "publish"}, "Observation")
         if request.evidence_requirements.require_structured is not True:
             raise ValueError("Observation packets must require structured evidence as the operational output")
+        OpenHandsAdapter._validate_compiled_prompt_contains_contract(request, label="Observation")
 
     @staticmethod
     def _validate_execution_contract(request: ExecutionRequest) -> None:
@@ -102,14 +141,13 @@ class OpenHandsAdapter:
             raise ValueError(f"OpenHands execute() only accepts execute packets; publish packets must use publish() (not execute/publish packets), got {request.work_packet_kind}")
         if not request.expected_outputs:
             raise ValueError("Execution packets must declare expected_outputs")
-        forbidden = {item.strip().lower() for item in request.forbidden_actions}
+        forbidden = OpenHandsAdapter._forbidden_set(request)
         if "change_workflow_decision" not in forbidden:
             raise ValueError("Execution packets must forbid changing workflow decisions")
-        missing_publish_guards = {"commit", "push", "create_pr", "open_pull_request", "publish"} - forbidden
-        if missing_publish_guards:
-            raise ValueError(f"Execution packets must explicitly forbid publish actions: {sorted(missing_publish_guards)}")
+        OpenHandsAdapter._require_forbidden_actions(request, _NON_PUBLISH_GIT_GUARDS, "Execution")
         if request.evidence_requirements.require_structured is not True:
             raise ValueError("Execution packets must require structured evidence as the operational output")
+        OpenHandsAdapter._validate_compiled_prompt_contains_contract(request, label="Execution")
 
 
     @staticmethod
@@ -118,13 +156,27 @@ class OpenHandsAdapter:
             raise ValueError(f"OpenHands publish() only accepts publish packets, got {request.work_packet_kind}")
         if not request.expected_outputs:
             raise ValueError("Publish packets must declare expected_outputs")
-        forbidden = {item.strip().lower() for item in request.forbidden_actions}
+        forbidden = OpenHandsAdapter._forbidden_set(request)
         if "change_workflow_decision" not in forbidden:
             raise ValueError("Publish packets must forbid changing workflow decisions")
         if "reimplement_feature" not in forbidden or "expand_task_scope" not in forbidden:
             raise ValueError("Publish packets must forbid reimplementation and scope expansion")
+        OpenHandsAdapter._require_forbidden_actions(request, _DESTRUCTIVE_PUBLISH_GUARDS, "Publish")
         if request.evidence_requirements.require_structured is not True:
             raise ValueError("Publish packets must require structured evidence as the operational output")
+        OpenHandsAdapter._validate_compiled_prompt_contains_contract(request, label="Publish")
+
+
+    @staticmethod
+    def _validate_repair_contract(request: RepairRequest) -> None:
+        if request.work_packet_kind != WorkPacketKind.REPAIR:
+            raise ValueError(f"OpenHands repair() only accepts repair packets, got {request.work_packet_kind}")
+        OpenHandsAdapter._require_forbidden_actions(request, _NON_PUBLISH_GIT_GUARDS, "Repair")
+        if request.attempt < 1 or request.attempt > request.max_attempts:
+            raise ValueError("Repair packet attempt is outside the configured repair budget")
+        if request.evidence_requirements.require_structured is not True:
+            raise ValueError("Repair packets must require structured evidence as the operational output")
+        OpenHandsAdapter._validate_compiled_prompt_contains_contract(request, label="Repair")
 
     @staticmethod
     def _validate_world_verification_contract(request: VerificationRequest) -> None:
@@ -136,8 +188,10 @@ class OpenHandsAdapter:
         # World checks may inspect filesystem/shell/git, so they must not inherit the Direct LLM forbidden-input contract.
         if forbidden & _DIRECT_VERIFY_FORBIDDEN_ACTIONS == _DIRECT_VERIFY_FORBIDDEN_ACTIONS:
             raise ValueError("World verification packets must declare world-check inputs/actions explicitly, not Direct LLM forbidden inputs")
+        OpenHandsAdapter._require_forbidden_actions(request, {"edit_files", "write_files", "fix_code", "repair", "commit", "push", "git push", "create_pr", "open_pull_request", "publish"}, "World verification")
         if request.evidence_requirements.require_structured is not True:
             raise ValueError("World verification packets must require structured evidence as the operational output")
+        OpenHandsAdapter._validate_compiled_prompt_contains_contract(request, label="World verification")
 
     def _evidence_bundle(self, *, text: str, raw_artifact_id: str, request_id: str, ok: bool, summary: str, evidence_kind: str, work_packet_kind: WorkPacketKind, changed_default: bool = False) -> tuple[EvidenceBundle, object]:
         structured = self.evidence_extractor.from_agent_output(text, artifact_id=raw_artifact_id, changed_default=changed_default)
@@ -282,6 +336,49 @@ class OpenHandsAdapter:
             transport_error=transport_error,
             evidence_kind=evidence_kind,
         )
+
+
+    async def repair(self, request: RepairRequest) -> RepairResult:
+        self._validate_repair_contract(request)
+        run = await self.instance.run(
+            prompt=request.compiled_prompt(),
+            model=self._resolve_stage_model(request.metadata, "execute"),
+            title=f"repair:{request.task_id}:attempt-{request.attempt}",
+        )
+        transport_error, evidence_kind = _classify_run_text(run.text)
+        ok = bool(run.text.strip()) and not transport_error
+        artifact = self.artifact_store.add_text(
+            "repair_evidence",
+            run.text,
+            metadata={"conversation_id": run.conversation_id, "request_id": request.id, "evidence_kind": evidence_kind, "attempt": request.attempt},
+        )
+        summary = run.text.strip()[:400] if not transport_error else "OpenHands did not return usable repair evidence."
+        bundle, bundle_artifact = self._evidence_bundle(
+            text=run.text,
+            raw_artifact_id=artifact.id,
+            request_id=request.id,
+            ok=ok,
+            summary=summary,
+            evidence_kind=evidence_kind,
+            work_packet_kind=WorkPacketKind.REPAIR,
+            changed_default=False,
+        )
+        execution_result = ExecutionResult(
+            request_id=request.id,
+            ok=ok,
+            execution_status=_execution_status_from_bundle(ok=ok, transport_error=transport_error, bundle=bundle),
+            summary=summary,
+            evidence_text=run.text,
+            artifacts=[artifact, bundle_artifact],
+            structured_evidence=bundle.structured,
+            evidence_bundle=bundle,
+            primary_evidence_artifact_ids=[bundle_artifact.id],
+            raw_evidence_artifact_id=artifact.id,
+            conversation_id=run.conversation_id,
+            transport_error=transport_error,
+            evidence_kind=evidence_kind,
+        )
+        return RepairResult(request_id=request.id, attempt=request.attempt, ok=ok, summary=summary, execution_result=execution_result)
 
     async def verify(self, request: VerificationRequest) -> VerificationResult:
         self._validate_world_verification_contract(request)

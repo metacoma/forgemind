@@ -35,7 +35,6 @@
 
 - Split long graph prompt strings into dedicated prompt/work-packet builder modules.
 - Add structured evidence extraction from OpenHands output into `EvidenceBundle` records.
-- Add bounded repair loops for failed verification.
 - Add persistent workflow resume from `ArtifactStore.index.json`.
 - Replace `StaticApprovalProvider` with a real human approval backend.
 
@@ -96,8 +95,7 @@ Closed in this pass:
 Remaining debt:
 
 1. Acceptance obligation derivation is deterministic and typed, but still heuristic. Future iterations can make obligations first-class planner output validated by policy.
-2. Repair loops are still not first-class: failed/blocked acceptance stops safely, but does not yet create a typed repair request.
-3. OpenHands should eventually emit strict JSON evidence with blocker kinds directly instead of relying on fallback blocker normalization.
+2. OpenHands should eventually emit strict JSON evidence with blocker kinds directly instead of relying on fallback blocker normalization.
 
 
 ## Lifecycle / policy engine pass
@@ -116,6 +114,62 @@ Closed in this pass:
 Remaining debt:
 
 1. The lifecycle fallback currently mirrors only the hard P0 invariants. More Rego rules should gradually move from Python helper logic into policy modules.
-2. A first-class typed repair loop is still missing. Publish now reports blockers instead of repairing, but the controller does not yet generate a bounded `RepairRequest`.
-3. Durable resume/replay still needs to restore lifecycle decisions from artifacts and continue from a safe stage.
-4. The optional OPA invocation should be hardened for production deployment conventions, bundle loading, and policy test fixtures.
+2. Durable resume/replay still needs to restore lifecycle decisions from artifacts and continue from a safe stage.
+3. The optional OPA invocation should be hardened for production deployment conventions, bundle loading, and policy test fixtures.
+
+
+## Repair loop pass
+
+Closed in this pass:
+
+- Added typed `RepairRequest` and `RepairResult` contracts.
+- Added lifecycle facts/policy for `publish_review`, `can_leave_publish`, and `can_repair`.
+- Added `publish_review` and `repair` graph stages.
+- Publisher no longer owns CI repair. It reports failed checks/blockers; lifecycle policy decides whether a bounded repair packet is allowed.
+- Repair packets forbid commit, push, PR creation/update, publishing, waiting PR checks, and workflow decisions.
+- After repair the graph returns to `execution_review`, so repaired code must pass lifecycle review before verification/acceptance and any subsequent publish.
+- Added regression tests for failed PR checks -> repair -> review -> second publish, repair attempt limit, and publisher-repair policy violation.
+
+Remaining debt:
+
+1. Repair budget is currently a fixed controller value (`max_attempts=2`); future work can move this into typed task policy/config.
+2. Publish-forbidden-action detection still has conservative text/evidence fallback; strict JSON publish evidence should eventually become mandatory for publication.
+3. Durable resume/replay should restore mid-repair lifecycle state safely from artifacts.
+
+## Stage prompt / contract hardening update
+
+Closed in this pass:
+
+- Added a centralized OpenHands stage contract renderer instead of relying on per-node prose to communicate boundaries.
+- Every OpenHands packet now renders `Allowed actions`, `Forbidden actions`, `Stop conditions`, `Required outputs`, and explicit control-plane non-goals.
+- Observe/research are read-only by contract and capability-filtered to read-only capabilities.
+- Execute and repair explicitly forbid commit, push, PR creation, release, publish, tag, merge, and rebase actions.
+- Verify/world-check explicitly forbids mutation, repair, publishing, git publication actions, and final acceptance decisions.
+- Publish is limited to publication/check evidence and explicitly forbids source edits, CI repair, feature reimplementation, force push, tags, merge/rebase, and releases.
+- OpenHands adapter validation now checks that compiled prompts contain the standard bounded-packet sections before dispatch.
+- Added prompt/contract regression tests for observe, execute, verify, publish, repair, and mutating capability filtering.
+
+Remaining debt:
+
+1. Some narrative bodies still live in `graph/workflow.py`; they are now bounded by the centralized stage contract compiler, but should eventually move to dedicated packet builder modules.
+2. OPA/Rego currently covers lifecycle gates, while prompt-contract validation is still Python-side. Future work can add policy tests for prompt/action matrices.
+3. Strict JSON evidence emission should become mandatory for publish and repair once OpenHands reliably emits the schema.
+
+## Pipeline-wide re-entry pass
+
+Closed in this pass:
+
+- Added typed `PipelineLoopDecision`, `PipelineLoopTriggerKind`, `PipelineReentryTarget`, and `PipelineLoopBudget` models.
+- Added controller-owned `RuntimeKernel.evaluate_pipeline_reentry()` for verification, acceptance, and publish-review re-entry decisions.
+- Added lifecycle/policy support for `can_reenter` with Rego and deterministic Python fallback.
+- Added legal re-entry targets back to research, observe, context build, obligation discovery, and planning.
+- Added global, per-trigger, and per-source-stage budgets so rediscovery cannot become an infinite loop.
+- Expanded obligation discovery to docs, examples, CI/build, codegen/tooling, affected surfaces, adjacent components, discovered impacts, and work-surface completion.
+- Folded discovered impacts into planning, verification, and acceptance obligations.
+- Added regression coverage for verify->obligations re-entry, acceptance-contract broad obligations, and budget exhaustion.
+
+Remaining debt:
+
+1. Re-entry trigger detection is typed at the decision layer but still partially uses conservative text normalization from verification/publish summaries; strict structured trigger output from verification would reduce heuristics further.
+2. Durable resume/replay should restore `PipelineLoopDecision` history and continue from the safe re-entry target.
+3. Policy fixtures should grow from hard invariants into scenario-specific bundles for repo, infra, k8s, and network task families.

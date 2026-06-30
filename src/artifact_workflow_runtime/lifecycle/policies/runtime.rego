@@ -33,3 +33,36 @@ default can_finalize_success := false
 can_finalize_success if {
   input.acceptance.accepted == true
 }
+
+default can_leave_publish := false
+
+can_leave_publish if {
+  not input.publish_forbidden_action_detected
+}
+
+default can_repair := false
+
+can_repair if {
+  not input.environment_blocked
+  input.repair_attempt_count < input.max_repair_attempts
+  input.publish_failed_checks
+}
+
+can_repair if {
+  not input.environment_blocked
+  input.repair_attempt_count < input.max_repair_attempts
+  input.publish_has_blockers
+}
+
+
+default can_reenter := false
+
+can_reenter if {
+  input.reentry_required
+  input.reentry_target_stage != "continue"
+  not input.reentry_budget_exhausted
+}
+
+can_reenter if {
+  not input.reentry_required
+}

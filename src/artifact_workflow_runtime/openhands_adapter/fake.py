@@ -15,6 +15,8 @@ from artifact_workflow_runtime.models import (
     ObservationResult,
     PublishRequest,
     PublishResult,
+    RepairRequest,
+    RepairResult,
     VerificationMode,
     VerificationRequest,
     VerificationResult,
@@ -154,6 +156,41 @@ class FakeOpenHandsAdapter:
             transport_error=transport_error,
             evidence_kind=evidence_kind,
         )
+
+
+    async def repair(self, request: RepairRequest) -> RepairResult:
+        self.calls["repair"].append(request)
+        text = self._next("repair")
+        transport_error, evidence_kind = _classify_run_text(text)
+        ok = bool(text.strip()) and not transport_error
+        artifact = self.artifact_store.add_text("repair_evidence", text, metadata={"request_id": request.id, "evidence_kind": evidence_kind, "attempt": request.attempt})
+        summary = text[:400] if not transport_error else "OpenHands did not return usable repair evidence."
+        bundle, bundle_artifact = self._bundle(
+            text=text,
+            raw_artifact_id=artifact.id,
+            request_id=request.id,
+            ok=ok,
+            summary=summary,
+            evidence_kind=evidence_kind,
+            work_packet_kind=WorkPacketKind.REPAIR,
+            changed_default=False,
+        )
+        execution_result = ExecutionResult(
+            request_id=request.id,
+            ok=ok,
+            execution_status=_execution_status_from_bundle(ok=ok, transport_error=transport_error, bundle=bundle),
+            summary=summary,
+            evidence_text=text,
+            artifacts=[artifact, bundle_artifact],
+            structured_evidence=bundle.structured,
+            evidence_bundle=bundle,
+            primary_evidence_artifact_ids=[bundle_artifact.id],
+            raw_evidence_artifact_id=artifact.id,
+            conversation_id="fake-repair",
+            transport_error=transport_error,
+            evidence_kind=evidence_kind,
+        )
+        return RepairResult(request_id=request.id, attempt=request.attempt, ok=ok, summary=summary, execution_result=execution_result)
 
     async def verify(self, request: VerificationRequest) -> VerificationResult:
         self.calls["verify"].append(request)

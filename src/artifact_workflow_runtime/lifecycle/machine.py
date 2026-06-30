@@ -33,15 +33,9 @@ class LifecycleMachine(_ExternalStateMachine):  # type: ignore[misc]
         if event == LifecycleEvent.ACCEPTANCE_EVALUATED:
             return self._after_acceptance(from_stage, facts)
         if event == LifecycleEvent.PUBLISH_FINISHED:
-            return LifecycleTransitionDecision(
-                event=event,
-                from_stage=from_stage,
-                to_stage=LifecycleStage.VERIFYING,
-                graph_next="verify",
-                allowed=True,
-                reason="Publish finished; post-publish verification must review PR/commit/check evidence.",
-                facts=facts,
-            )
+            return self._after_publish(from_stage, facts)
+        if event == LifecycleEvent.REPAIR_FINISHED:
+            return self._after_repair(from_stage, facts)
         return LifecycleTransitionDecision(
             event=event,
             from_stage=from_stage,
@@ -156,6 +150,81 @@ class LifecycleMachine(_ExternalStateMachine):  # type: ignore[misc]
             graph_next="finalize",
             allowed=acceptance.accepted,
             reason=f"Acceptance resolved as {acceptance.status.value}; finalization is the only legal next step.",
+            facts=facts,
+        )
+
+
+    def _after_publish(self, from_stage: LifecycleStage, facts: LifecycleFacts) -> LifecycleTransitionDecision:
+        policy = self.policy_evaluator.evaluate("can_leave_publish", facts)
+        if not policy.allowed:
+            return LifecycleTransitionDecision(
+                event=LifecycleEvent.PUBLISH_FINISHED,
+                from_stage=from_stage,
+                to_stage=LifecycleStage.CONTROL_PLANE_VIOLATION,
+                graph_next="finalize",
+                allowed=False,
+                reason="Publish result violates lifecycle policy; publisher cannot repair/reimplement or expand scope.",
+                policy_decision=policy,
+                violations=policy.violations,
+                facts=facts,
+            )
+        if facts.publish_failed_checks or facts.publish_has_blockers:
+            repair_policy = self.policy_evaluator.evaluate("can_repair", facts)
+            if repair_policy.allowed:
+                return LifecycleTransitionDecision(
+                    event=LifecycleEvent.PUBLISH_FINISHED,
+                    from_stage=from_stage,
+                    to_stage=LifecycleStage.REPAIRING,
+                    graph_next="repair",
+                    allowed=True,
+                    reason="Publish/PR checks reported failures; lifecycle routes to a bounded repair packet before any new publish attempt.",
+                    policy_decision=repair_policy,
+                    facts=facts,
+                )
+            return LifecycleTransitionDecision(
+                event=LifecycleEvent.PUBLISH_FINISHED,
+                from_stage=from_stage,
+                to_stage=LifecycleStage.VERIFYING,
+                graph_next="verify",
+                allowed=False,
+                reason="Publish/PR checks failed but repair policy denied another repair attempt; verification/acceptance must record non-success.",
+                policy_decision=repair_policy,
+                violations=repair_policy.violations,
+                facts=facts,
+            )
+        return LifecycleTransitionDecision(
+            event=LifecycleEvent.PUBLISH_FINISHED,
+            from_stage=from_stage,
+            to_stage=LifecycleStage.VERIFYING,
+            graph_next="verify",
+            allowed=True,
+            reason="Publish finished without structured check failures; post-publish verification must review PR/commit/check evidence.",
+            policy_decision=policy,
+            facts=facts,
+        )
+
+    def _after_repair(self, from_stage: LifecycleStage, facts: LifecycleFacts) -> LifecycleTransitionDecision:
+        policy = self.policy_evaluator.evaluate("can_leave_execute", facts)
+        if not policy.allowed:
+            return LifecycleTransitionDecision(
+                event=LifecycleEvent.REPAIR_FINISHED,
+                from_stage=from_stage,
+                to_stage=LifecycleStage.CONTROL_PLANE_VIOLATION,
+                graph_next="finalize",
+                allowed=False,
+                reason="Repair packet violated execute-stage lifecycle policy; workflow cannot continue as normal.",
+                policy_decision=policy,
+                violations=policy.violations,
+                facts=facts,
+            )
+        return LifecycleTransitionDecision(
+            event=LifecycleEvent.REPAIR_FINISHED,
+            from_stage=from_stage,
+            to_stage=LifecycleStage.EXECUTION_REVIEW,
+            graph_next="execution_review",
+            allowed=True,
+            reason="Repair finished; lifecycle requires another execution review before verification or publish.",
+            policy_decision=policy,
             facts=facts,
         )
 

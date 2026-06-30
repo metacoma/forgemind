@@ -56,10 +56,32 @@ PLAN_SCHEMA_HINT = {
 
 
 OBLIGATION_SCHEMA_HINT = {
-    "required_test_levels": ["build|unit|integration|smoke|lint"],
+    "required_test_levels": ["build|unit|component|integration|e2e|smoke|lint"],
     "required_setup_steps": ["string"],
     "required_environment_conditions": ["string"],
-    "required_publish_actions": ["commit|push|create_pr|wait_pr_checks|fix_failing_pr_checks"],
+    "required_documentation_updates": ["README|user docs|developer docs|API docs|migration notes"],
+    "required_examples_updates": ["examples|snippets|samples|usage demos"],
+    "required_ci_updates": ["workflow changes|CI jobs|build scripts|packaging checks"],
+    "required_codegen_or_build_updates": ["proto/codegen/tooling/build config updates"],
+    "affected_surfaces": ["public API|client binding|integration path|build surface|docs surface"],
+    "adjacent_components": ["string"],
+    "discovered_impacts": [
+        {
+            "kind": "code|test|integration|setup|documentation|examples|ci_build|codegen_tooling|publish|research|observation",
+            "summary": "string",
+            "required": True,
+            "blocking": True,
+            "affected_paths": ["string"],
+            "evidence_artifact_ids": ["string"],
+        }
+    ],
+    "work_surface": {
+        "affected_surfaces": ["string"],
+        "impacts": [],
+        "adjacent_components": ["string"],
+        "reasoning": "string",
+    },
+    "required_publish_actions": ["commit|push|create_pr|wait_pr_checks"],
     "completion_requirements": ["string"],
     "blocker_conditions": ["string"],
     "reasoning_summary": "string",
@@ -170,6 +192,10 @@ def build_obligation_analysis_prompt(task: Task, classification: TaskClassificat
         "Synthesize execution obligations from observed evidence before planning.\n"
         "You are not producing an execution plan. You are extracting mandatory obligations from the task plus evidence.\n"
         "Do not weaken or skip evidence-backed requirements.\n"
+        "Discovery is broad: for a feature/API/client/binding/integration path, identify the whole required work surface, not only the main code change.\n"
+        "Explicitly discover obligations for code, build/config, tests, integration/e2e/smoke, environment setup, documentation, examples/snippets, CI/pipeline, codegen/tooling, packaging, and adjacent components.\n"
+        "If a public API/client/binding or user-facing behavior changes, require user/developer/API docs and examples unless evidence proves none exist.\n"
+        "If proto/generated code/build tooling/CI workflows are affected, require codegen/build/CI obligations.\n"
         "If the repository evidence shows an integration harness, integration scripts, or setup scripts for runtime dependencies such as Freeplane inside Docker, require them when the change touches the same functional surface.\n"
         "Prefer semantic reasoning over surface wording.\n"
         "Return strict JSON matching this shape:\n"
@@ -199,7 +225,7 @@ def build_verification_prompt(task: Task, context_packet: ContextPacket, plan: E
         "Check whether the performed test levels are sufficient for the change. Unit-only evidence is insufficient when the plan required integration tests.\n"
         "Check whether commit/push obligations were fulfilled if they were required by the plan.\n"
         "If publish evidence indicates that a PR exists, check whether the workflow waited for all PR checks to complete and whether all of them passed.\n"
-        "If any PR checks failed, verify that the agent inspected the failures, fixed the issues, pushed follow-up commits, and re-waited for the checks.\n"
+        "If any PR checks failed, classify publish verification as failed/blocked and report the failing jobs as controller repair input; publisher must not fix CI inside publish.\n"
         "Return strict JSON matching this shape:\n"
         f"{json.dumps(VERIFICATION_SCHEMA_HINT, ensure_ascii=False, indent=2)}\n\n"
         f"Task:\n{task.description}\n\n"

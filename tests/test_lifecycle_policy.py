@@ -16,6 +16,7 @@ from artifact_workflow_runtime.models import (
     ExecutionPlan,
     ExecutionResult,
     ExecutionStatus,
+    PublishResult,
     TaskAcceptanceContract,
     VerificationObligationResult,
 )
@@ -63,6 +64,17 @@ def _execution(text: str, *, status: ExecutionStatus = ExecutionStatus.SUCCEEDED
         request_id="exec_req_1",
         ok=True,
         execution_status=status,
+        summary=text,
+        evidence_text=text,
+        structured_evidence=structured,
+    )
+
+
+def _publish(text: str) -> PublishResult:
+    structured = EvidenceExtractor().from_agent_output(text, changed_default=False)
+    return PublishResult(
+        request_id="publish_req_1",
+        ok=True,
         summary=text,
         evidence_text=text,
         structured_evidence=structured,
@@ -156,3 +168,64 @@ def test_lifecycle_machine_fallback_is_strict_without_external_statemachine() ->
 
     assert decision.allowed is False
     assert "execute_pushed_git" in {violation.code for violation in decision.violations}
+
+
+
+def test_lifecycle_routes_failed_publish_checks_to_repair() -> None:
+    kernel = RuntimeKernel()
+    plan = _plan(publish=True, integration=False)
+    execution = _execution("Changed src/client.cc. Ran unit tests: passed.")
+    publish = _publish("Created PR #42 and waited for PR checks. PR checks failed: ci/test failed.")
+
+    decision = kernel.review_publish(
+        plan=plan,
+        execution=execution,
+        publish=publish,
+        acceptance_contract=_contract(plan),
+        repair_attempt_count=0,
+        max_repair_attempts=2,
+    )
+
+    assert decision.allowed is True
+    assert decision.to_stage == LifecycleStage.REPAIRING
+    assert decision.graph_next == "repair"
+
+
+def test_lifecycle_denies_repair_after_attempt_budget() -> None:
+    kernel = RuntimeKernel()
+    plan = _plan(publish=True, integration=False)
+    execution = _execution("Changed src/client.cc. Ran unit tests: passed.")
+    publish = _publish("Created PR #42 and waited for PR checks. PR checks failed: ci/test failed.")
+
+    decision = kernel.review_publish(
+        plan=plan,
+        execution=execution,
+        publish=publish,
+        acceptance_contract=_contract(plan),
+        repair_attempt_count=2,
+        max_repair_attempts=2,
+    )
+
+    assert decision.allowed is False
+    assert decision.graph_next == "verify"
+    assert "repair_attempt_limit_reached" in {violation.code for violation in decision.violations}
+
+
+def test_lifecycle_denies_publisher_that_repairs_ci_inside_publish() -> None:
+    kernel = RuntimeKernel()
+    plan = _plan(publish=True, integration=False)
+    execution = _execution("Changed src/client.cc. Ran unit tests: passed.")
+    publish = _publish("Created PR #42. Applied fix in src/client.cc to fix CI and pushed follow-up commit.")
+
+    decision = kernel.review_publish(
+        plan=plan,
+        execution=execution,
+        publish=publish,
+        acceptance_contract=_contract(plan),
+        repair_attempt_count=0,
+        max_repair_attempts=2,
+    )
+
+    assert decision.allowed is False
+    assert decision.to_stage == LifecycleStage.CONTROL_PLANE_VIOLATION
+    assert "publisher_repaired_or_reimplemented" in {violation.code for violation in decision.violations}

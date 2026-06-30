@@ -8,7 +8,7 @@ The current codebase is no longer organized around roles. It is organized around
 - **LifecycleMachine + OPA/Rego policy gates** decide whether state transitions are legal.
 - **LangGraph** runs the executor/orchestration graph.
 - **Direct LLM backend** receives text-only `LLMRequest` packets.
-- **OpenHands backend** receives bounded `observe`, `research`, `execute`, `publish`, or `verify` work packets.
+- **OpenHands backend** receives bounded `observe`, `research`, `execute`, `repair`, `publish`, or `verify` work packets.
 - **ArtifactStore + typed WorkflowStateSnapshot** are the source of truth.
 - **StructuredEvidence / EvidenceBundle** converts raw agent text into machine-usable evidence.
 - **ContextBuilder** converts persisted artifacts into a text-only `ContextPacket` for Direct LLM reasoning.
@@ -27,7 +27,7 @@ src/artifact_workflow_runtime/
   evidence/            # raw OpenHands text -> structured evidence bundles
   context/             # artifacts -> ContextPacket text bridge
   llm_backend/         # text-only Direct LLM adapters and fake backend
-  openhands_adapter/   # bounded OpenHands observe/execute/verify adapter
+  openhands_adapter/   # bounded OpenHands observe/execute/repair/publish/verify adapter
   observation/         # ObservationRequest / research request construction
   policy/              # policy, evidence gate, approvals
   reports/             # FinalReport assembly
@@ -46,8 +46,9 @@ src/artifact_workflow_runtime/
 8. `RuntimeKernel` + `EvidenceGate` + `PolicyEngine` decide whether execution is blocked, allowed, or approval-gated.
 9. OpenHands executes only after policy/approval and receives an explicit bounded `ExecutionRequest`.
 10. Optional publish obligations are handled as a separate bounded packet.
-11. The lifecycle/policy gate reviews execute/verify/acceptance facts before publish/finalize transitions.
-12. Direct LLM verifies evidence from artifacts; final status is assembled by `FinalReportBuilder`.
+11. Publish results are reviewed by lifecycle/policy; failed PR/CI checks route to a bounded repair packet if the repair budget allows it.
+12. Repair results go back through execution review, verification, acceptance, and then publish again when legal.
+13. Direct LLM verifies evidence from artifacts; final status is assembled by `FinalReportBuilder`.
 
 
 ## Lifecycle and policy gates
@@ -58,6 +59,8 @@ Hard invariants are enforced before the graph can advance:
 
 - `execute` must not commit, push, or create/open PRs.
 - `publish` is a separate bounded OpenHands packet, not a second `execute()` call.
+- `publish` must not repair CI or reimplement features; failed checks become controller-owned repair input.
+- `repair` is a separate bounded OpenHands packet that cannot commit, push, create PRs, or choose workflow steps.
 - mutation tasks require verification/acceptance before publish unless policy explicitly allows otherwise.
 - environment blockers such as missing Freeplane integration runtime prevent publish/completed finalization.
 - `completed` requires an accepted `AcceptanceDecision`; useful execution alone is not success.
@@ -72,7 +75,7 @@ The Direct LLM gets only text. `LLMRequest` now carries explicit `task_text`, `i
 
 ### OpenHands
 
-OpenHands is not the workflow brain. It receives bounded work packets and returns evidence/artifacts/blockers. The adapter validates observe/execute/publish/world-verification packet kinds, rejects mutating observation contracts, rejects publish packets passed through `execute()`, and stores raw plus structured evidence artifacts. It does not decide the next graph step.
+OpenHands is not the workflow brain. It receives bounded work packets and returns evidence/artifacts/blockers. The adapter validates observe/execute/repair/publish/world-verification packet kinds, rejects mutating observation contracts, rejects publish packets passed through `execute()`, and stores raw plus structured evidence artifacts. It does not decide the next graph step.
 
 ### Artifacts, evidence, and state
 
@@ -141,7 +144,7 @@ Legacy `roles:` configs are rejected.
 python -m pytest -q
 ```
 
-The current test suite covers capability normalization, typed state validation, structured evidence extraction, per-stage and per-verification-check model routing, OpenHands transport fallback, sandbox reuse, runtime events, lifecycle/policy transition guards, research/observation routing, publish obligations, and verification behavior.
+The current test suite covers capability normalization, typed state validation, structured evidence extraction, per-stage and per-verification-check model routing, OpenHands transport fallback, sandbox reuse, runtime events, lifecycle/policy transition guards, research/observation routing, publish obligations, bounded repair loops, pipeline-wide re-entry, broad obligation discovery, and verification behavior.
 
 ## Acceptance gate hardening
 
@@ -155,3 +158,11 @@ The key distinction is now explicit:
 - `VerificationResult` describes evidence/world verification results.
 - `AcceptanceDecision` decides whether the task is accepted for completion.
 - `FinalReport.status` follows the acceptance decision for mutation tasks.
+
+## Pipeline-wide re-entry and broad obligation discovery
+
+The runtime now supports controlled re-entry across the whole pipeline, not only local publish/repair loops. `RuntimeKernel.evaluate_pipeline_reentry()` evaluates typed `PipelineLoopDecision` records from verification, acceptance, and publish-review stages. Re-entry is driven by first-class trigger kinds such as missing research evidence, missing repository/world observation, insufficient context, missing obligations, docs/examples impact, CI/build/codegen impact, setup gaps, integration-scope discovery, and incomplete plans.
+
+Each decision records the source stage, target stage, trigger kind, reason, missing evidence/obligations, policy decision, and loop counters. `PipelineLoopBudget` limits global, per-trigger, and per-source-stage re-entry so rediscovery cannot become an infinite loop. If the budget is exhausted, the workflow finalizes with a hard non-success path instead of silently continuing.
+
+Obligation discovery now covers the full work surface for feature/API/client/integration changes. `ObligationAnalysis` can declare required documentation updates, examples/snippets, CI/build updates, codegen/tooling updates, affected surfaces, adjacent components, discovered impacts, and completion requirements. These fields are folded into planning, verification, and acceptance obligations, so “feature implemented” no longer automatically means “task complete.”

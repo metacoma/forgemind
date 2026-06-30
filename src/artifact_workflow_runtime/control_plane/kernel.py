@@ -20,6 +20,7 @@ from artifact_workflow_runtime.models import (
     ObservationResult,
     PolicyDecision,
     PublishResult,
+    RepairResult,
     RoutingDecision,
     Task,
     TaskAcceptanceContract,
@@ -34,6 +35,10 @@ from artifact_workflow_runtime.lifecycle import (
     LifecycleMachine,
     LifecycleStage,
     LifecycleTransitionDecision,
+    PipelineLoopBudget,
+    PipelineLoopDecision,
+    PipelineLoopTriggerKind,
+    PipelineReentryTarget,
     PolicyViolation,
 )
 from artifact_workflow_runtime.policy import PolicyEngine
@@ -219,6 +224,30 @@ class RuntimeKernel:
             facts=facts,
         )
 
+    def review_publish(
+        self,
+        *,
+        plan: ExecutionPlan,
+        execution: ExecutionResult | None,
+        publish: PublishResult,
+        acceptance_contract: TaskAcceptanceContract | None = None,
+        repair_attempt_count: int = 0,
+        max_repair_attempts: int = 2,
+    ) -> LifecycleTransitionDecision:
+        facts = self.lifecycle_facts(
+            plan=plan,
+            execution=execution,
+            publish=publish,
+            acceptance_contract=acceptance_contract,
+            repair_attempt_count=repair_attempt_count,
+            max_repair_attempts=max_repair_attempts,
+        )
+        return self.lifecycle_machine.transition(
+            from_stage=LifecycleStage.PUBLISHING,
+            event=LifecycleEvent.PUBLISH_FINISHED,
+            facts=facts,
+        )
+
     def lifecycle_facts(
         self,
         *,
@@ -228,6 +257,18 @@ class RuntimeKernel:
         verification: VerificationResult | None = None,
         publish: PublishResult | None = None,
         acceptance: AcceptanceDecision | None = None,
+        repair_attempt_count: int = 0,
+        max_repair_attempts: int = 2,
+        reentry_required: bool = False,
+        reentry_target_stage: PipelineReentryTarget = PipelineReentryTarget.CONTINUE,
+        reentry_trigger_kind: PipelineLoopTriggerKind = PipelineLoopTriggerKind.NONE,
+        reentry_budget_exhausted: bool = False,
+        pipeline_loop_count: int = 0,
+        trigger_loop_count: int = 0,
+        source_stage_loop_count: int = 0,
+        pipeline_loop_global_limit: int = 3,
+        pipeline_loop_per_trigger_limit: int = 1,
+        pipeline_loop_per_source_stage_limit: int = 2,
     ) -> LifecycleFacts:
         publish_required = _publish_required(plan) if plan is not None else False
         mutation_task = bool(plan and (plan.requires_mutation or plan.must_change_world or plan.expected_repo_changes))
@@ -244,6 +285,9 @@ class RuntimeKernel:
         execution_status = _derive_execution_status(execution) if execution is not None else ExecutionStatus.FAILED
         execution_has_blockers = bool(execution and execution.structured_evidence.blockers)
         execution_succeeded = bool(execution and execution.ok and execution_status == ExecutionStatus.SUCCEEDED and not execution_has_blockers)
+        publish_failed_checks = _publish_failed_checks(publish)
+        publish_has_blockers = bool(publish and publish.structured_evidence.blockers)
+        publish_forbidden_action_detected = _publish_forbidden_action_detected(publish)
         return LifecycleFacts(
             plan=plan,
             acceptance_contract=acceptance_contract,
@@ -252,7 +296,12 @@ class RuntimeKernel:
             publish=publish,
             acceptance=acceptance,
             publish_required=publish_required,
-            publish_done=publish is not None and publish.ok,
+            publish_done=publish is not None and publish.ok and not publish_failed_checks and not publish_has_blockers,
+            publish_failed_checks=publish_failed_checks,
+            publish_has_blockers=publish_has_blockers,
+            publish_forbidden_action_detected=publish_forbidden_action_detected,
+            repair_attempt_count=repair_attempt_count,
+            max_repair_attempts=max_repair_attempts,
             mutation_task=mutation_task,
             mandatory_verification_required=mandatory_verification_required,
             mandatory_verification_satisfied=mandatory_verification_satisfied,
@@ -266,6 +315,16 @@ class RuntimeKernel:
             execute_git_push=execute_git_push,
             execute_git_commit=execute_git_commit,
             execute_forbidden_action_detected=execute_pr_created or execute_git_push or execute_git_commit,
+            reentry_required=reentry_required,
+            reentry_target_stage=reentry_target_stage,
+            reentry_trigger_kind=reentry_trigger_kind,
+            reentry_budget_exhausted=reentry_budget_exhausted,
+            pipeline_loop_count=pipeline_loop_count,
+            trigger_loop_count=trigger_loop_count,
+            source_stage_loop_count=source_stage_loop_count,
+            pipeline_loop_global_limit=pipeline_loop_global_limit,
+            pipeline_loop_per_trigger_limit=pipeline_loop_per_trigger_limit,
+            pipeline_loop_per_source_stage_limit=pipeline_loop_per_source_stage_limit,
         )
 
     def acceptance_from_lifecycle_violation(
@@ -366,6 +425,18 @@ class RuntimeKernel:
                 checks=env_prereqs,
                 env=env_prereqs,
             )
+
+        if obligations is not None:
+            if obligations.required_documentation_updates:
+                add(AcceptanceObligationKind.DOCUMENTATION_UPDATED, "Required documentation updates completed", checks=list(obligations.required_documentation_updates), source="obligation_discovery")
+            if obligations.required_examples_updates:
+                add(AcceptanceObligationKind.EXAMPLES_UPDATED, "Required examples/snippets updates completed", checks=list(obligations.required_examples_updates), source="obligation_discovery")
+            if obligations.required_ci_updates:
+                add(AcceptanceObligationKind.CI_OR_BUILD_UPDATED, "Required CI/build updates completed", checks=list(obligations.required_ci_updates), source="obligation_discovery")
+            if obligations.required_codegen_or_build_updates:
+                add(AcceptanceObligationKind.CODEGEN_OR_TOOLING_UPDATED, "Required codegen/tooling/build updates completed", checks=list(obligations.required_codegen_or_build_updates), source="obligation_discovery")
+            if obligations.affected_surfaces or obligations.discovered_impacts:
+                add(AcceptanceObligationKind.WORK_SURFACE_COMPLETE, "Discovered work surface obligations completed", checks=[*obligations.affected_surfaces, *[impact.summary for impact in obligations.discovered_impacts if impact.blocking]], source="obligation_discovery")
 
         if _publish_required(plan):
             add(AcceptanceObligationKind.PUBLISH_OBLIGATIONS_SATISFIED, "Publish/commit/push obligations satisfied", checks=list(plan.publication_steps))
@@ -503,6 +574,16 @@ class RuntimeKernel:
         if obligation.kind == AcceptanceObligationKind.ENVIRONMENT_PREREQUISITES_SATISFIED:
             return _obligation_result(obligation, True, "No structured environment blocker was reported.", artifact_ids)
 
+        if obligation.kind in {
+            AcceptanceObligationKind.DOCUMENTATION_UPDATED,
+            AcceptanceObligationKind.EXAMPLES_UPDATED,
+            AcceptanceObligationKind.CI_OR_BUILD_UPDATED,
+            AcceptanceObligationKind.CODEGEN_OR_TOOLING_UPDATED,
+            AcceptanceObligationKind.WORK_SURFACE_COMPLETE,
+        }:
+            ok = _obligation_has_named_evidence(obligation, execution, verification, publish)
+            return _obligation_result(obligation, ok, "Discovered work-surface evidence found." if ok else "Discovered work-surface obligation lacks explicit evidence.", artifact_ids)
+
         if obligation.kind == AcceptanceObligationKind.PUBLISH_OBLIGATIONS_SATISFIED:
             if verification is not None and (verification.commit_required or verification.push_required):
                 ok = (not verification.commit_required or verification.commit_done) and (not verification.push_required or verification.push_done)
@@ -512,6 +593,90 @@ class RuntimeKernel:
 
         ok = bool(verification and (verification.passed or verification.checks_passed)) or bool(execution.evidence_bundle and execution.evidence_bundle.ok)
         return _obligation_result(obligation, ok, "Required evidence exists." if ok else "Required evidence is missing.", artifact_ids)
+
+    def evaluate_pipeline_reentry(
+        self,
+        *,
+        source_stage: str,
+        plan: ExecutionPlan | None = None,
+        obligations: ObligationAnalysis | None = None,
+        verification: VerificationResult | None = None,
+        acceptance: AcceptanceDecision | None = None,
+        publish: PublishResult | None = None,
+        loop_decisions: list[PipelineLoopDecision | dict[str, object]] | None = None,
+        budget: PipelineLoopBudget | None = None,
+    ) -> PipelineLoopDecision:
+        """Decide whether the workflow must re-enter an earlier pipeline stage.
+
+        This is the pipeline-wide loop controller. Local repair is still handled
+        by publish_review -> repair, but newly discovered work surfaces, missing
+        discovery, missing context, or deeper CI/setup/doc obligations are routed
+        back through observe/build_context/obligations/plan under explicit budget.
+        """
+
+        budget = budget or PipelineLoopBudget()
+        prior = [_coerce_loop_decision(item) for item in (loop_decisions or [])]
+        trigger, target, reason, missing_evidence, missing_obligations = _detect_reentry_trigger(
+            source_stage=source_stage,
+            plan=plan,
+            obligations=obligations,
+            verification=verification,
+            acceptance=acceptance,
+            publish=publish,
+        )
+        if trigger == PipelineLoopTriggerKind.NONE:
+            return PipelineLoopDecision(
+                source_stage=source_stage,
+                target_stage=PipelineReentryTarget.CONTINUE,
+                trigger_kind=trigger,
+                reason="No pipeline-wide re-entry trigger detected.",
+                automatic=False,
+                allowed=True,
+                loop_count=len(prior),
+                global_limit=budget.global_limit,
+                per_trigger_limit=budget.per_trigger_limit,
+                per_source_stage_limit=budget.per_source_stage_limit,
+            )
+
+        trigger_count = sum(1 for item in prior if item.trigger_kind == trigger)
+        source_count = sum(1 for item in prior if item.source_stage == source_stage)
+        exhausted = len(prior) >= budget.global_limit or trigger_count >= budget.per_trigger_limit or source_count >= budget.per_source_stage_limit
+        facts = self.lifecycle_facts(
+            plan=plan,
+            verification=verification,
+            publish=publish,
+            acceptance=acceptance,
+            reentry_required=True,
+            reentry_target_stage=target,
+            reentry_trigger_kind=trigger,
+            reentry_budget_exhausted=exhausted,
+            pipeline_loop_count=len(prior),
+            trigger_loop_count=trigger_count,
+            source_stage_loop_count=source_count,
+            pipeline_loop_global_limit=budget.global_limit,
+            pipeline_loop_per_trigger_limit=budget.per_trigger_limit,
+            pipeline_loop_per_source_stage_limit=budget.per_source_stage_limit,
+        )
+        policy = self.lifecycle_machine.policy_evaluator.evaluate("can_reenter", facts)
+        allowed = policy.allowed and not exhausted
+        return PipelineLoopDecision(
+            source_stage=source_stage,
+            target_stage=target if allowed else PipelineReentryTarget.FINALIZE,
+            trigger_kind=trigger,
+            reason=reason if allowed else f"Pipeline re-entry requested for {trigger.value}, but loop budget/policy denied it.",
+            allowed=allowed,
+            automatic=allowed,
+            missing_evidence=missing_evidence,
+            missing_obligations=missing_obligations,
+            loop_count=len(prior),
+            trigger_count=trigger_count,
+            source_stage_count=source_count,
+            global_limit=budget.global_limit,
+            per_trigger_limit=budget.per_trigger_limit,
+            per_source_stage_limit=budget.per_source_stage_limit,
+            budget_exhausted=exhausted,
+            policy_decision=policy,
+        )
 
     def verification_strategy(
         self,
@@ -558,6 +723,73 @@ class RuntimeKernel:
             requires_world_check=False,
             reason="Verification can be completed as Direct LLM evidence review over artifacts/context.",
         )
+
+
+
+def _coerce_loop_decision(item: PipelineLoopDecision | dict[str, object]) -> PipelineLoopDecision:
+    if isinstance(item, PipelineLoopDecision):
+        return item
+    return PipelineLoopDecision.model_validate(item)
+
+
+def _detect_reentry_trigger(
+    *,
+    source_stage: str,
+    plan: ExecutionPlan | None,
+    obligations: ObligationAnalysis | None,
+    verification: VerificationResult | None,
+    acceptance: AcceptanceDecision | None,
+    publish: PublishResult | None,
+) -> tuple[PipelineLoopTriggerKind, PipelineReentryTarget, str, list[str], list[str]]:
+    text_items: list[str] = []
+    missing_evidence: list[str] = []
+    missing_obligations: list[str] = []
+    if verification is not None:
+        missing_evidence.extend(verification.missing_evidence)
+        missing_obligations.extend(verification.missing_obligations)
+        missing_obligations.extend(verification.missing_test_levels)
+        missing_obligations.extend(verification.missing_setup_steps)
+        text_items.extend([verification.summary, *verification.missing_evidence, *verification.missing_obligations, *verification.missing_test_levels, *verification.missing_setup_steps, *verification.checks_failed])
+    if acceptance is not None:
+        for result in acceptance.obligation_results:
+            if result.status != AcceptanceObligationStatus.PASSED:
+                missing_obligations.append(result.obligation_name)
+                text_items.append(f"{result.kind.value} {result.obligation_name} {result.reason}")
+    if publish is not None:
+        text_items.extend([publish.summary, publish.evidence_text, *[b.summary for b in publish.structured_evidence.blockers]])
+    text = _lower_join(text_items)
+
+    if not text.strip():
+        return PipelineLoopTriggerKind.NONE, PipelineReentryTarget.CONTINUE, "No re-entry trigger text was present.", [], []
+    if any(marker in text for marker in ("official docs", "current docs", "release notes", "api changed", "version mismatch", "unknown api")):
+        return PipelineLoopTriggerKind.MISSING_RESEARCH_EVIDENCE, PipelineReentryTarget.RESEARCH, "New external/current documentation evidence is required before replanning.", missing_evidence, missing_obligations
+    if any(marker in text for marker in ("repo observation", "inspect repository", "missing repository", "repo topology", "existing pattern unknown")):
+        return PipelineLoopTriggerKind.MISSING_REPOSITORY_OBSERVATION, PipelineReentryTarget.OBSERVE, "Repository observation is missing or insufficient; re-enter observe.", missing_evidence, missing_obligations
+    if any(marker in text for marker in ("context packet insufficient", "missing context", "context missing")):
+        return PipelineLoopTriggerKind.MISSING_CONTEXT, PipelineReentryTarget.BUILD_CONTEXT, "ContextPacket is insufficient; rebuild context from artifacts.", missing_evidence, missing_obligations
+    gap_markers = ("missing", "required", "requires", "need", "needs", "discovered", "impact", "gap", "incomplete", "omitted", "lacks", "not present", "not updated", "should update", "must update")
+    docs_markers = ("documentation", "readme", "docs", "user-facing docs", "developer docs", "api docs", "migration notes")
+    if any(marker in text for marker in docs_markers) and any(marker in text for marker in gap_markers):
+        return PipelineLoopTriggerKind.DOCS_IMPACT_DISCOVERED, PipelineReentryTarget.OBLIGATIONS, "Documentation impact was discovered after initial planning; re-enter obligation discovery.", missing_evidence, missing_obligations
+    example_markers = ("example", "sample", "snippet")
+    if any(marker in text for marker in example_markers) and any(marker in text for marker in gap_markers):
+        return PipelineLoopTriggerKind.EXAMPLES_IMPACT_DISCOVERED, PipelineReentryTarget.OBLIGATIONS, "Examples/snippets impact was discovered after initial planning; re-enter obligation discovery.", missing_evidence, missing_obligations
+    ci_markers = ("ci config", "gitlab ci", "workflow file", "pipeline", "build script", "github actions")
+    ci_gap_markers = ("missing", "need", "needs", "required", "update", "add", "configure", "not configured", "deeper")
+    if any(marker in text for marker in ci_markers) and any(marker in text for marker in ci_gap_markers):
+        return PipelineLoopTriggerKind.CI_BUILD_IMPACT_DISCOVERED, PipelineReentryTarget.OBLIGATIONS, "CI/build pipeline impact requires rediscovery and replanning.", missing_evidence, missing_obligations
+    codegen_markers = ("codegen", "generated code", "proto generation", "protoc", "tooling")
+    if any(marker in text for marker in codegen_markers) and any(marker in text for marker in gap_markers):
+        return PipelineLoopTriggerKind.CODEGEN_BUILD_IMPACT_DISCOVERED, PipelineReentryTarget.OBLIGATIONS, "Codegen/tooling/build impact requires rediscovery and replanning.", missing_evidence, missing_obligations
+    if any(marker in text for marker in ("new integration surface", "integration scope", "binding surface", "client surface", "public api surface")):
+        return PipelineLoopTriggerKind.INTEGRATION_SCOPE_DISCOVERED, PipelineReentryTarget.OBLIGATIONS, "A broader integration/work surface was discovered; re-enter obligation discovery.", missing_evidence, missing_obligations
+    if any(marker in text for marker in ("setup gap", "missing setup step", "missing dependency install", "test harness setup")):
+        return PipelineLoopTriggerKind.SETUP_GAP_DISCOVERED, PipelineReentryTarget.OBLIGATIONS, "A setup/test-harness gap was discovered; re-enter obligation discovery.", missing_evidence, missing_obligations
+    if any(marker in text for marker in ("plan incomplete", "planner missed", "missing plan step", "scope deeper than repair")):
+        return PipelineLoopTriggerKind.PLAN_INCOMPLETE, PipelineReentryTarget.PLAN, "The current plan is incomplete; re-enter planning.", missing_evidence, missing_obligations
+    if source_stage == "publish_review" and any(marker in text for marker in ("deeper", "not just repair", "missing setup", "missing ci", "missing docs", "missing codegen")):
+        return PipelineLoopTriggerKind.PUBLISH_DEEPER_PLANNING_REQUIRED, PipelineReentryTarget.OBLIGATIONS, "Publish/check evidence revealed deeper missing work; re-enter discovery instead of local repair.", missing_evidence, missing_obligations
+    return PipelineLoopTriggerKind.NONE, PipelineReentryTarget.CONTINUE, "No pipeline-wide re-entry trigger detected.", missing_evidence, missing_obligations
 
 
 _ALLOWED_INTENTS = {"implement", "modify", "investigate", "document", "verify"}
@@ -774,6 +1006,48 @@ def _check_result(obligation: AcceptanceObligation, ran: bool, passed: bool, fai
         evidence_artifact_ids=artifact_ids,
         blocker_kind=None if passed else BlockerKind.MISSING_EVIDENCE,
     )
+
+
+
+def _obligation_has_named_evidence(obligation: AcceptanceObligation, execution: ExecutionResult | None, verification: VerificationResult | None, publish: PublishResult | None) -> bool:
+    terms = [str(item).lower() for item in obligation.checks if str(item).strip()]
+    if not terms:
+        terms = [obligation.name.lower(), obligation.kind.value.replace("_", " ")]
+    haystack = _result_text(execution).lower() + "\n" + _result_text(verification).lower() + "\n" + _result_text(publish).lower()
+    return any(term and term in haystack for term in terms)
+
+
+def _publish_failed_checks(publish: PublishResult | None) -> bool:
+    if publish is None:
+        return False
+    evidence = publish.structured_evidence
+    for test in evidence.tests:
+        status = str(test.status).lower()
+        if status in {"failed", "error", "blocked"}:
+            return True
+        if test.passed is False:
+            return True
+    text = _result_text(publish).lower()
+    return any(marker in text for marker in ("pr checks failed", "checks failed", "check failed", "github actions failed", "ci failed", "job failed", "workflow failed", "red"))
+
+
+def _publish_forbidden_action_detected(publish: PublishResult | None) -> bool:
+    if publish is None:
+        return False
+    evidence = publish.structured_evidence
+    text = _result_text(publish).lower()
+    if any(marker in text for marker in ("applied fix", "fixed ci", "fixed failing", "patched", "reimplemented", "modified source", "changed src", "updated src", "edited src")):
+        return True
+    source_like_changes = [
+        item.path
+        for item in evidence.files_changed
+        if str(item.path).startswith(("src/", "lib/", "cmd/", "pkg/", "tests/"))
+        or str(item.path).endswith((".py", ".go", ".rs", ".ts", ".js", ".tsx", ".jsx", ".cc", ".cpp", ".h", ".hpp", ".java", ".kt", ".proto", ".sh", ".yaml", ".yml", ".toml"))
+    ]
+    if source_like_changes:
+        repair_words = ("fix", "patch", "modify", "change", "edit", "reimplement", "applied")
+        return any(word in text for word in repair_words)
+    return False
 
 
 def _contains_any(text: str, markers: tuple[str, ...]) -> bool:

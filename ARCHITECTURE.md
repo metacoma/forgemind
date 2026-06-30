@@ -149,7 +149,7 @@ Graph state keeps artifact ids and typed model dumps. Later stages rebuild conte
 The current implementation is now structurally runnable and closer to the target control-plane model, but several deeper improvements remain:
 
 1. Replace remaining long prompt strings in graph nodes with dedicated prompt/work-packet builders.
-2. Add repair-loop state for failed verification and bounded re-execution.
+2. Expand repair policy fixtures and durable replay/resume for mid-loop recovery.
 3. Add real human approval backends.
 4. Add persistent workflow resume from `ArtifactStore.index.json` and `workflow_state_snapshot` artifacts.
 5. Split verification into richer rule-based evidence checks plus Direct LLM judgment.
@@ -180,7 +180,7 @@ The runtime now separates execution, verification, acceptance, and final workflo
 The graph flow is now lifecycle-gated:
 
 ```text
-execute -> execution_review -> verify -> acceptance -> publish? -> verify -> acceptance -> finalize
+execute -> execution_review -> verify -> acceptance -> publish? -> publish_review -> repair? -> execution_review -> verify -> acceptance -> publish? -> publish_review -> verify -> acceptance -> finalize
 ```
 
 For mutation tasks, verification is mandatory and finalization depends on `AcceptanceDecision`, not on raw OpenHands prose or a permissive verification summary. Publish is blocked by default until lifecycle/OPA policy sees clean execution and satisfied mandatory verification/acceptance obligations. If execute creates a PR, pushes, or commits, the lifecycle layer emits a control-plane violation and routes directly to finalization with non-success status.
@@ -198,3 +198,47 @@ Closed in this pass:
 - Execution requests now explicitly forbid commit, push, PR creation, publish, and waiting for PR checks.
 - Publish no longer performs hidden CI repair loops or feature reimplementation; it reports blockers/check failures for controller-owned repair decisions.
 - Fixed missing-evidence/test-run logic so `not run` and `missing evidence` cannot satisfy “tests were run”.
+
+
+## Repair loop hardening update
+
+Failed publish/PR checks are now handled as controller-owned lifecycle state, not as hidden publisher autonomy. `publish` may commit/push/open or update a PR and collect check evidence, but it must not modify source files, repair CI, or reimplement features. `publish_review` evaluates `LifecycleFacts` through policy; failed checks route to `repair` only while the repair budget allows it and only when no environment blocker is present.
+
+`RepairRequest` / `RepairResult` are typed contracts. Repair packets run through OpenHands separately from publish, explicitly forbid commit/push/create_pr/publish/wait_pr_checks, and return structured evidence. After each repair, the graph returns to `execution_review`; only after review, verification, and acceptance may publish run again. This gives the loop the shape:
+
+```text
+publish -> publish_review -> repair -> execution_review -> verify/acceptance -> publish
+```
+
+If the publisher attempts to repair inside publish, lifecycle policy emits `publisher_repaired_or_reimplemented` and routes to non-success finalization. If repair attempts are exhausted, failed checks are verified/accepted as non-success instead of causing an unbounded repair loop.
+
+## Stage contract / prompt hardening pass
+
+OpenHands prompts are now compiled from typed stage contracts. Every OpenHands-bound packet renders the same non-negotiable sections before any narrative instruction:
+
+- control-plane boundary: OpenHands is not the workflow brain and cannot decide next stages or final acceptance;
+- allowed actions;
+- forbidden actions;
+- stop conditions;
+- required outputs;
+- non-goals.
+
+`ObservationRequest`, `ExecutionRequest`, `VerificationRequest` when `backend=openhands`, `PublishRequest`, and `RepairRequest` all use the centralized OpenHands packet compiler. This makes prompt text a derived rendering of typed contracts instead of a hidden source of authority.
+
+Git publication actions are denied everywhere except the bounded publish packet. Observe/research/execute/verify/repair prompts and adapter validators explicitly forbid `git push`, `git push --force`, `git tag`, `git merge`, `git rebase`, PR creation, release, and publish actions. Publish itself still forbids force-push, tags, merge/rebase, release, CI repair, source edits, reimplementation, and scope expansion.
+
+The OpenHands adapter validates compiled prompts before dispatch, so a packet missing the standard stage-contract sections is rejected before it reaches the executor. Observation requests also filter capabilities to read-only capabilities before packet construction.
+
+## Pipeline-wide lifecycle re-entry
+
+The lifecycle layer is no longer limited to the local `publish -> repair -> execution_review` loop. Verification, acceptance, and publish-review stages can now ask the controller for a typed `PipelineLoopDecision`. The decision is evaluated through lifecycle policy (`can_reenter`) and records the source stage, target re-entry stage, trigger kind, missing evidence/obligations, policy outcome, and loop-budget counters.
+
+Legal re-entry targets include research, observe, context rebuild, obligation discovery, and planning. This lets the runtime return from `verify` or `acceptance` to rediscover obligations when new docs, examples, CI/build, codegen, setup, or integration-scope impacts are found. Publish-review can also escalate beyond local repair when check evidence reveals deeper missing setup, CI, docs, or codegen work.
+
+Re-entry is bounded by `PipelineLoopBudget` with global, per-trigger, and per-source-stage limits. Exhausted budgets route to finalization as non-success instead of allowing unbounded retries or soft completion.
+
+## Broad work-surface obligation discovery
+
+`ObligationAnalysis` now models the broader work surface of engineering tasks. In addition to tests, setup, environment conditions, blockers, and completion requirements, it carries required documentation updates, examples/snippet updates, CI/build updates, codegen/tooling updates, affected surfaces, adjacent components, discovered impacts, and an optional `DiscoveredWorkSurface`.
+
+`RuntimeKernel.build_acceptance_contract()` translates these discovered impacts into blocking acceptance obligations such as `documentation_updated`, `examples_updated`, `ci_or_build_updated`, `codegen_or_tooling_updated`, and `work_surface_complete`. `merge_plan_with_obligations()` feeds the same information into the execution plan, expected repo changes, success criteria, and verification checks.

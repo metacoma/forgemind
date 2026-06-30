@@ -22,6 +22,8 @@ from artifact_workflow_runtime.models.core import (
     PolicyDecision,
     PublishRequest,
     PublishResult,
+    RepairRequest,
+    RepairResult,
     RoutingDecision,
     RuntimeModel,
     Task,
@@ -33,7 +35,7 @@ from artifact_workflow_runtime.models.core import (
     VerificationResult,
     utc_now,
 )
-from artifact_workflow_runtime.lifecycle.models import LifecycleTransitionDecision
+from artifact_workflow_runtime.lifecycle.models import LifecycleTransitionDecision, PipelineLoopDecision
 
 JsonDict = dict[str, Any]
 
@@ -52,6 +54,8 @@ class WorkflowStatus(str, Enum):
     APPROVAL_RESOLVED = "approval_resolved"
     EXECUTED = "executed"
     EXECUTION_REVIEWED = "execution_reviewed"
+    REPAIRED = "repaired"
+    PUBLISH_REVIEWED = "publish_reviewed"
     PUBLISHED = "published"
     VERIFIED = "verified"
     ACCEPTANCE_EVALUATED = "acceptance_evaluated"
@@ -126,8 +130,11 @@ class WorkflowStateSnapshot(RuntimeModel):
     execution_request: ExecutionRequest | None = None
     execution_result: ExecutionResult | None = None
     execution_review_decision: LifecycleTransitionDecision | None = None
+    repair_requests: list[RepairRequest] = Field(default_factory=list)
+    repair_results: list[RepairResult] = Field(default_factory=list)
     publish_request: PublishRequest | None = None
     publish_result: PublishResult | None = None
+    publish_review_decision: LifecycleTransitionDecision | None = None
     verification_request: VerificationRequest | None = None
     verification_check_requests: list[VerificationCheckRequest] = Field(default_factory=list)
     verification_check_results: list[VerificationCheckResult] = Field(default_factory=list)
@@ -135,6 +142,7 @@ class WorkflowStateSnapshot(RuntimeModel):
     acceptance_decision: AcceptanceDecision | None = None
     final_report: FinalReport | None = None
     lifecycle_decisions: list[LifecycleTransitionDecision] = Field(default_factory=list)
+    pipeline_loop_decisions: list[PipelineLoopDecision] = Field(default_factory=list)
     controller_decisions: list[ControllerDecision] = Field(default_factory=list)
     transitions: list[StageTransition] = Field(default_factory=list)
     artifact_ids: list[str] = Field(default_factory=list)
@@ -200,8 +208,11 @@ class WorkflowState(TypedDict, total=False):
     execution_request: JsonDict | None
     execution_result: JsonDict | None
     execution_review_decision: JsonDict | None
+    repair_requests: list[JsonDict]
+    repair_results: list[JsonDict]
     publish_request: JsonDict | None
     publish_result: JsonDict | None
+    publish_review_decision: JsonDict | None
     verification_request: JsonDict | None
     verification_check_requests: list[JsonDict]
     verification_check_results: list[JsonDict]
@@ -209,6 +220,7 @@ class WorkflowState(TypedDict, total=False):
     acceptance_decision: JsonDict | None
     final_report: JsonDict | None
     lifecycle_decisions: list[JsonDict]
+    pipeline_loop_decisions: list[JsonDict]
     controller_decisions: list[JsonDict]
     transitions: list[JsonDict]
     artifact_ids: list[str]

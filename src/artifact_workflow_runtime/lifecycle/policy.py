@@ -94,6 +94,32 @@ class OpaPolicyEvaluator:
             allowed = not violations
             return LifecyclePolicyDecision(allowed=allowed, query=query, reasons=[] if allowed else [item.message for item in violations], violations=violations, engine="fallback")
 
+        if query == "can_leave_publish":
+            if facts.publish_forbidden_action_detected:
+                violations.append(PolicyViolation(code="publisher_repaired_or_reimplemented", message="Publish packet appears to have modified source or repaired CI; publish must only commit/push/open PR/collect check evidence.", blocker_kind=BlockerKind.POLICY_BLOCKED))
+            allowed = not violations
+            return LifecyclePolicyDecision(allowed=allowed, query=query, reasons=[] if allowed else [item.message for item in violations], violations=violations, engine="fallback")
+
+        if query == "can_repair":
+            if facts.environment_blocked:
+                violations.append(PolicyViolation(code="repair_blocked_by_environment", message="Repair is forbidden while required verification environment is unavailable; human/environment action is required.", blocker_kind=BlockerKind.MISSING_ENVIRONMENT_DEPENDENCY))
+            if facts.repair_attempt_count >= facts.max_repair_attempts:
+                violations.append(PolicyViolation(code="repair_attempt_limit_reached", message="Repair attempt limit reached; controller must stop automatic repair and finalize non-success.", blocker_kind=BlockerKind.POLICY_BLOCKED))
+            if not facts.publish_failed_checks and not facts.publish_has_blockers:
+                violations.append(PolicyViolation(code="repair_requires_failed_publish_checks", message="Repair is only allowed after structured publish/check failures or blockers.", blocker_kind=BlockerKind.POLICY_BLOCKED))
+            allowed = not violations
+            return LifecyclePolicyDecision(allowed=allowed, query=query, reasons=[] if allowed else [item.message for item in violations], violations=violations, engine="fallback")
+
+        if query == "can_reenter":
+            if not facts.reentry_required:
+                return LifecyclePolicyDecision(allowed=True, query=query, reasons=["No re-entry requested."], engine="fallback")
+            if facts.reentry_budget_exhausted:
+                violations.append(PolicyViolation(code="pipeline_reentry_budget_exhausted", message="Pipeline-wide re-entry budget is exhausted; controller must finalize non-success instead of looping.", blocker_kind=BlockerKind.POLICY_BLOCKED))
+            if facts.reentry_target_stage.value == "continue":
+                violations.append(PolicyViolation(code="pipeline_reentry_missing_target", message="Re-entry was requested but no target stage was selected.", blocker_kind=BlockerKind.POLICY_BLOCKED))
+            allowed = not violations
+            return LifecyclePolicyDecision(allowed=allowed, query=query, reasons=[] if allowed else [item.message for item in violations], violations=violations, engine="fallback")
+
         if query == "can_finalize_success":
             if facts.acceptance is None or not facts.acceptance.accepted:
                 violations.append(PolicyViolation(code="finalize_requires_acceptance", message="Completed finalization is forbidden unless acceptance status is accepted."))
