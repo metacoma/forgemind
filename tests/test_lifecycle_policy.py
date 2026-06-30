@@ -229,3 +229,14 @@ def test_lifecycle_denies_publisher_that_repairs_ci_inside_publish() -> None:
     assert decision.allowed is False
     assert decision.to_stage == LifecycleStage.CONTROL_PLANE_VIOLATION
     assert "publisher_repaired_or_reimplemented" in {violation.code for violation in decision.violations}
+
+
+def test_lifecycle_machine_does_not_inherit_external_statemachine_runtime() -> None:
+    """Regression for real python-statemachine installations.
+
+    The lifecycle engine is programmatic and policy-backed. If it subclasses
+    statemachine.StateMachine without declarative class-level states, controller
+    construction fails with InvalidDefinition("There are no states or transitions").
+    """
+    assert all("statemachine" not in getattr(base, "__module__", "") for base in LifecycleMachine.__mro__[1:])
+    assert LifecycleMachine().policy_evaluator is not None

@@ -1,30 +1,24 @@
 from __future__ import annotations
 
-try:  # optional runtime dependency; fallback keeps tests/self-contained tarballs runnable.
-    from statemachine import StateMachine as _ExternalStateMachine  # type: ignore
-except Exception:  # pragma: no cover - depends on optional dependency availability
-    _ExternalStateMachine = object  # type: ignore
-
 from artifact_workflow_runtime.models import AcceptanceObligationKind, AcceptanceObligationStatus, AcceptanceStatus
 
 from .models import LifecycleEvent, LifecycleFacts, LifecycleStage, LifecycleTransitionDecision
 from .policy import OpaPolicyEvaluator
 
 
-class LifecycleMachine(_ExternalStateMachine):  # type: ignore[misc]
+class LifecycleMachine:
     """Strict lifecycle transition engine used by RuntimeKernel.
 
-    The class is intentionally small: LangGraph still executes work nodes, while
-    this layer decides whether transitions such as execute->publish or
-    acceptance->finalize are legal under typed facts and OPA/Rego policy gates.
+    LangGraph executes work nodes. This layer owns the lifecycle transition
+    decisions and policy gates. It deliberately does **not** inherit from
+    ``python-statemachine``: the external library requires declarative class-level
+    states/transitions and raises ``InvalidDefinition`` for programmatic transition
+    engines like this one. Keeping this class as a plain policy-backed engine makes
+    controller construction deterministic whether the optional dependency is
+    installed or not.
     """
 
     def __init__(self, *, policy_evaluator: OpaPolicyEvaluator | None = None) -> None:
-        # External python-statemachine may define its own __init__; object does not need it.
-        try:
-            super().__init__()  # type: ignore[misc]
-        except TypeError:
-            pass
         self.policy_evaluator = policy_evaluator or OpaPolicyEvaluator()
 
     def transition(self, *, from_stage: LifecycleStage, event: LifecycleEvent, facts: LifecycleFacts) -> LifecycleTransitionDecision:
