@@ -1,28 +1,50 @@
 from __future__ import annotations
 
-from artifact_workflow_runtime.models import Capability
+from dataclasses import dataclass
+
+from artifact_workflow_runtime.models import Capability, VerificationMode
 from artifact_workflow_runtime.models import (
     ApprovalRequest,
     ExecutionPlan,
     ExecutionResult,
     ObservationResult,
     PolicyDecision,
+    PublishResult,
     RoutingDecision,
     TaskClassification,
 )
+from artifact_workflow_runtime.models.state import ControllerDecision
 from artifact_workflow_runtime.policy import PolicyEngine
 from artifact_workflow_runtime.policy.evidence import EvidenceGate
+
+
+@dataclass(frozen=True, slots=True)
+class VerificationStrategy:
+    mode: VerificationMode
+    per_check: bool
+    requires_world_check: bool
+    reason: str
 
 
 class RuntimeKernel:
     """Controller decision kernel used by the LangGraph runtime.
 
     LangGraph executes nodes and persists state transitions; this object owns the
-    workflow decisions that should not live in OpenHands prompts.
+    workflow decisions that should not live in OpenHands prompts. OpenHands can
+    return hints/evidence, but this kernel decides which workflow edge is taken.
     """
 
     def __init__(self, *, evidence_gate: EvidenceGate | None = None) -> None:
         self.evidence_gate = evidence_gate or EvidenceGate()
+
+    def controller_decision(self, *, stage: str, selected_next_stage: str, reason: str, required_state_fields: list[str] | None = None, missing_state_fields: list[str] | None = None) -> ControllerDecision:
+        return ControllerDecision(
+            stage=stage,
+            selected_next_stage=selected_next_stage,
+            reason=reason,
+            required_state_fields=required_state_fields or [],
+            missing_state_fields=missing_state_fields or [],
+        )
 
     def next_after_route(self, decision: RoutingDecision) -> str:
         if decision.needs_fresh_external_research:
@@ -35,6 +57,14 @@ class RuntimeKernel:
         if decision.needs_repository_observation or decision.needs_world_observation:
             return "observe"
         return "build_context"
+
+    def can_plan(self, *, route: RoutingDecision, research: ObservationResult | None, observation: ObservationResult | None) -> tuple[bool, list[str]]:
+        missing: list[str] = []
+        if route.needs_fresh_external_research and research is None:
+            missing.append("research_result")
+        if (route.needs_repository_observation or route.needs_world_observation) and observation is None:
+            missing.append("observation_result")
+        return not missing, missing
 
     def evaluate_policy(
         self,
@@ -84,6 +114,40 @@ class RuntimeKernel:
         if execution.ok and _publish_required(plan):
             return "publish"
         return "verify"
+
+    def verification_strategy(
+        self,
+        *,
+        plan: ExecutionPlan,
+        execution: ExecutionResult,
+        publish: PublishResult | None = None,
+        per_check_routing_enabled: bool = False,
+    ) -> VerificationStrategy:
+        if not execution.ok:
+            return VerificationStrategy(
+                mode=VerificationMode.EVIDENCE_REVIEW,
+                per_check=False,
+                requires_world_check=False,
+                reason="Execution failed or returned unusable evidence; controller will use evidence guard verification.",
+            )
+        verification_text = " ".join([*plan.verification_checks, *plan.required_test_levels, plan.execution_environment]).lower()
+        requires_world_check = any(
+            marker in verification_text
+            for marker in ("world_check", "real_world", "postcheck_in_environment", "cluster live", "host live", "kubectl live", "ansible live", "ssh live")
+        ) and publish is None
+        if requires_world_check:
+            return VerificationStrategy(
+                mode=VerificationMode.WORLD_CHECK,
+                per_check=False,
+                requires_world_check=True,
+                reason="Plan declares verification that requires runtime/world access after execution evidence.",
+            )
+        return VerificationStrategy(
+            mode=VerificationMode.EVIDENCE_REVIEW,
+            per_check=bool(per_check_routing_enabled and plan.verification_checks),
+            requires_world_check=False,
+            reason="Verification can be completed as Direct LLM evidence review over artifacts/context.",
+        )
 
 
 _ALLOWED_INTENTS = {"implement", "modify", "investigate", "document", "verify"}

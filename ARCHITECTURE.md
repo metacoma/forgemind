@@ -23,7 +23,7 @@ User task
 
 `WorkflowController` is the public runtime entrypoint. It wires services, creates the file-backed `ArtifactStore`, installs `RuntimeKernel`, and invokes the graph with a serializable initial state.
 
-It does not delegate global workflow ownership to OpenHands.
+It does not delegate global workflow ownership to OpenHands. It starts the graph from a typed `WorkflowStateSnapshot` and persists the final state snapshot as an artifact so state is not only an ephemeral LangGraph dictionary.
 
 ### RuntimeKernel
 
@@ -35,6 +35,7 @@ It does not delegate global workflow ownership to OpenHands.
 - after approval: execute or finalize
 - after execution: publish or verify
 - policy gate evaluation before OpenHands execution
+- verification strategy selection: Direct LLM evidence review vs bounded OpenHands world check
 
 LangGraph executes these decisions; OpenHands does not make them.
 
@@ -50,7 +51,7 @@ When the optional `langgraph` dependency is unavailable, `graph.compat` provides
 
 `llm_backend.OpenAICompatibleLLMBackend` accepts `LLMRequest` and returns typed `LLMResult` plus a validated pydantic model.
 
-`LLMRequest` is text-only and declares forbidden inputs:
+`LLMRequest` is text-only and declares `task_text`, `instructions`, `input_artifact_ids`, `allowed_inputs`, and forbidden inputs:
 
 - filesystem
 - shell
@@ -81,7 +82,9 @@ Typed request contracts now carry backend/work-packet boundaries:
 - `ExecutionRequest.work_packet_kind = execute | publish`
 - `VerificationRequest.work_packet_kind = verify`
 
-Requests also declare allowed actions, forbidden actions, expected outputs, capabilities, and metadata. This makes backend boundaries explicit instead of hiding them only inside prompt prose.
+Requests also declare objectives, allowed actions, forbidden actions, expected outputs, capabilities, scope constraints, and metadata. This makes backend boundaries explicit instead of hiding them only inside prompt prose.
+
+`OpenHandsAdapter` validates those contracts: observation packets cannot allow mutation, execution packets must forbid workflow-decision changes, and `verify()` accepts only `backend=openhands` + `mode=world_check`.
 
 ## State and artifacts
 
@@ -90,10 +93,20 @@ Requests also declare allowed actions, forbidden actions, expected outputs, capa
 `artifacts.ArtifactStore` is a file-backed source of truth. It writes:
 
 - text evidence
+- structured evidence bundles
 - JSON model dumps
+- final workflow state snapshots
 - an `index.json` registry
 
 Graph state keeps artifact ids and typed model dumps. Later stages rebuild context from artifacts rather than relying on invisible prior prompt state.
+
+### WorkflowStateSnapshot
+
+`models.state.WorkflowStateSnapshot` is the typed durable state model. LangGraph still uses a `TypedDict` wire state for compatibility, but the controller and tests validate it through the pydantic snapshot. The snapshot includes typed request/result models, controller decisions, transitions, artifact ids, status, and errors.
+
+### StructuredEvidence
+
+`evidence.EvidenceExtractor` converts raw OpenHands text into `StructuredEvidence` and an `EvidenceBundle`. The bundle tracks commands run, files changed, files observed, extracted facts, diffs, tests/checks, blockers, mutation summary, and postcheck summary. This keeps OpenHands as a world-access backend while giving subsequent runtime stages machine-usable evidence.
 
 ### ContextPacket
 
@@ -126,11 +139,10 @@ Graph state keeps artifact ids and typed model dumps. Later stages rebuild conte
 The current implementation is now structurally runnable and closer to the target control-plane model, but several deeper improvements remain:
 
 1. Replace remaining long prompt strings in graph nodes with dedicated prompt/work-packet builders.
-2. Store richer structured evidence bundles, not only text artifacts plus summaries.
-3. Add repair-loop state for failed verification and bounded re-execution.
-4. Add real human approval backends.
-5. Add persistent workflow resume from `ArtifactStore.index.json`.
-6. Split verification into rule-based evidence checks plus Direct LLM judgment more cleanly.
+2. Add repair-loop state for failed verification and bounded re-execution.
+3. Add real human approval backends.
+4. Add persistent workflow resume from `ArtifactStore.index.json` and `workflow_state_snapshot` artifacts.
+5. Split verification into richer rule-based evidence checks plus Direct LLM judgment.
 
 
 ## Verification check routing

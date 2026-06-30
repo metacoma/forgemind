@@ -17,6 +17,7 @@ from artifact_workflow_runtime.llm_backend.prompts import (
 )
 from artifact_workflow_runtime.models import (
     ApprovalRequest,
+    BackendKind,
     Capability,
     ContextPacket,
     EvidenceVerification,
@@ -34,8 +35,10 @@ from artifact_workflow_runtime.models import (
     TaskClassification,
     VerificationCheckRequest,
     VerificationCheckResult,
+    VerificationMode,
     VerificationRequest,
     VerificationResult,
+    WorkPacketKind,
 )
 from artifact_workflow_runtime.models.state import WorkflowState
 from artifact_workflow_runtime.observation import ObservationService
@@ -162,7 +165,10 @@ async def _run_check_routed_verification(
             kind="verification_check",
             prompt=check_request.prompt,
             task_id=task.id,
+            task_text=task.description,
             context_packet_id=context_packet.id,
+            input_artifact_ids=list(artifact_ids),
+            instructions=["review only provided evidence", "do not infer filesystem/runtime state"],
             metadata={
                 **check_request.metadata,
                 "verification_check_request_id": check_request.id,
@@ -265,6 +271,8 @@ async def _run_check_routed_verification(
     request = VerificationRequest(
         execution_result_id=execution.id,
         execution_family=plan.execution_family,
+        backend=BackendKind.DIRECT_LLM,
+        mode=VerificationMode.EVIDENCE_REVIEW,
         prompt="per_check_evidence_verification",
         artifact_ids=artifact_ids,
         checks=list(plan.verification_checks),
@@ -319,7 +327,14 @@ def build_workflow_graph(services: WorkflowServices):
     async def classify_node(state: WorkflowState) -> dict[str, Any]:
         task = Task.model_validate(state["task"])
         await _emit(services, "stage_started", "classify", "Sending task to Direct LLM for triage", task_id=task.id)
-        request = LLMRequest(kind="classification", prompt=build_classification_prompt(task), task_id=task.id, metadata={"model_slot": "classify", "model_override": _llm_model_for(services, "classify")})
+        request = LLMRequest(
+            kind="classification",
+            prompt=build_classification_prompt(task),
+            task_id=task.id,
+            task_text=task.description,
+            instructions=["classify task intent", "declare whether world facts are needed"],
+            metadata={"model_slot": "classify", "model_override": _llm_model_for(services, "classify")},
+        )
         result, parsed = await services.llm_backend.complete_json(request, TaskClassification)
         artifact = services.artifact_store.add_json("classification", parsed.model_dump(mode="json"))
         await _emit(
@@ -344,7 +359,14 @@ def build_workflow_graph(services: WorkflowServices):
         task = Task.model_validate(state["task"])
         classification = TaskClassification.model_validate(state["classification"])
         await _emit(services, "stage_started", "route", "Analyzing evidence requirements before planning", task_id=task.id)
-        request = LLMRequest(kind="route_analysis", prompt=build_route_prompt(task, classification), task_id=task.id, metadata={"model_slot": "route", "model_override": _llm_model_for(services, "route")})
+        request = LLMRequest(
+            kind="route_analysis",
+            prompt=build_route_prompt(task, classification),
+            task_id=task.id,
+            task_text=task.description,
+            instructions=["decide required evidence", "do not plan implementation"],
+            metadata={"model_slot": "route", "model_override": _llm_model_for(services, "route")},
+        )
         result, parsed = await services.llm_backend.complete_json(request, RoutingDecision)
         artifact = services.artifact_store.add_json("route_decision", parsed.model_dump(mode="json"))
         await _emit(
@@ -473,7 +495,10 @@ def build_workflow_graph(services: WorkflowServices):
             kind="obligation_analysis",
             prompt=build_obligation_analysis_prompt(task, classification, route, context_packet),
             task_id=task.id,
+            task_text=task.description,
             context_packet_id=context_packet.id,
+            input_artifact_ids=list(context_packet.artifact_ids),
+            instructions=["derive obligations only from the context packet", "return structured completion requirements"],
             metadata={"model_slot": "obligations", "model_override": _llm_model_for(services, "obligations")},
         )
         result, parsed = await services.llm_backend.complete_json(request, ObligationAnalysis)
@@ -512,7 +537,10 @@ def build_workflow_graph(services: WorkflowServices):
             kind="planning",
             prompt=build_plan_prompt(task, context_packet, _effective_task_intent(classification), obligations),
             task_id=task.id,
+            task_text=task.description,
             context_packet_id=context_packet.id,
+            input_artifact_ids=list(context_packet.artifact_ids),
+            instructions=["plan from typed obligations and context packet", "do not assume unobserved world facts"],
             metadata={"model_slot": "plan", "model_override": _llm_model_for(services, "plan")},
         )
         result, parsed = await services.llm_backend.complete_json(request, ExecutionPlan)
@@ -630,6 +658,11 @@ def build_workflow_graph(services: WorkflowServices):
             execution_family=plan.execution_family,
             capabilities=plan.capabilities,
             prompt=prompt,
+            objective="execute approved controller plan",
+            plan_steps=list(plan.steps),
+            expected_changes=list(plan.expected_repo_changes),
+            verification_commands=list(plan.verification_checks),
+            scope_constraints=["do not choose next workflow step", "do not expand task scope", "collect structured evidence"],
             plan_summary=plan.summary,
             context_packet_id=context_packet.id if context_packet else None,
             artifact_ids=list(state.get("artifact_ids") or []),
@@ -704,8 +737,14 @@ def build_workflow_graph(services: WorkflowServices):
             ExecutionRequest(
                 task_id=task.id,
                 execution_family=plan.execution_family,
+                work_packet_kind=WorkPacketKind.PUBLISH,
                 capabilities=_publish_capabilities(plan),
                 prompt=prompt,
+                objective="complete commit/push/PR obligations only",
+                plan_steps=list(plan.publication_steps),
+                expected_changes=[],
+                verification_commands=list(plan.verification_checks),
+                scope_constraints=["do not choose next workflow step", "do not reimplement except minimal CI repair", "do not expand task scope"],
                 plan_summary="publish obligations",
                 context_packet_id=state.get("context_packet", {}).get("id") if isinstance(state.get("context_packet"), dict) else None,
                 artifact_ids=list(state.get("artifact_ids") or []),
@@ -753,6 +792,8 @@ def build_workflow_graph(services: WorkflowServices):
         request = VerificationRequest(
             execution_result_id=execution.id,
             execution_family=plan.execution_family,
+            backend=BackendKind.DIRECT_LLM,
+            mode=VerificationMode.EVIDENCE_REVIEW,
             prompt="evidence_verification",
             artifact_ids=artifact_ids,
             checks=list(plan.verification_checks),
@@ -826,7 +867,39 @@ def build_workflow_graph(services: WorkflowServices):
             if context_packet_raw is None:
                 raise RuntimeError("context_packet missing")
             context_packet = ContextPacket.model_validate(context_packet_raw)
-            if services.model_routing and services.model_routing.verification_checks and plan.verification_checks:
+            kernel = services.runtime_kernel or RuntimeKernel()
+            strategy = kernel.verification_strategy(
+                plan=plan,
+                execution=execution,
+                publish=publish,
+                per_check_routing_enabled=bool(services.model_routing and services.model_routing.verification_checks),
+            )
+            if strategy.requires_world_check:
+                prompt = (
+                    "You are performing a bounded world verification packet for the controller.\n"
+                    "Do not choose the next workflow step. Do not expand task scope. Do not publish.\n"
+                    "Run only the checks requested by the controller and report commands, outputs, statuses, blockers, and missing evidence.\n\n"
+                    f"Task: {task.description}\n\n"
+                    f"ContextPacket:\n{context_packet.text}\n\n"
+                    f"Execution summary: {execution.summary}\n"
+                    f"Checks: {plan.verification_checks}\n"
+                )
+                request = VerificationRequest(
+                    execution_result_id=execution.id,
+                    execution_family=plan.execution_family,
+                    backend=BackendKind.OPENHANDS,
+                    mode=VerificationMode.WORLD_CHECK,
+                    prompt=prompt,
+                    artifact_ids=artifact_ids,
+                    checks=list(plan.verification_checks),
+                    allowed_inputs=["filesystem", "shell", "git", "test_runtime", "context_packet_text"],
+                    forbidden_inputs=["change_workflow_decision", "expand_task_scope", "publish", "mutate_without_explicit_check_need"],
+                    expected_outputs=["commands_run", "check_statuses", "outputs", "blockers", "missing_evidence"],
+                    metadata={"mode": "world_check", "controller_reason": strategy.reason, "model_slot": "verify", "model_override": _openhands_model_for(services, "verify")},
+                )
+                result = await services.openhands_adapter.verify(request)
+                artifact_ids.extend(artifact.id for artifact in result.artifacts)
+            elif strategy.per_check:
                 request, result, artifact_ids, check_requests, check_results = await _run_check_routed_verification(
                     services,
                     task=task,
@@ -842,7 +915,10 @@ def build_workflow_graph(services: WorkflowServices):
                     kind="verification",
                     prompt=build_verification_prompt(task, context_packet, plan, execution, publish),
                     task_id=task.id,
+                    task_text=task.description,
                     context_packet_id=context_packet.id,
+                    input_artifact_ids=list(artifact_ids),
+                    instructions=["review structured artifacts and evidence text only", "separate missing evidence from failed checks"],
                     metadata={"model_slot": "verify", "model_override": _llm_model_for(services, "verify")},
                 )
                 llm_result, parsed = await services.llm_backend.complete_json(llm_request, EvidenceVerification)
@@ -870,6 +946,8 @@ def build_workflow_graph(services: WorkflowServices):
                 request = VerificationRequest(
                     execution_result_id=execution.id,
                     execution_family=plan.execution_family,
+                    backend=BackendKind.DIRECT_LLM,
+                    mode=VerificationMode.EVIDENCE_REVIEW,
                     prompt=llm_request.prompt,
                     artifact_ids=artifact_ids,
                     checks=list(plan.verification_checks),

@@ -1,3 +1,3 @@
-from .kernel import RuntimeKernel
+from .kernel import RuntimeKernel, VerificationStrategy
 
-__all__ = ["RuntimeKernel"]
+__all__ = ["RuntimeKernel", "VerificationStrategy"]

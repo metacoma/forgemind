@@ -105,6 +105,11 @@ class WorkPacketKind(str, Enum):
     VERIFY = "verify"
 
 
+class VerificationMode(str, Enum):
+    EVIDENCE_REVIEW = "evidence_review"
+    WORLD_CHECK = "world_check"
+
+
 class Task(RuntimeModel):
     id: str = Field(default_factory=lambda: new_id("task"))
     title: str | None = None
@@ -123,6 +128,74 @@ class Artifact(RuntimeModel):
     metadata: JsonDict = Field(default_factory=dict)
 
 
+class CommandEvidence(RuntimeModel):
+    command: str
+    cwd: str | None = None
+    exit_code: int | None = None
+    output_excerpt: str | None = None
+    output_artifact_ids: list[str] = Field(default_factory=list)
+
+
+class FileEvidence(RuntimeModel):
+    path: str
+    action: str = "observed"
+    summary: str | None = None
+    artifact_ids: list[str] = Field(default_factory=list)
+
+
+class ExtractedFact(RuntimeModel):
+    subject: str
+    fact: str
+    source: str | None = None
+    confidence: str = "medium"
+    artifact_ids: list[str] = Field(default_factory=list)
+
+
+class DiffEvidence(RuntimeModel):
+    path: str | None = None
+    summary: str
+    diff_artifact_ids: list[str] = Field(default_factory=list)
+
+
+class TestCheckEvidence(RuntimeModel):
+    name: str
+    command: str | None = None
+    passed: bool | None = None
+    status: str = "unknown"
+    output_excerpt: str | None = None
+    artifact_ids: list[str] = Field(default_factory=list)
+
+
+class BlockerEvidence(RuntimeModel):
+    summary: str
+    severity: str = "medium"
+    artifact_ids: list[str] = Field(default_factory=list)
+
+
+class MutationSummary(RuntimeModel):
+    changed: bool = False
+    summary: str = ""
+    files_changed: list[str] = Field(default_factory=list)
+
+
+class PostcheckSummary(RuntimeModel):
+    attempted: bool = False
+    summary: str = ""
+    checks: list[TestCheckEvidence] = Field(default_factory=list)
+
+
+class StructuredEvidence(RuntimeModel):
+    commands_run: list[CommandEvidence] = Field(default_factory=list)
+    files_changed: list[FileEvidence] = Field(default_factory=list)
+    files_observed: list[FileEvidence] = Field(default_factory=list)
+    extracted_facts: list[ExtractedFact] = Field(default_factory=list)
+    diffs: list[DiffEvidence] = Field(default_factory=list)
+    tests: list[TestCheckEvidence] = Field(default_factory=list)
+    blockers: list[BlockerEvidence] = Field(default_factory=list)
+    mutation_summary: MutationSummary = Field(default_factory=MutationSummary)
+    postcheck_summary: PostcheckSummary = Field(default_factory=PostcheckSummary)
+
+
 class EvidenceBundle(RuntimeModel):
     id: str = Field(default_factory=lambda: new_id("evidence"))
     source_backend: BackendKind
@@ -130,6 +203,7 @@ class EvidenceBundle(RuntimeModel):
     ok: bool
     summary: str
     artifact_ids: list[str] = Field(default_factory=list)
+    structured: StructuredEvidence = Field(default_factory=StructuredEvidence)
     evidence_kind: str = "agent_text"
     blockers: list[str] = Field(default_factory=list)
     created_at: str = Field(default_factory=utc_now)
@@ -199,6 +273,10 @@ class ObservationRequest(RuntimeModel):
     work_packet_kind: WorkPacketKind = WorkPacketKind.OBSERVE
     capabilities: list[Capability] = Field(default_factory=list)
     prompt: str
+    objective: str = "collect world facts"
+    focus: list[str] = Field(default_factory=list)
+    required_facts: list[str] = Field(default_factory=list)
+    scope_constraints: list[str] = Field(default_factory=list)
     allowed_actions: list[str] = Field(default_factory=lambda: ["read_files", "run_read_only_commands", "inspect_repo", "inspect_runtime_state"] )
     forbidden_actions: list[str] = Field(default_factory=lambda: ["edit_files", "commit", "push", "apply_cluster_changes", "change_host_config"] )
     expected_outputs: list[str] = Field(default_factory=lambda: ["facts", "commands_run", "outputs", "blockers", "unknowns"] )
@@ -217,6 +295,8 @@ class ObservationResult(RuntimeModel):
     summary: str
     evidence_text: str
     artifacts: list[Artifact] = Field(default_factory=list)
+    structured_evidence: StructuredEvidence | None = None
+    evidence_bundle: EvidenceBundle | None = None
     conversation_id: str | None = None
     transport_error: bool = False
     evidence_kind: str = "agent_text"
@@ -228,6 +308,9 @@ class LLMRequest(RuntimeModel):
     kind: str
     prompt: str
     task_id: str
+    task_text: str | None = None
+    instructions: list[str] = Field(default_factory=list)
+    input_artifact_ids: list[str] = Field(default_factory=list)
     backend: BackendKind = BackendKind.DIRECT_LLM
     context_packet_id: str | None = None
     response_schema: str | None = None
@@ -308,6 +391,11 @@ class ExecutionRequest(RuntimeModel):
     work_packet_kind: WorkPacketKind = WorkPacketKind.EXECUTE
     capabilities: list[Capability] = Field(default_factory=list)
     prompt: str
+    objective: str = "execute approved plan"
+    plan_steps: list[str] = Field(default_factory=list)
+    expected_changes: list[str] = Field(default_factory=list)
+    verification_commands: list[str] = Field(default_factory=list)
+    scope_constraints: list[str] = Field(default_factory=list)
     plan_summary: str | None = None
     context_packet_id: str | None = None
     artifact_ids: list[str] = Field(default_factory=list)
@@ -330,6 +418,8 @@ class ExecutionResult(RuntimeModel):
     summary: str
     evidence_text: str
     artifacts: list[Artifact] = Field(default_factory=list)
+    structured_evidence: StructuredEvidence | None = None
+    evidence_bundle: EvidenceBundle | None = None
     conversation_id: str | None = None
     transport_error: bool = False
     evidence_kind: str = "agent_text"
@@ -342,6 +432,9 @@ class PublishRequest(RuntimeModel):
     task_id: str
     work_packet_kind: WorkPacketKind = WorkPacketKind.PUBLISH
     prompt: str
+    objective: str = "complete repository publication obligations"
+    allowed_actions: list[str] = Field(default_factory=lambda: ["inspect_git", "commit_when_required", "push_when_required", "inspect_pr_checks", "collect_evidence"] )
+    forbidden_actions: list[str] = Field(default_factory=lambda: ["change_workflow_decision", "expand_task_scope", "skip_required_pr_checks"] )
     require_commit: bool = False
     require_push: bool = False
     artifact_ids: list[str] = Field(default_factory=list)
@@ -356,6 +449,8 @@ class PublishResult(RuntimeModel):
     summary: str
     evidence_text: str
     artifacts: list[Artifact] = Field(default_factory=list)
+    structured_evidence: StructuredEvidence | None = None
+    evidence_bundle: EvidenceBundle | None = None
     conversation_id: str | None = None
     transport_error: bool = False
     evidence_kind: str = "agent_text"
@@ -400,9 +495,14 @@ class VerificationRequest(RuntimeModel):
     execution_result_id: str
     execution_family: ExecutionFamily
     work_packet_kind: WorkPacketKind = WorkPacketKind.VERIFY
+    backend: BackendKind = BackendKind.DIRECT_LLM
+    mode: VerificationMode = VerificationMode.EVIDENCE_REVIEW
     prompt: str
     artifact_ids: list[str] = Field(default_factory=list)
     checks: list[str] = Field(default_factory=list)
+    allowed_inputs: list[str] = Field(default_factory=lambda: ["task_text", "context_packet_text", "structured_evidence", "artifact_text"] )
+    forbidden_inputs: list[str] = Field(default_factory=lambda: ["filesystem", "shell", "git", "hosts", "kubernetes", "network_runtime_state"] )
+    expected_outputs: list[str] = Field(default_factory=lambda: ["checks_passed", "checks_failed", "missing_evidence", "completion_status"] )
     metadata: JsonDict = Field(default_factory=dict)
 
 
@@ -438,7 +538,10 @@ class VerificationResult(RuntimeModel):
     summary: str
     evidence_text: str
     artifacts: list[Artifact] = Field(default_factory=list)
+    structured_evidence: StructuredEvidence | None = None
+    evidence_bundle: EvidenceBundle | None = None
     conversation_id: str | None = None
+    mode: VerificationMode = VerificationMode.EVIDENCE_REVIEW
     checks_passed: list[str] = Field(default_factory=list)
     checks_failed: list[str] = Field(default_factory=list)
     missing_evidence: list[str] = Field(default_factory=list)

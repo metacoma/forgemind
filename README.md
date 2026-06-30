@@ -8,7 +8,8 @@ The current codebase is no longer organized around roles. It is organized around
 - **LangGraph** runs the state machine.
 - **Direct LLM backend** receives text-only `LLMRequest` packets.
 - **OpenHands backend** receives bounded `observe`, `research`, `execute`, `publish`, or `verify` work packets.
-- **ArtifactStore + WorkflowState** are the source of truth.
+- **ArtifactStore + typed WorkflowStateSnapshot** are the source of truth.
+- **StructuredEvidence / EvidenceBundle** converts raw agent text into machine-usable evidence.
 - **ContextBuilder** converts persisted artifacts into a text-only `ContextPacket` for Direct LLM reasoning.
 - **PolicyEngine / EvidenceGate / ApprovalProvider** are separate control layers.
 
@@ -21,6 +22,7 @@ src/artifact_workflow_runtime/
   graph/               # LangGraph workflow + offline compat state graph
   models/              # Pydantic typed contracts and WorkflowState
   artifacts/           # file-backed ArtifactStore and index
+  evidence/            # raw OpenHands text -> structured evidence bundles
   context/             # artifacts -> ContextPacket text bridge
   llm_backend/         # text-only Direct LLM adapters and fake backend
   openhands_adapter/   # bounded OpenHands observe/execute/verify adapter
@@ -48,15 +50,15 @@ src/artifact_workflow_runtime/
 
 ### Direct LLM
 
-The Direct LLM gets only text. Its request contract includes forbidden inputs such as filesystem, shell, git, host, Kubernetes, and network runtime state. It must not be given live world access.
+The Direct LLM gets only text. `LLMRequest` now carries explicit `task_text`, `instructions`, `input_artifact_ids`, `allowed_inputs`, and `forbidden_inputs` in addition to the rendered prompt string used by the transport adapter. Its forbidden inputs include filesystem, shell, git, host, Kubernetes, and network runtime state. It must not be given live world access.
 
 ### OpenHands
 
-OpenHands is not the workflow brain. It receives bounded work packets and returns evidence/artifacts/blockers. It does not decide the next graph step.
+OpenHands is not the workflow brain. It receives bounded work packets and returns evidence/artifacts/blockers. The adapter validates observe/execute/world-verification packet kinds, rejects mutating observation contracts, and stores raw plus structured evidence artifacts. It does not decide the next graph step.
 
-### Artifacts and state
+### Artifacts, evidence, and state
 
-Every meaningful step writes typed records or evidence files to `ArtifactStore`. `WorkflowState` stores serializable model dumps plus artifact ids; runtime services are injected separately.
+Every meaningful step writes typed records or evidence files to `ArtifactStore`. `WorkflowStateSnapshot` validates the LangGraph wire state as typed durable runtime state, and the controller persists a final `workflow_state_snapshot` artifact for debugging/resume work. OpenHands text evidence is also converted into `StructuredEvidence` / `EvidenceBundle` records containing commands, file observations/changes, facts, diffs, tests/checks, blockers, mutation summaries, and postcheck summaries.
 
 ## Installation
 
@@ -121,4 +123,4 @@ Legacy `roles:` configs are rejected.
 python -m pytest -q
 ```
 
-The current test suite covers capability normalization, per-stage and per-verification-check model routing, OpenHands transport fallback, sandbox reuse, runtime events, policy gating, research/observation routing, publish obligations, and verification behavior.
+The current test suite covers capability normalization, typed state validation, structured evidence extraction, per-stage and per-verification-check model routing, OpenHands transport fallback, sandbox reuse, runtime events, policy gating, research/observation routing, publish obligations, and verification behavior.

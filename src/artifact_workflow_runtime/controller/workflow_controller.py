@@ -7,6 +7,7 @@ from artifact_workflow_runtime.context import ContextBuilder
 from artifact_workflow_runtime.control_plane import RuntimeKernel
 from artifact_workflow_runtime.graph import WorkflowServices, build_workflow_graph
 from artifact_workflow_runtime.models import FinalReport, Task
+from artifact_workflow_runtime.models.state import WorkflowStateSnapshot, validate_workflow_state
 from artifact_workflow_runtime.observation import ObservationService
 from artifact_workflow_runtime.policy import ApprovalProvider, PolicyEngine
 from artifact_workflow_runtime.reports import FinalReportBuilder
@@ -36,11 +37,13 @@ class WorkflowController:
         self.graph = build_workflow_graph(self.services)
 
     async def run(self, task: Task) -> FinalReport:
-        initial_state = {
-            "task": task.model_dump(mode="json"),
-            "artifact_ids": [],
-            "errors": [],
-            "status": "created",
-        }
-        result_state = await self.graph.ainvoke(initial_state)
-        return FinalReport.model_validate(result_state["final_report"])
+        initial_snapshot = WorkflowStateSnapshot(task=task)
+        result_state = await self.graph.ainvoke(initial_snapshot.to_graph_state())
+        final_snapshot = validate_workflow_state(result_state)
+        # Persist the typed state snapshot as a durable runtime artifact. The final
+        # report remains the public result, but the state artifact is the process
+        # source of truth for debugging, repair loops, and future resumability.
+        self.artifact_store.add_json("workflow_state_snapshot", final_snapshot.model_dump(mode="json"), metadata={"task_id": task.id})
+        if final_snapshot.final_report is None:
+            raise RuntimeError("workflow finished without a final_report")
+        return final_snapshot.final_report

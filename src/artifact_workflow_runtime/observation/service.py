@@ -15,6 +15,10 @@ class ObservationService:
             execution_family=classification.execution_family,
             capabilities=classification.capabilities,
             prompt=prompt,
+            objective="collect controller-requested world facts without mutation",
+            focus=focus_items or ["collect the minimum world facts needed"],
+            required_facts=list(route.required_evidence_types) if route is not None else [],
+            scope_constraints=["observe only", "do not plan", "do not mutate repository/hosts/cluster"],
             metadata={"mode": "observe_only", "evidence_required": True},
         )
 
@@ -47,6 +51,10 @@ class ObservationService:
             execution_family=classification.execution_family,
             capabilities=[],
             prompt=prompt,
+            objective="collect fresh external source-backed facts without local mutation",
+            focus=list(route.research_targets),
+            required_facts=list(route.required_evidence_types),
+            scope_constraints=["official sources preferred", "observe only", "do not produce a plan"],
             work_packet_kind=WorkPacketKind.RESEARCH,
             allowed_actions=["internet_research", "read_official_docs", "inspect_public_metadata", "collect_source_attribution"],
             forbidden_actions=["edit_files", "commit", "push", "change_hosts", "change_cluster_state"],
