@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 import inspect
 import json
 import sys
+from dataclasses import replace
 from typing import Any, AsyncIterator
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -665,16 +665,7 @@ class OpenHandsClient:
         *,
         verbose: bool = False,
     ) -> AppConversationStart:
-        """Refresh runtime URL/session fields for a conversation if available.
-
-        Follow-up calls should avoid extra metadata round-trips when the
-        conversation already contains enough websocket/auth information. This
-        keeps the existing-conversation path simple and avoids turning a working
-        chat thread into a follow-up failure because of an auxiliary refresh
-        request.
-        """
-        if (conversation.session_api_key and conversation.conversation_url) or (conversation.session_api_key and conversation.agent_server_url):
-            return conversation
+        """Refresh runtime URL/session fields for a conversation if available."""
         try:
             info = await self.get_app_conversation(conversation.conversation_id)
         except OpenHandsError as exc:

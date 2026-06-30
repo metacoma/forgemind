@@ -104,47 +104,24 @@ async def test_fetch_final_text_fallback_ignores_json_wrapped_openhands_html(mon
     assert await client.fetch_final_text_fallback(start) == ""
 
 
-async def test_refresh_app_conversation_start_metadata_uses_dataclass_replace(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = OpenHandsClient("http://openhands")
+async def test_refresh_app_conversation_start_metadata_keeps_dataclass_compatible(fake_openhands_server) -> None:
+    client = OpenHandsClient(fake_openhands_server.endpoint)
+    start = AppConversationStart(
+        conversation_id=fake_openhands_server.conversation_id,
+        conversation_url="http://stale/conversation",
+        agent_server_url=None,
+        session_api_key=None,
+    )
 
-    async def fake_get_app_conversation(conversation_id: str):
-        assert conversation_id == "conv-1"
-        return {
-            "conversation_url": "http://openhands/api/conversations/conv-1",
-            "agent_server_url": "http://runtime:3000",
-            "session_api_key": "session-key",
-        }
-
-    monkeypatch.setattr(client, "get_app_conversation", fake_get_app_conversation)
-
-    start = AppConversationStart(conversation_id="conv-1", status="READY")
     refreshed = await client._refresh_app_conversation_start_metadata(start)
 
     assert refreshed is not start
-    assert refreshed.conversation_url == "http://openhands/api/conversations/conv-1"
-    assert refreshed.agent_server_url == "http://runtime:3000"
-    assert refreshed.session_api_key == "session-key"
-    assert refreshed.raw_conversation == {
-        "conversation_url": "http://openhands/api/conversations/conv-1",
-        "agent_server_url": "http://runtime:3000",
-        "session_api_key": "session-key",
-    }
-    assert start.conversation_url is None
-
-
-async def test_refresh_app_conversation_start_metadata_skips_lookup_when_runtime_metadata_present(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = OpenHandsClient("http://openhands")
-
-    async def fail_get_app_conversation(conversation_id: str):
-        raise AssertionError("metadata refresh should have been skipped")
-
-    monkeypatch.setattr(client, "get_app_conversation", fail_get_app_conversation)
-
-    start = AppConversationStart(
-        conversation_id="conv-1",
-        conversation_url="http://openhands/api/conversations/conv-1",
-        session_api_key="session-key",
+    assert refreshed.conversation_id == start.conversation_id
+    assert refreshed.sandbox_id == start.sandbox_id
+    assert refreshed.conversation_url == (
+        f"{fake_openhands_server.endpoint}/api/conversations/"
+        f"{fake_openhands_server.conversation_id}"
     )
-    refreshed = await client._refresh_app_conversation_start_metadata(start)
-
-    assert refreshed is start
+    assert refreshed.agent_server_url == fake_openhands_server.endpoint
+    assert refreshed.session_api_key == "fake-session-key"
+    assert refreshed.raw_conversation is not None
