@@ -99,16 +99,8 @@ def merge_plan_with_obligations(plan: ExecutionPlan, obligations: ObligationAnal
     required_test_levels = _union_strings(plan.required_test_levels, obligations.required_test_levels)
     required_setup_steps = _union_strings(plan.required_setup_steps, obligations.required_setup_steps)
     environment_notes = _union_strings(plan.environment_notes, obligations.required_environment_conditions)
-    discovered_requirements = [
-        *obligations.completion_requirements,
-        *[f"documentation: {item}" for item in obligations.required_documentation_updates],
-        *[f"examples: {item}" for item in obligations.required_examples_updates],
-        *[f"ci/build: {item}" for item in obligations.required_ci_updates],
-        *[f"codegen/build tooling: {item}" for item in obligations.required_codegen_or_build_updates],
-        *[f"affected surface: {item}" for item in obligations.affected_surfaces],
-    ]
-    verification_checks = _union_strings(plan.verification_checks, discovered_requirements)
-    success_criteria = _union_strings(plan.success_criteria, discovered_requirements)
+    verification_checks = _union_strings(plan.verification_checks, obligations.completion_requirements)
+    success_criteria = _union_strings(plan.success_criteria, obligations.completion_requirements)
     require_commit = plan.require_commit or any(action in {"commit", "push", "create_pr", "wait_pr_checks", "fix_failing_pr_checks"} for action in obligations.required_publish_actions)
     require_push = plan.require_push or any(action in {"push", "create_pr", "wait_pr_checks", "fix_failing_pr_checks"} for action in obligations.required_publish_actions)
     publication_steps = _union_strings(plan.publication_steps, obligations.required_publish_actions)
@@ -121,5 +113,4 @@ def merge_plan_with_obligations(plan: ExecutionPlan, obligations: ObligationAnal
         "require_commit": require_commit,
         "require_push": require_push,
         "publication_steps": publication_steps,
-        "expected_repo_changes": _union_strings(plan.expected_repo_changes, [*obligations.required_documentation_updates, *obligations.required_examples_updates, *obligations.required_ci_updates, *obligations.required_codegen_or_build_updates]),
     })

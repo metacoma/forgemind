@@ -7,7 +7,6 @@ from artifact_workflow_runtime.context import ContextBuilder
 from artifact_workflow_runtime.control_plane import RuntimeKernel
 from artifact_workflow_runtime.graph import WorkflowServices, build_workflow_graph
 from artifact_workflow_runtime.models import FinalReport, Task
-from artifact_workflow_runtime.contracts import ContractViolationError
 from artifact_workflow_runtime.models.state import WorkflowStateSnapshot, validate_workflow_state
 from artifact_workflow_runtime.observation import ObservationService
 from artifact_workflow_runtime.policy import ApprovalProvider, PolicyEngine
@@ -31,7 +30,6 @@ class WorkflowController:
             final_report_builder=FinalReportBuilder(),
             event_sink=event_sink,
             model_routing=model_routing,
-            runtime_kernel=RuntimeKernel(),
         )
         if self.services.approval_provider is None:
             from artifact_workflow_runtime.policy import StaticApprovalProvider
@@ -40,23 +38,7 @@ class WorkflowController:
 
     async def run(self, task: Task) -> FinalReport:
         initial_snapshot = WorkflowStateSnapshot(task=task)
-        try:
-            result_state = await self.graph.ainvoke(initial_snapshot.to_graph_state())
-        except ContractViolationError as exc:
-            artifact = self.artifact_store.add_json(
-                "contract_violation",
-                exc.result.model_dump(mode="json"),
-                metadata={"task_id": task.id, "source": "direct_llm_contract_gateway"},
-            )
-            report = FinalReport(
-                task_id=task.id,
-                status="contract_violation",
-                summary=str(exc),
-                artifact_ids=[artifact.id],
-            )
-            self.artifact_store.add_json("final_report", report.model_dump(mode="json"), metadata={"task_id": task.id, "status": report.status})
-            self.artifact_store.add_json("workflow_state_snapshot", initial_snapshot.model_dump(mode="json"), metadata={"task_id": task.id, "status": "contract_violation"})
-            return report
+        result_state = await self.graph.ainvoke(initial_snapshot.to_graph_state())
         final_snapshot = validate_workflow_state(result_state)
         # Persist the typed state snapshot as a durable runtime artifact. The final
         # report remains the public result, but the state artifact is the process

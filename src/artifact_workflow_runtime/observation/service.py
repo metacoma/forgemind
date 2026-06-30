@@ -1,19 +1,6 @@
 from __future__ import annotations
 
-from artifact_workflow_runtime.models import Capability, ExecutionFamily, ObservationRequest, RoutingDecision, Task, TaskClassification, WorkPacketKind
-
-_READ_ONLY_CAPABILITIES = {
-    Capability.DOCUMENT_READ,
-    Capability.REPO_READ,
-    Capability.SHELL_READ,
-    Capability.GIT_READ,
-    Capability.K8S_READ,
-    Capability.NETWORK_DIAGNOSTICS,
-}
-
-
-def _read_only_capabilities(capabilities: list[Capability]) -> list[Capability]:
-    return [cap for cap in capabilities if cap in _READ_ONLY_CAPABILITIES]
+from artifact_workflow_runtime.models import ExecutionFamily, ObservationRequest, RoutingDecision, Task, TaskClassification, WorkPacketKind
 
 
 class ObservationService:
@@ -26,7 +13,7 @@ class ObservationService:
         return ObservationRequest(
             task_id=task.id,
             execution_family=classification.execution_family,
-            capabilities=_read_only_capabilities(classification.capabilities),
+            capabilities=classification.capabilities,
             prompt=prompt,
             objective="collect controller-requested world facts without mutation",
             focus=focus_items or ["collect the minimum world facts needed"],
@@ -70,7 +57,7 @@ class ObservationService:
             scope_constraints=["official sources preferred", "observe only", "do not produce a plan"],
             work_packet_kind=WorkPacketKind.RESEARCH,
             allowed_actions=["internet_research", "read_official_docs", "inspect_public_metadata", "collect_source_attribution"],
-            forbidden_actions=["edit_files", "write_files", "run_mutating_commands", "commit", "push", "git push", "git push --force", "git tag", "git merge", "git rebase", "create_pr", "open_pull_request", "publish", "release", "change_hosts", "change_cluster_state", "change_workflow_decision", "declare_task_completed_or_accepted"],
+            forbidden_actions=["edit_files", "commit", "push", "change_hosts", "change_cluster_state"],
             expected_outputs=["source_urls", "version_facts", "release_notes", "blockers", "unknowns"],
             metadata={
                 "mode": "observe_only",
