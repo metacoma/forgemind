@@ -37,6 +37,31 @@ class ProseThenJsonInstance(ProseOnlyInstance):
             start=conversation,
         )
 
+class ProseThenFencedJsonInstance(ProseOnlyInstance):
+    def __init__(self) -> None:
+        self.followup_prompts: list[str] = []
+
+    async def followup(self, *, conversation, prompt: str) -> OpenHandsRunResult:
+        self.followup_prompts.append(prompt)
+        return OpenHandsRunResult(
+            text="""``` json
+{
+  "summary": "execute summary",
+  "structured_evidence": {
+    "commands_run": [{"command": "pytest", "cwd": null, "exit_code": 0, "output_excerpt": "passed"}],
+    "files_changed": ["src/app.py"],
+    "tests": [{"name": "pytest", "status": "passed", "output_excerpt": "1 passed"}],
+    "mutation_summary": {"changed": true, "files_changed": ["src/app.py"], "summary": "modified src/app.py"},
+    "postcheck_summary": {"attempted": true, "checks": [], "summary": "pytest passed"},
+    "blockers": []
+  }
+}
+```""",
+            status="finished",
+            conversation_id=conversation.conversation_id,
+            start=conversation,
+        )
+
 
 def test_openhands_adapter_default_strict_evidence_rejects_prose_only_output(tmp_path) -> None:
     adapter = OpenHandsAdapter(ProseOnlyInstance(), ArtifactStore(tmp_path))
@@ -101,3 +126,24 @@ def test_openhands_adapter_retries_in_same_conversation_for_json_handoff(tmp_pat
     assert result.structured_evidence.commands_run[0].command == "pytest"
     assert instance.followup_prompts
     assert "Return JSON only." in instance.followup_prompts[0]
+
+
+def test_openhands_adapter_accepts_fenced_json_on_contract_repair_followup(tmp_path) -> None:
+    instance = ProseThenFencedJsonInstance()
+    adapter = OpenHandsAdapter(instance, ArtifactStore(tmp_path))
+    result = asyncio.run(
+        adapter.execute(
+            ExecutionRequest(
+                task_id="task",
+                execution_family=ExecutionFamily.REPOSITORY_CHANGE,
+                prompt="execute bounded packet",
+                expected_outputs=["changed_files", "commands_run", "test_results"],
+            )
+        )
+    )
+
+    assert result.ok is True
+    assert result.evidence_kind == "agent_text"
+    assert result.stage_failure is None
+    assert result.structured_evidence.commands_run[0].command == "pytest"
+    assert instance.followup_prompts

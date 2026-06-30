@@ -302,34 +302,32 @@ def _list(value: object) -> list[object]:
     return [value]
 
 
+_FENCED_JSON_RE = re.compile(r"```(?:\s*json)?\s*(?P<body>[\s\S]*?)```", re.IGNORECASE)
+
+
 def _extract_json_payload(text: str) -> object | None:
     stripped = text.strip()
     if not stripped:
         return None
 
     candidates: list[str] = [stripped]
-    fenced_blocks = re.findall(r"```(?:json|JSON)?\s*(.*?)```", stripped, flags=re.DOTALL)
-    for block in fenced_blocks:
-        block = block.strip()
-        if block:
-            candidates.append(block)
-
     if stripped.startswith("```"):
         lines = stripped.splitlines()
         if lines and lines[0].startswith("```"):
             lines = lines[1:]
         if lines and lines[-1].startswith("```"):
             lines = lines[:-1]
-        block_only = "\n".join(lines).strip()
-        if block_only:
-            candidates.append(block_only)
+        inner = "\n".join(lines).strip()
+        if inner and inner not in candidates:
+            candidates.insert(0, inner)
+
+    for match in _FENCED_JSON_RE.finditer(stripped):
+        body = match.group("body").strip()
+        if body and body not in candidates:
+            candidates.insert(0, body)
 
     decoder = json.JSONDecoder()
-    seen: set[str] = set()
     for candidate in candidates:
-        if not candidate or candidate in seen:
-            continue
-        seen.add(candidate)
         try:
             return json.loads(candidate)
         except json.JSONDecodeError:
@@ -341,122 +339,4 @@ def _extract_json_payload(text: str) -> object | None:
                     return obj
                 except json.JSONDecodeError:
                     continue
-    return None
-
-
-def _classify_blocker_kind(text: str) -> BlockerKind:
-    lowered = text.lower()
-    env_markers = ("missing", "not found", "not installed", "unavailable", "cannot find", "no such file", "dependency")
-    integration_markers = ("freeplane", "x11", "display", "integration", "gui", "runtime", "service", "daemon")
-    if any(marker in lowered for marker in integration_markers) and any(marker in lowered for marker in env_markers):
-        return BlockerKind.INTEGRATION_ENVIRONMENT_UNAVAILABLE
-    if any(marker in lowered for marker in ("missing dependency", "dependency missing", "not installed", "cannot find", "not found")):
-        return BlockerKind.MISSING_ENVIRONMENT_DEPENDENCY
-    if any(marker in lowered for marker in ("runtime prerequisite", "prerequisite", "environment unavailable")):
-        return BlockerKind.MISSING_RUNTIME_PREREQUISITE
-    if any(marker in lowered for marker in ("test failed", "tests failed", "failure", "assertion")):
-        return BlockerKind.TEST_FAILURE
-    if any(marker in lowered for marker in ("missing evidence", "not run", "not executed")):
-        return BlockerKind.MISSING_EVIDENCE
-    return BlockerKind.GENERIC
-
-
-def _list(value: object) -> list[object]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return value
-    return [value]
-
-
-def _extract_json_payload(text: str) -> object | None:
-    stripped = text.strip()
-    if not stripped:
-        return None
-
-    candidates: list[str] = [stripped]
-    fenced_blocks = re.findall(r"```(?:json|JSON)?\s*(.*?)```", stripped, flags=re.DOTALL)
-    for block in fenced_blocks:
-        block = block.strip()
-        if block:
-            candidates.append(block)
-
-    if stripped.startswith("```"):
-        lines = stripped.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].startswith("```"):
-            lines = lines[:-1]
-        block_only = "\n".join(lines).strip()
-        if block_only:
-            candidates.append(block_only)
-
-    decoder = json.JSONDecoder()
-    seen: set[str] = set()
-    for candidate in candidates:
-        if not candidate or candidate in seen:
-            continue
-        seen.add(candidate)
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            for idx, ch in enumerate(candidate):
-                if ch not in "[{":
-                    continue
-                try:
-                    obj, _ = decoder.raw_decode(candidate[idx:])
-                    return obj
-                except json.JSONDecodeError:
-                    continue
-    return None
-
-
-def _classify_blocker_kind(text: str) -> BlockerKind:
-    lowered = text.lower()
-    env_markers = ("missing", "not found", "not installed", "unavailable", "cannot find", "no such file", "dependency")
-    integration_markers = ("freeplane", "x11", "display", "integration", "gui", "runtime", "service", "daemon")
-    if any(marker in lowered for marker in integration_markers) and any(marker in lowered for marker in env_markers):
-        return BlockerKind.INTEGRATION_ENVIRONMENT_UNAVAILABLE
-    if any(marker in lowered for marker in ("missing dependency", "dependency missing", "not installed", "cannot find", "not found")):
-        return BlockerKind.MISSING_ENVIRONMENT_DEPENDENCY
-    if any(marker in lowered for marker in ("runtime prerequisite", "prerequisite", "environment unavailable")):
-        return BlockerKind.MISSING_RUNTIME_PREREQUISITE
-    if any(marker in lowered for marker in ("test failed", "tests failed", "failure", "assertion")):
-        return BlockerKind.TEST_FAILURE
-    if any(marker in lowered for marker in ("missing evidence", "not run", "not executed")):
-        return BlockerKind.MISSING_EVIDENCE
-    return BlockerKind.GENERIC
-
-
-def _list(value: object) -> list[object]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return value
-    return [value]
-
-
-def _extract_json_payload(text: str) -> object | None:
-    stripped = text.strip()
-    if not stripped:
-        return None
-    if stripped.startswith("```"):
-        lines = stripped.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].startswith("```"):
-            lines = lines[:-1]
-        stripped = "\n".join(lines).strip()
-    try:
-        return json.loads(stripped)
-    except json.JSONDecodeError:
-        decoder = json.JSONDecoder()
-        for idx, ch in enumerate(stripped):
-            if ch not in "[{":
-                continue
-            try:
-                obj, _ = decoder.raw_decode(stripped[idx:])
-                return obj
-            except json.JSONDecodeError:
-                continue
     return None
