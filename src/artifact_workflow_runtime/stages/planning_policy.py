@@ -89,28 +89,52 @@ class PlanningPolicyStageMixin:
             )
             artifact = services.artifact_store.add_json("execution_plan", parsed.model_dump(mode="json"))
             acceptance_artifact = services.artifact_store.add_json("task_acceptance_contract", acceptance_contract.model_dump(mode="json"), metadata={"task_id": task.id, "plan_id": parsed.id})
+            planner = _planner_for(services)
+            active_strategy = strategy_state.get("active_strategy")
+            decomposition_plan = planner.build_plan(
+                task=task,
+                strategy_id=active_strategy,
+                acceptance_contract=acceptance_contract,
+                obligations=obligations,
+                snapshot=WorkflowStateSnapshot.from_graph_state(strategy_state),
+            )
+            decomposition_artifact = services.artifact_store.add_json(
+                "decomposition_plan",
+                decomposition_plan.model_dump(mode="json"),
+                metadata={"task_id": task.id, "plan_id": parsed.id, "strategy_id": active_strategy or "default"},
+            )
+            packet_selection = _selector_for(services).select(plan=decomposition_plan, active_strategy=active_strategy)
+            packet_selection_artifact = services.artifact_store.add_json(
+                "packet_selection",
+                packet_selection.model_dump(mode="json"),
+                metadata={"task_id": task.id, "plan_id": parsed.id, "strategy_id": active_strategy or "default"},
+            )
             await _emit(
                 services,
                 "stage_completed",
                 "plan",
-                "Execution plan and acceptance contract generated",
+                "Execution plan, acceptance contract, and decomposition plan generated",
                 execution_family=parsed.execution_family.value,
                 task_intent=parsed.task_intent,
                 deliverable_kind=parsed.deliverable_kind,
                 requires_mutation=parsed.requires_mutation,
                 acceptance_obligations=len(acceptance_contract.obligations),
+                packet_count=len(decomposition_plan.packets),
                 artifact_id=artifact.id,
                 acceptance_artifact_id=acceptance_artifact.id,
+                decomposition_artifact_id=decomposition_artifact.id,
             )
-            artifact_ids = [*_append_artifact_id(strategy_update.get("artifact_ids", state.get("artifact_ids")), artifact.id), acceptance_artifact.id]
+            artifact_ids = [*_append_artifact_id(strategy_update.get("artifact_ids", state.get("artifact_ids")), artifact.id), acceptance_artifact.id, decomposition_artifact.id, packet_selection_artifact.id]
             update = {
                 "plan_request": request.model_dump(mode="json"),
                 "plan_result": result.model_dump(mode="json"),
                 "plan": parsed.model_dump(mode="json"),
                 "acceptance_contract": acceptance_contract.model_dump(mode="json"),
+                "decomposition_plan": decomposition_plan.model_dump(mode="json"),
+                "active_packet_id": packet_selection.selected_packet_id,
                 "artifact_ids": artifact_ids,
                 "status": "planned",
-                "transitions": _append_transition(strategy_state, "plan", "planned", "Execution plan and acceptance contract generated from ContextPacket, obligations, and active strategy", [artifact.id, acceptance_artifact.id]),
+                "transitions": _append_transition(strategy_state, "plan", "planned", "Execution plan, acceptance contract, and bounded decomposition plan generated", [artifact.id, acceptance_artifact.id, decomposition_artifact.id, packet_selection_artifact.id]),
             }
             return _merge_strategy_update(update, strategy_update)
 

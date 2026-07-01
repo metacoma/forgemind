@@ -18,8 +18,45 @@ class ExecutionStageMixin:
             observation_text = (render_structured_evidence_summary(observation_result.structured_evidence) if observation_result else "No observation evidence was collected.")
             context_text = context_packet.text if context_packet else ""
             strategy_block = _active_strategy_prompt_block(services, state)
+
+            decomposition_plan_raw = state.get("decomposition_plan")
+            if decomposition_plan_raw is None:
+                acceptance_contract = state.get("acceptance_contract")
+                obligations = state.get("obligations")
+                decomposition_plan = _planner_for(services).build_plan(
+                    task=task,
+                    strategy_id=state.get("active_strategy"),
+                    acceptance_contract=acceptance_contract,
+                    obligations=obligations,
+                    snapshot=WorkflowStateSnapshot.from_graph_state(state),
+                )
+                decomposition_artifact = services.artifact_store.add_json(
+                    "decomposition_plan",
+                    decomposition_plan.model_dump(mode="json"),
+                    metadata={"task_id": task.id, "source": "execute_fallback"},
+                )
+                state_artifact_ids = [*_append_artifact_id(state.get("artifact_ids"), decomposition_artifact.id)]
+            else:
+                from artifact_workflow_runtime.decomposition import DecompositionPlan
+                decomposition_plan = DecompositionPlan.model_validate(decomposition_plan_raw)
+                decomposition_artifact = None
+                state_artifact_ids = list(state.get("artifact_ids") or [])
+
+            packet_selection = _selector_for(services).select(plan=decomposition_plan, active_strategy=state.get("active_strategy"))
+            packet_selection_artifact = services.artifact_store.add_json(
+                "packet_selection",
+                packet_selection.model_dump(mode="json"),
+                metadata={"task_id": task.id, "plan_id": decomposition_plan.plan_id, "stage": "execute"},
+            )
+            state_artifact_ids.append(packet_selection_artifact.id)
+            active_packet_id = packet_selection.selected_packet_id
+            packet = _packet_from_state({"active_packet_id": active_packet_id}, decomposition_plan)
+            packet_block = _packet_prompt_block(packet)
             execute_steps = execute_prompt_steps(plan)
             execute_success = build_execute_success_criteria(plan)
+            if packet is not None and packet.success_criteria:
+                execute_success = list(dict.fromkeys([*execute_success, *packet.success_criteria]))
+
             prompt = (
                 "You are executing an approved controller plan.\n"
                 "Use the environment as needed and make the requested changes.\n"
@@ -31,6 +68,7 @@ class ExecutionStageMixin:
                 f"ContextPacket:\n{context_text}\n\n"
                 f"Observation evidence:\n{observation_text}\n\n"
                 f"{strategy_block}\n\n"
+                f"{packet_block}\n\n"
                 f"Plan summary: {plan.summary}\n"
                 "Execute-stage steps:\n"
                 + "\n".join(f"- {step}" for step in execute_steps)
@@ -53,16 +91,37 @@ class ExecutionStageMixin:
                 scope_constraints=["do not choose next workflow step", "do not expand task scope", "collect structured evidence"],
                 plan_summary=plan.summary,
                 context_packet_id=context_packet.id if context_packet else None,
-                artifact_ids=list(state.get("artifact_ids") or []),
+                artifact_ids=list(state_artifact_ids),
                 success_criteria=execute_success,
                 expected_outputs=["changed_files", "commands_run", "setup_steps", "test_results", "blockers"],
-                metadata={"evidence_required": True, "model_slot": "execute", "model_override": _openhands_model_for(services, "execute"), **_strategy_metadata(services, state)},
+                metadata={"evidence_required": True, "model_slot": "execute", "model_override": _openhands_model_for(services, "execute"), **_strategy_metadata(services, state), **_packet_metadata(packet)},
             )
-            await _emit(services, "execution_request", "execute", "Execution request created", execution_family=request.execution_family.value, capability_count=len(request.capabilities))
+            await _emit(services, "execution_request", "execute", "Execution request created", execution_family=request.execution_family.value, capability_count=len(request.capabilities), active_packet_id=active_packet_id)
             result = await services.openhands_adapter.execute(request)
-            artifact_ids = list(state.get("artifact_ids") or [])
+            artifact_ids = list(state_artifact_ids)
             artifact_ids.extend(artifact.id for artifact in result.artifacts)
             workspace_root = infer_workspace_root_from_execution(result) or workspace_root_from_state(state)
+
+            packet_history = list(state.get("packet_history") or [])
+            updated_decomposition = decomposition_plan
+            if packet is not None:
+                packet_status = _packet_status_from_execution_result(result)
+                updated_decomposition, history_entry = _update_packet_status(
+                    decomposition_plan,
+                    packet_id=packet.packet_id,
+                    new_status=packet_status,
+                    reason=result.summary,
+                    stage="execute",
+                    execution_result_id=result.id,
+                )
+                packet_history = _append_packet_history(state, history_entry)
+                packet_status_artifact = services.artifact_store.add_json(
+                    "packet_status_update",
+                    history_entry.model_dump(mode="json"),
+                    metadata={"task_id": task.id, "packet_id": packet.packet_id, "stage": "execute"},
+                )
+                artifact_ids.append(packet_status_artifact.id)
+
             await _emit(
                 services,
                 "stage_completed",
@@ -73,14 +132,24 @@ class ExecutionStageMixin:
                 transport_error=result.transport_error,
                 evidence_kind=result.evidence_kind,
                 artifact_ids=[artifact.id for artifact in result.artifacts],
+                active_packet_id=active_packet_id,
             )
+            added_artifacts = [artifact.id for artifact in result.artifacts]
+            if decomposition_artifact is not None:
+                added_artifacts.append(decomposition_artifact.id)
+            added_artifacts.append(packet_selection_artifact.id)
+            if packet is not None:
+                added_artifacts.extend([aid for aid in artifact_ids if aid not in (state.get("artifact_ids") or []) and aid not in added_artifacts])
             return {
                 "execution_request": request.model_dump(mode="json"),
                 "execution_result": result.model_dump(mode="json"),
                 "workspace_root": workspace_root,
+                "decomposition_plan": updated_decomposition.model_dump(mode="json"),
+                "active_packet_id": active_packet_id,
+                "packet_history": packet_history,
                 "artifact_ids": artifact_ids,
                 "status": "executed",
-                "transitions": _append_transition(state, "execute", "executed", "Bounded OpenHands execution packet finished", [artifact.id for artifact in result.artifacts]),
+                "transitions": _append_transition(state, "execute", "executed", "Bounded OpenHands execution packet finished", added_artifacts),
                 "controller_decisions": _append_controller_decision(state, (services.runtime_kernel or RuntimeKernel()).controller_decision(stage="execute", selected_next_stage="review", reason="Execution completed; review gate must evaluate the candidate revision before QA.")),
             }
 
@@ -161,6 +230,13 @@ class ExecutionStageMixin:
             failed_checks = _unique(failed_checks)
             blocker_summaries = _unique(blocker_summaries)
             strategy_block = _active_strategy_prompt_block(services, strategy_state)
+            decomposition_plan = None
+            packet = None
+            if state.get("decomposition_plan"):
+                from artifact_workflow_runtime.decomposition import DecompositionPlan
+                decomposition_plan = DecompositionPlan.model_validate(state["decomposition_plan"])
+                packet = _packet_from_state(state, decomposition_plan)
+            packet_block = _packet_prompt_block(packet)
             await _emit(services, "stage_started", "repair", "Running bounded repair packet after failed publish/check evidence", task_id=task.id, attempt=attempt, failed_checks=failed_checks)
             prompt = (
                 f"You are performing a bounded repair packet after {failure_source}.\n"
@@ -173,6 +249,7 @@ class ExecutionStageMixin:
                 f"Previous execution summary: {execution.summary}\n"
                 f"Publish summary: {publish_summary}\n\n"
                 f"{strategy_block}\n\n"
+                f"{packet_block}\n\n"
                 f"Plan summary: {plan.summary}\n"
                 "Plan steps:\n" + "\n".join(f"- {step}" for step in plan.steps) + "\n\n"
                 "Return changed files, commands run, test results, blockers, and repair summary as structured evidence."
@@ -192,14 +269,33 @@ class ExecutionStageMixin:
                 scope_constraints=["do not choose next workflow step", "do not expand task scope", "do not commit/push/create PR", "repair only controller-provided failures"],
                 context_packet_id=context_packet.id if context_packet else None,
                 artifact_ids=list(strategy_state.get("artifact_ids") or []),
-                metadata={"model_slot": "execute", "model_override": _openhands_model_for(services, "execute"), "repair_attempt": attempt, **_strategy_metadata(services, strategy_state)},
+                metadata={"model_slot": "execute", "model_override": _openhands_model_for(services, "execute"), "repair_attempt": attempt, **_strategy_metadata(services, strategy_state), **_packet_metadata(packet)},
             )
             result = await services.openhands_adapter.repair(request)
             artifact_ids = list(strategy_state.get("artifact_ids") or [])
             artifact_ids.extend(artifact.id for artifact in result.execution_result.artifacts)
             repair_requests = [*(state.get("repair_requests") or []), request.model_dump(mode="json")]
             repair_results = [*(state.get("repair_results") or []), result.model_dump(mode="json")]
-            await _emit(services, "stage_completed", "repair", "Repair packet completed", ok=result.ok, attempt=attempt, artifact_ids=[artifact.id for artifact in result.execution_result.artifacts])
+            packet_history = list(state.get("packet_history") or [])
+            updated_decomposition = state.get("decomposition_plan")
+            if decomposition_plan is not None and packet is not None:
+                updated_plan, history_entry = _update_packet_status(
+                    decomposition_plan,
+                    packet_id=packet.packet_id,
+                    new_status=_packet_status_from_execution_result(result.execution_result),
+                    reason=result.execution_result.summary,
+                    stage="repair",
+                    execution_result_id=result.execution_result.id,
+                )
+                updated_decomposition = updated_plan.model_dump(mode="json")
+                packet_history = _append_packet_history(state, history_entry)
+                packet_status_artifact = services.artifact_store.add_json(
+                    "packet_status_update",
+                    history_entry.model_dump(mode="json"),
+                    metadata={"task_id": task.id, "packet_id": packet.packet_id, "stage": "repair"},
+                )
+                artifact_ids.append(packet_status_artifact.id)
+            await _emit(services, "stage_completed", "repair", "Repair packet completed", ok=result.ok, attempt=attempt, artifact_ids=[artifact.id for artifact in result.execution_result.artifacts], active_packet_id=state.get("active_packet_id"))
             update = {
                 "repair_requests": repair_requests,
                 "repair_results": repair_results,
@@ -212,6 +308,9 @@ class ExecutionStageMixin:
                 "verification_check_requests": [],
                 "verification_check_results": [],
                 "acceptance_decision": None,
+                "decomposition_plan": updated_decomposition,
+                "active_packet_id": state.get("active_packet_id"),
+                "packet_history": packet_history,
                 "artifact_ids": artifact_ids,
                 "status": "repaired",
                 "transitions": _append_transition(state, "repair", "repaired", "Bounded repair packet finished; lifecycle requires review before continuing", [artifact.id for artifact in result.execution_result.artifacts]),

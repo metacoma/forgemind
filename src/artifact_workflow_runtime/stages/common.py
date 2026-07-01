@@ -54,6 +54,7 @@ from artifact_workflow_runtime.strategy import (
     strategy_metadata as _strategy_metadata,
 )
 from artifact_workflow_runtime.model_routing import normalize_verification_check_slot
+from artifact_workflow_runtime.decomposition import packet_from_state as _packet_from_state, packet_metadata as _packet_metadata, packet_prompt_block as _packet_prompt_block, planner_for as _planner_for, selector_for as _selector_for, status_from_execution_result as _packet_status_from_execution_result, update_packet_status as _update_packet_status
 from artifact_workflow_runtime.runtime_events import emit_event
 from artifact_workflow_runtime.graph.contracts import (
     append_artifact_id as _append_artifact_id,
@@ -106,6 +107,9 @@ def _append_transition(state: WorkflowState, stage: str, to_status: str, reason:
 def _append_controller_decision(state: WorkflowState, decision: ControllerDecision) -> list[dict[str, Any]]:
     return [*(state.get("controller_decisions") or []), decision.model_dump(mode="json")]
 
+
+def _append_packet_history(state: WorkflowState, entry: Any) -> list[dict[str, Any]]:
+    return [*(state.get("packet_history") or []), entry.model_dump(mode="json")]
 
 
 def _append_lifecycle_decision(state: WorkflowState, decision: Any) -> list[dict[str, Any]]:

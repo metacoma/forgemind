@@ -18,6 +18,7 @@ from artifact_workflow_runtime.reports import FinalReportBuilder
 from artifact_workflow_runtime.runtime_events import EventSink
 from artifact_workflow_runtime.state.checkpoints import WorkflowCheckpointRecorder
 from artifact_workflow_runtime.strategy import LLMStrategyAdvisor, StrategyArbitrator, StrategyGovernor, StrategySelectionMode
+from artifact_workflow_runtime.decomposition import DecompositionPlanner, PacketSelector, DecompositionValidator
 
 
 @dataclass
@@ -43,3 +44,6 @@ class WorkflowServices:
     strategy_selection_mode: StrategySelectionMode = StrategySelectionMode.RULE_BASED
     strategy_advisor: LLMStrategyAdvisor | None = None
     strategy_arbitrator: StrategyArbitrator | None = None
+    decomposition_planner: DecompositionPlanner | None = None
+    packet_selector: PacketSelector | None = None
+    decomposition_validator: DecompositionValidator | None = None

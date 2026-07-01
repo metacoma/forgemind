@@ -20,6 +20,7 @@ from artifact_workflow_runtime.runtime_events import EventSink
 from artifact_workflow_runtime.model_routing import ModelRoutingConfig
 from artifact_workflow_runtime.state import WorkflowCheckpointRecorder
 from artifact_workflow_runtime.strategy import StrategyArbitrator, StrategyGovernor, StrategySelectionMode
+from artifact_workflow_runtime.decomposition import DecompositionPlanner, PacketSelector, DecompositionValidator
 
 
 class WorkflowController:
@@ -47,6 +48,9 @@ class WorkflowController:
             strategy_governor=StrategyGovernor(),
             strategy_selection_mode=StrategySelectionMode.coerce(strategy_selection_mode),
             strategy_arbitrator=StrategyArbitrator(),
+            decomposition_planner=DecompositionPlanner(),
+            packet_selector=PacketSelector(),
+            decomposition_validator=DecompositionValidator(),
         )
         if self.services.approval_provider is None:
             from artifact_workflow_runtime.policy import StaticApprovalProvider
