@@ -1,0 +1,21 @@
+direct_llm:
+  classify: qwen36-35b
+  route: qwen36-35b
+  obligations: qwen36-27b
+  plan: qwen36-27b
+  verify: qwen36-27b
+
+openhands:
+  observe: openai/qwen36-35b
+  research: openai/qwen36-35b
+  execute: openai/qwen36-27b
+  publish: openai/qwen36-35b
+
+verification_checks:
+  default: qwen36-27b
+  build: qwen36-27b
+  unit_tests: qwen36-27b
+  integration_tests: qwen36-27b
+  smoke_tests: qwen36-27b
+  docs: qwen36-27b
+  pr_checks: qwen36-27b
