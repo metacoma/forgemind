@@ -11,11 +11,33 @@ class ObservationContextStageMixin:
             task = Task.model_validate(state["task"])
             classification = TaskClassification.model_validate(state["classification"])
             route = RoutingDecision.model_validate(state["route_decision"])
-            await _emit(services, "stage_started", "research", "Collecting fresh external research evidence", task_id=task.id)
-            request = services.observation_service.build_research_request(task, classification, route)
+            freshness_decision = None
+            if state.get("freshness_decision"):
+                from artifact_workflow_runtime.freshness import FreshnessDecision
+                freshness_decision = FreshnessDecision.model_validate(state["freshness_decision"])
+            await _emit(services, "stage_started", "research", "Collecting fresh external research evidence", task_id=task.id, freshness_required=bool(freshness_decision and freshness_decision.freshness_required))
+            retrieval_service = services.retrieval_service
+            if freshness_decision is not None and freshness_decision.freshness_required and retrieval_service is not None:
+                request = retrieval_service.build_request(task=task, classification=classification, decision=freshness_decision)
+            else:
+                request = services.observation_service.build_research_request(task, classification, route)
             result = await services.openhands_adapter.observe(request)
+            retrieval_snapshot = None
+            retrieval_artifacts: list[Any] = []
+            if freshness_decision is not None and freshness_decision.freshness_required and retrieval_service is not None:
+                retrieval_snapshot, retrieval_artifacts = retrieval_service.normalize_result(
+                    artifact_store=services.artifact_store,
+                    task=task,
+                    decision=freshness_decision,
+                    result=result,
+                )
+                result = result.model_copy(update={
+                    "artifacts": [*result.artifacts, *retrieval_artifacts],
+                    "primary_evidence_artifact_ids": [*result.primary_evidence_artifact_ids, *[artifact.id for artifact in retrieval_artifacts]],
+                })
             artifact_ids = list(state.get("artifact_ids") or [])
             artifact_ids.extend(artifact.id for artifact in result.artifacts)
+            artifact_ids = list(dict.fromkeys(artifact_ids))
             await _emit(
                 services,
                 "stage_completed",
@@ -24,15 +46,20 @@ class ObservationContextStageMixin:
                 ok=result.ok,
                 conversation_id=result.conversation_id,
                 evidence_kind=result.evidence_kind,
+                retrieval_mode=(freshness_decision.retrieval_mode.value if freshness_decision else "generic_research"),
+                retrieval_artifact_ids=[artifact.id for artifact in retrieval_artifacts],
                 artifact_ids=[artifact.id for artifact in result.artifacts],
             )
+            kernel = services.runtime_kernel or RuntimeKernel()
+            added_artifacts = [artifact.id for artifact in result.artifacts]
             return {
                 "research_request": request.model_dump(mode="json"),
                 "research_result": result.model_dump(mode="json"),
+                **({"retrieval_snapshot": retrieval_snapshot.model_dump(mode="json"), "retrieval_artifact_ids": list(retrieval_snapshot.artifact_ids)} if retrieval_snapshot is not None else {}),
                 "artifact_ids": artifact_ids,
                 "status": "researched",
-                "transitions": _append_transition(state, "research", "researched", "Fresh external research evidence collected", [artifact.id for artifact in result.artifacts]),
-                "controller_decisions": _append_controller_decision(state, (services.runtime_kernel or RuntimeKernel()).controller_decision(stage="research", selected_next_stage=(services.runtime_kernel or RuntimeKernel()).next_after_research(route), reason="Research complete; controller selected next stage from route requirements.")),
+                "transitions": _append_transition(state, "research", "researched", "Fresh external research evidence collected", added_artifacts),
+                "controller_decisions": _append_controller_decision(state, kernel.controller_decision(stage="research", selected_next_stage=kernel.next_after_research(route), reason="Research/retrieval complete; controller selected next stage from route requirements.")),
             }
 
     def research_next(self, state: WorkflowState) -> str:
@@ -103,6 +130,13 @@ class ObservationContextStageMixin:
                         artifact = services.artifact_store.get(art["id"])
                         artifacts.append(artifact)
                         artifact_texts[artifact.id] = services.artifact_store.read_text(artifact.id)
+            for artifact_id in state.get("retrieval_artifact_ids") or []:
+                try:
+                    artifact = services.artifact_store.get(artifact_id)
+                except KeyError:
+                    continue
+                artifacts.append(artifact)
+                artifact_texts[artifact.id] = services.artifact_store.read_text(artifact.id)
             context_packet = services.context_builder.build(task, artifacts, artifact_texts=artifact_texts)
             artifact = services.artifact_store.add_text("context_packet", context_packet.text, metadata={"task_id": task.id})
             await _emit(

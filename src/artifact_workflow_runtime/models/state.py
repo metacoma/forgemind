@@ -42,6 +42,7 @@ from artifact_workflow_runtime.models.core import (
 from artifact_workflow_runtime.lifecycle.models import LifecycleTransitionDecision, PipelineLoopDecision
 from artifact_workflow_runtime.strategy.models import StrategyDecision, StrategyId
 from artifact_workflow_runtime.decomposition.models import DecompositionPlan, DecompositionProgressDecision, PacketHistoryEntry
+from artifact_workflow_runtime.freshness.models import FreshnessDecision, RetrievalSnapshot
 
 JsonDict = dict[str, Any]
 
@@ -277,6 +278,9 @@ class WorkflowStateSnapshot(RuntimeModel):
     route_decision: RoutingDecision | None = None
     research_request: ObservationRequest | None = None
     research_result: ObservationResult | None = None
+    freshness_decision: FreshnessDecision | None = None
+    retrieval_snapshot: RetrievalSnapshot | None = None
+    retrieval_artifact_ids: list[str] = Field(default_factory=list)
     observation_request: ObservationRequest | None = None
     observation_result: ObservationResult | None = None
     context_packet: ContextPacket | None = None
@@ -425,6 +429,9 @@ class WorkflowState(TypedDict, total=False):
     route_decision: JsonDict | None
     research_request: JsonDict | None
     research_result: JsonDict | None
+    freshness_decision: JsonDict | None
+    retrieval_snapshot: JsonDict | None
+    retrieval_artifact_ids: list[str]
     observation_request: JsonDict | None
     observation_result: JsonDict | None
     context_packet: JsonDict | None

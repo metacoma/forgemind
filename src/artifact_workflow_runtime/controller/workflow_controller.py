@@ -7,6 +7,7 @@ from artifact_workflow_runtime.context import ContextBuilder
 from artifact_workflow_runtime.control_plane import RuntimeKernel
 from artifact_workflow_runtime.done_contract import DoneContractCompiler
 from artifact_workflow_runtime.environment import EnvironmentDiscovery
+from artifact_workflow_runtime.freshness import FreshnessGate, RetrievalService
 from artifact_workflow_runtime.graph import WorkflowServices, build_workflow_graph
 from artifact_workflow_runtime.models import FinalReport, Task
 from artifact_workflow_runtime.contracts import ContractViolationError
@@ -34,6 +35,8 @@ class WorkflowController:
             artifact_store=self.artifact_store,
             context_builder=ContextBuilder(),
             observation_service=ObservationService(),
+            freshness_gate=FreshnessGate(),
+            retrieval_service=RetrievalService(),
             policy_engine=PolicyEngine(),
             approval_provider=approval_provider or getattr(openhands_adapter, "approval_provider", None),
             final_report_builder=FinalReportBuilder(),

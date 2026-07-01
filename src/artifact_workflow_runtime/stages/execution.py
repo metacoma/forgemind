@@ -61,6 +61,7 @@ class ExecutionStageMixin:
                 "You are executing an approved controller plan.\n"
                 "Use the environment as needed and make the requested changes.\n"
                 "Ground your work in the evidence below.\n"
+                "Freshness/retrieval artifacts in the ContextPacket are the truth layer for current docs, versions, changelog, CLI flags, compatibility, and migration facts; do not guess current versions or docs from stale model memory.\n"
                 "The original task intent is primary; do not silently degrade implementation work into analysis-only output.\n"
                 "This is the execute stage only: edit files, install required local dependencies, and run build/unit/integration checks.\n"
                 "Repository publication is handled by a later publish stage. Do not commit, push, create a PR, wait for PR checks, or report missing publication as an execute blocker.\n"

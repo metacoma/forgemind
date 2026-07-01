@@ -8,6 +8,7 @@ from artifact_workflow_runtime.context import ContextBuilder
 from artifact_workflow_runtime.control_plane import RuntimeKernel
 from artifact_workflow_runtime.done_contract import DoneContractCompiler
 from artifact_workflow_runtime.environment import EnvironmentDiscovery
+from artifact_workflow_runtime.freshness import FreshnessGate, RetrievalService
 from artifact_workflow_runtime.model_routing import ModelRoutingConfig
 from artifact_workflow_runtime.observation import ObservationService
 from artifact_workflow_runtime.openhands_adapter import OpenHandsAdapter
@@ -36,6 +37,8 @@ class WorkflowServices:
     qa_planner: QAPlanner
     qa_runner: DeterministicQARunner
     publisher_backend: DeterministicPublisher
+    freshness_gate: FreshnessGate | None = None
+    retrieval_service: RetrievalService | None = None
     event_sink: EventSink | None = None
     model_routing: ModelRoutingConfig | None = None
     runtime_kernel: RuntimeKernel | None = None
