@@ -30,6 +30,7 @@ from artifact_workflow_runtime.models.core import (
     RepairRequest,
     RepairResult,
     RoutingDecision,
+    WorkspaceReconciliation,
     RuntimeModel,
     Task,
     TaskAcceptanceContract,
@@ -80,10 +81,6 @@ class WorkflowStatus(str, Enum):
     PARTIALLY_COMPLETED = "partially_completed"
     NEEDS_HUMAN_REVIEW = "needs_human_review"
     NEEDS_ENVIRONMENT = "needs_environment"
-    RUNTIME_PROOF_BLOCKED = "runtime_proof_blocked"
-    IMPLEMENTATION_PASSED_RUNTIME_BLOCKED = "implementation_passed_runtime_blocked"
-    PUBLISH_NOT_REACHED = "publish_not_reached"
-    CONTROL_PLANE_PROGRESSION_ERROR = "control_plane_progression_error"
     FAILED = "failed"
 
     @classmethod
@@ -289,6 +286,7 @@ class WorkflowStateSnapshot(RuntimeModel):
     retrieval_artifact_ids: list[str] = Field(default_factory=list)
     observation_request: ObservationRequest | None = None
     observation_result: ObservationResult | None = None
+    workspace_reconciliation: WorkspaceReconciliation | None = None
     context_packet: ContextPacket | None = None
     obligation_request: LLMRequest | None = None
     obligation_result: LLMResult | None = None
@@ -445,6 +443,7 @@ class WorkflowState(TypedDict, total=False):
     retrieval_artifact_ids: list[str]
     observation_request: JsonDict | None
     observation_result: JsonDict | None
+    workspace_reconciliation: JsonDict | None
     context_packet: JsonDict | None
     obligation_request: JsonDict | None
     obligation_result: JsonDict | None

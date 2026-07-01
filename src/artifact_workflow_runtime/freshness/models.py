@@ -19,6 +19,13 @@ class RetrievalMode(str, Enum):
     DOCS_PLUS_VERSIONS = "docs_plus_versions"
 
 
+
+
+class FreshnessStagePreference(str, Enum):
+    IMMEDIATE = "immediate"
+    AFTER_OBSERVE = "after_observe"
+    PACKET_SCOPED = "packet_scoped"
+
 class RetrievalSourceKind(str, Enum):
     OFFICIAL_DOCUMENTATION = "official_documentation"
     OFFICIAL_RELEASE_NOTES = "official_release_notes"
@@ -46,6 +53,7 @@ class FreshnessDecision(RuntimeModel):
     docs_resolution_required: bool = False
     changelog_resolution_required: bool = False
     web_resolution_required: bool = False
+    stage_preference: FreshnessStagePreference = FreshnessStagePreference.IMMEDIATE
     targets: list[str] = Field(default_factory=list)
     triggered_by: list[str] = Field(default_factory=list)
     created_at: str = Field(default_factory=utc_now)

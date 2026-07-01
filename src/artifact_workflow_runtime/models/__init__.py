@@ -60,6 +60,7 @@ from .task import (
     Task,
     TaskClassification,
     RoutingDecision,
+    WorkspaceReconciliation,
     ObligationAnalysis,
 )
 from .acceptance import (
@@ -158,6 +159,7 @@ __all__ = [
     "Task",
     "TaskClassification",
     "RoutingDecision",
+    "WorkspaceReconciliation",
     "ObligationAnalysis",
     "AcceptanceObligation",
     "TaskAcceptanceContract",

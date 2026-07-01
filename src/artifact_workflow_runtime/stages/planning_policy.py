@@ -68,9 +68,13 @@ class PlanningPolicyStageMixin:
             strategy_state = dict(state)
             strategy_state.update(strategy_update)
             strategy_block = _active_strategy_prompt_block(services, strategy_state)
+            reconciliation = None
+            if state.get("workspace_reconciliation") is not None:
+                from artifact_workflow_runtime.models import WorkspaceReconciliation
+                reconciliation = WorkspaceReconciliation.model_validate(state["workspace_reconciliation"])
             request = LLMRequest(
                 kind="planning",
-                prompt=build_plan_prompt(task, context_packet, _effective_task_intent(classification), obligations) + "\n\nDoneContract:\n" + done_contract_text + "\n\n" + strategy_block,
+                prompt=build_plan_prompt(task, context_packet, _effective_task_intent(classification), obligations, reconciliation) + "\n\nDoneContract:\n" + done_contract_text + "\n\n" + strategy_block,
                 task_id=task.id,
                 task_text=task.description,
                 context_packet_id=context_packet.id,

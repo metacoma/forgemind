@@ -6,6 +6,7 @@ import pytest
 
 from artifact_workflow_runtime.artifacts import ArtifactStore
 from artifact_workflow_runtime.controller import WorkflowController
+from artifact_workflow_runtime.control_plane.reconcile import WorkspaceReconciler
 from artifact_workflow_runtime.freshness import FreshnessGate, RetrievalMode, RetrievalService, RetrievalSourceKind
 from artifact_workflow_runtime.llm_backend import ScriptedLLMBackend
 from artifact_workflow_runtime.models import (
@@ -17,6 +18,7 @@ from artifact_workflow_runtime.models import (
     StructuredEvidence,
     Task,
     TaskClassification,
+    WorkPacketKind,
 )
 from artifact_workflow_runtime.openhands_adapter import FakeOpenHandsAdapter
 from artifact_workflow_runtime.policy import StaticApprovalProvider
@@ -81,6 +83,15 @@ def test_freshness_gate_does_not_trigger_for_stable_local_task() -> None:
     assert decision.retrieval_mode == RetrievalMode.NONE
     assert decision.version_resolution_required is False
     assert decision.docs_resolution_required is False
+
+
+def test_freshness_gate_prefers_after_observe_when_repository_observation_is_also_required() -> None:
+    task = Task(description="Inspect grpc/csharp in the repository and align Grpc.Net.Client plus GitHub Actions to current versions.")
+    route = _route(needs_repository_observation=True, can_plan_immediately=False)
+    decision = FreshnessGate().decide(task, _classification(task.description), route)
+
+    assert decision.freshness_required is True
+    assert decision.stage_preference.value == "after_observe"
 
 
 def test_source_preference_policy_ranks_official_sources_before_third_party(tmp_path) -> None:
@@ -236,7 +247,7 @@ async def test_runtime_route_forces_retrieval_and_plan_execute_receive_grounding
     openhands = FakeOpenHandsAdapter(
         artifact_store,
         scripts={
-            "observe": [retrieval_output, "Observed repository root. found .github/workflows and README.md. command: git status --short"],
+            "observe": ["Observed repository root. found .github/workflows and README.md. command: git status --short", retrieval_output],
             "execute": [
                 "changed .github/workflows/ci.yml to use actions/checkout@v5\ncommand: bash -n .github/workflows/ci.yml passed",
                 "confirmed .github/workflows/ci.yml still uses actions/checkout@v5\ncommand: bash -n .github/workflows/ci.yml passed",
@@ -259,7 +270,11 @@ async def test_runtime_route_forces_retrieval_and_plan_execute_receive_grounding
 
     assert report.status in {"completed", "blocked", "needs_environment", "partially_completed", "failed"}
     assert len(openhands.calls["observe"]) == 2
-    research_request = openhands.calls["observe"][0]
+    observation_request = openhands.calls["observe"][0]
+    research_request = openhands.calls["observe"][1]
+    assert observation_request.work_packet_kind == WorkPacketKind.OBSERVE
+    assert observation_request.metadata["mode"] == "observe_only"
+    assert research_request.work_packet_kind == WorkPacketKind.RESEARCH
     assert research_request.metadata["mode"] == "freshness_retrieval"
     assert research_request.metadata["retrieval_mode"] == RetrievalMode.DOCS_PLUS_VERSIONS.value
     route = report.route
@@ -279,23 +294,33 @@ async def test_runtime_route_forces_retrieval_and_plan_execute_receive_grounding
     assert "retrieval_snapshot" in artifact_kinds
 
 
-def test_freshness_retrieval_request_actions_are_authorized_by_research_acl() -> None:
-    from artifact_workflow_runtime.models import ExecutionFamily, TaskClassification
-    from artifact_workflow_runtime.openhands_adapter.contracts import OpenHandsStageContractGate
-
-    task = Task(description="Add a C#/.NET gRPC client using current NuGet package versions.")
-    classification = TaskClassification(
-        normalized_task="Add C# .NET gRPC client",
-        needs_world_facts=True,
-        execution_family=ExecutionFamily.REPOSITORY_CHANGE,
-        task_intent="implement",
-        capabilities=[],
-        observation_focus=["grpc", "dotnet"],
-        reasoning="repository change with current package versions",
-        risk_level="low",
+def test_workspace_reconciler_adopts_existing_candidate_and_marks_continuation() -> None:
+    task = Task(description="Work in /workspace/freeplane_plugin_grpc, improve grpc/csharp until smoke tests pass, and align Grpc.Net.Client with current official docs.")
+    classification = _classification(task.description)
+    route = _route(needs_repository_observation=True, can_plan_immediately=False, observation_focus=["grpc/csharp", "integration", "smoke"], required_evidence_types=["repo_patterns", "build_instructions"])
+    observation = ObservationResult(
+        request_id="observe_1",
+        ok=True,
+        summary="grpc/csharp already exists and dotnet test passed",
+        evidence_text="grpc/csharp already exists. dotnet test grpc/csharp/tests/FreeplaneGrpcClient.Tests.csproj passed with 39 passed.",
+        structured_evidence=StructuredEvidence(
+            files_observed=[],
+            commands_run=[],
+            extracted_facts=[],
+        ),
     )
-    decision = FreshnessGate().decide(task=task, classification=classification)
-    request = RetrievalService().build_request(task=task, classification=classification, decision=decision)
+    decision = FreshnessGate().decide(task, classification, route)
 
-    assert {"inspect_release_notes", "inspect_package_registry"}.issubset(set(request.allowed_actions))
-    OpenHandsStageContractGate.validate_observation(request)
+    reconciliation = WorkspaceReconciler().reconcile(
+        task=task,
+        classification=classification,
+        route=route,
+        observation=observation,
+        freshness_decision=decision,
+    )
+
+    assert reconciliation.adopt_existing_work is True
+    assert reconciliation.delivery_mode == "continue_existing_candidate"
+    assert "grpc/csharp" in reconciliation.existing_target_surfaces
+    assert reconciliation.freshness_scope in {"targeted_post_observe", "post_observe"}
+

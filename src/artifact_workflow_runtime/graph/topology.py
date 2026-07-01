@@ -68,7 +68,7 @@ def wire_workflow_graph(graph: Any, *, nodes: Mapping[str, NodeFn], routers: Map
     graph.add_edge("classify", "route")
     graph.add_conditional_edges("route", routers["route"], {"research": "research", "observe": "observe", "build_context": "build_context"})
     graph.add_conditional_edges("research", routers["research"], {"observe": "observe", "build_context": "build_context", "finalize": "finalize"})
-    graph.add_conditional_edges("observe", routers["observe"], {"build_context": "build_context", "finalize": "finalize"})
+    graph.add_conditional_edges("observe", routers["observe"], {"research": "research", "build_context": "build_context", "finalize": "finalize"})
     graph.add_edge("build_context", "obligations")
     graph.add_edge("obligations", "done_contract")
     graph.add_edge("done_contract", "plan")

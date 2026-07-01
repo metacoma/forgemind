@@ -4,7 +4,7 @@ from pathlib import Path
 
 from artifact_workflow_runtime.artifacts import ArtifactStore
 from artifact_workflow_runtime.context import ContextBuilder
-from artifact_workflow_runtime.control_plane import RuntimeKernel
+from artifact_workflow_runtime.control_plane import RuntimeKernel, WorkspaceReconciler
 from artifact_workflow_runtime.done_contract import DoneContractCompiler
 from artifact_workflow_runtime.environment import EnvironmentDiscovery
 from artifact_workflow_runtime.freshness import FreshnessGate, RetrievalService
@@ -48,6 +48,7 @@ class WorkflowController:
             event_sink=event_sink,
             model_routing=model_routing,
             runtime_kernel=RuntimeKernel(),
+            workspace_reconciler=WorkspaceReconciler(),
             checkpoint_recorder=WorkflowCheckpointRecorder(self.artifact_store),
             strategy_governor=StrategyGovernor(),
             strategy_selection_mode=StrategySelectionMode.coerce(strategy_selection_mode),

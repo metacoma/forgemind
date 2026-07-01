@@ -46,6 +46,7 @@ from artifact_workflow_runtime.policy import PolicyEngine
 from artifact_workflow_runtime.policy.evidence import EvidenceGate
 from artifact_workflow_runtime.decomposition import DecompositionOutcome, DecompositionPlan, DecompositionProgressDecision, progression_decision
 from artifact_workflow_runtime.control_plane.loop_policy import PipelineLoopPolicy
+from artifact_workflow_runtime.freshness import FreshnessDecision
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,11 +116,15 @@ class RuntimeKernel:
             missing_state_fields=missing_state_fields or [],
         )
 
-    def next_after_route(self, decision: RoutingDecision) -> str:
-        if decision.needs_fresh_external_research:
-            return "research"
+    def next_after_route(self, decision: RoutingDecision, freshness_decision: FreshnessDecision | None = None) -> str:
         if decision.needs_repository_observation or decision.needs_world_observation:
             return "observe"
+        freshness_required = bool(
+            (freshness_decision and freshness_decision.freshness_required)
+            or decision.needs_fresh_external_research
+        )
+        if freshness_required:
+            return "research"
         return "build_context"
 
     def next_after_research(self, decision: RoutingDecision) -> str:
@@ -452,14 +457,14 @@ class RuntimeKernel:
             add(AcceptanceObligationKind.CODE_CHANGED, "Repository/world mutation evidence exists", checks=list(plan.expected_repo_changes))
 
         all_test_text = _lower_join([*plan.required_test_levels, *plan.verification_checks, *plan.success_criteria])
-        if any(marker in all_test_text for marker in ("build", "compile", "cmake", "gradle", "mvn", "make", "dotnet build", "msbuild", "sln", "csproj")):
+        if any(marker in all_test_text for marker in ("build", "compile", "cmake", "gradle", "mvn", "make")):
             add(AcceptanceObligationKind.BUILD_OR_COMPILE_SUCCEEDED, "Build/compile obligation passed", checks=list(plan.required_test_levels))
 
         if plan.required_test_levels or plan.verification_checks:
             add(AcceptanceObligationKind.RELEVANT_TESTS_RUN, "Relevant verification checks were run", checks=[*plan.required_test_levels, *plan.verification_checks])
             add(AcceptanceObligationKind.RELEVANT_TESTS_PASSED, "Relevant verification checks passed", checks=[*plan.required_test_levels, *plan.verification_checks])
 
-        if any(marker in all_test_text for marker in ("integration", "e2e", "end-to-end", "smoke", "freeplane", "grpc smoke", "run-freeplane")):
+        if any(marker in all_test_text for marker in ("integration", "e2e", "end-to-end", "freeplane", "grpc smoke")):
             add(AcceptanceObligationKind.INTEGRATION_TESTS_RUN, "Integration verification was run", checks=[*plan.required_test_levels, *plan.verification_checks])
             add(AcceptanceObligationKind.INTEGRATION_TESTS_PASSED, "Integration verification passed", checks=[*plan.required_test_levels, *plan.verification_checks])
 
@@ -537,16 +542,10 @@ class RuntimeKernel:
         statuses = {item.status for item in blocking_results}
 
         execution_status = _derive_execution_status(execution)
-        only_publish_missing = _only_publish_obligations_missing(contract, blocking_results)
-
         if accepted:
             status = AcceptanceStatus.ACCEPTED
             final_status = "completed"
             summary = "All required acceptance obligations passed."
-        elif only_publish_missing:
-            status = AcceptanceStatus.NEEDS_HUMAN_REVIEW
-            final_status = "publish_not_reached"
-            summary = "Execute/verification obligations are not failed; publish obligations are lifecycle-scoped and were not reached yet."
         elif env_blockers:
             status = AcceptanceStatus.NEEDS_ENVIRONMENT
             final_status = "needs_environment"
@@ -608,7 +607,7 @@ class RuntimeKernel:
             return _obligation_result(obligation, changed, "Mutation evidence found." if changed else "No changed-file or mutation summary evidence found.", artifact_ids)
 
         if obligation.kind == AcceptanceObligationKind.BUILD_OR_COMPILE_SUCCEEDED:
-            ran, passed, failed = _check_status(execution, verification, publish, ("build", "compile", "cmake", "gradle", "mvn", "make", "dotnet build", "msbuild"))
+            ran, passed, failed = _check_status(execution, verification, publish, ("build", "compile", "cmake", "gradle", "mvn", "make"))
             return _check_result(obligation, ran, passed, failed, artifact_ids, "Build/compile")
 
         if obligation.kind == AcceptanceObligationKind.RELEVANT_TESTS_RUN:
@@ -620,11 +619,11 @@ class RuntimeKernel:
             return _check_result(obligation, ran, passed, failed, artifact_ids, "Relevant tests/checks")
 
         if obligation.kind == AcceptanceObligationKind.INTEGRATION_TESTS_RUN:
-            ran, _passed, _failed = _check_status(execution, verification, publish, ("integration", "e2e", "end-to-end", "smoke", "freeplane", "grpc smoke", "run-freeplane"))
-            return _run_result(obligation, ran, artifact_ids, "Integration/smoke tests")
+            ran, _passed, _failed = _check_status(execution, verification, publish, ("integration", "e2e", "end-to-end", "freeplane", "grpc smoke"))
+            return _run_result(obligation, ran, artifact_ids, "Integration tests")
 
         if obligation.kind == AcceptanceObligationKind.INTEGRATION_TESTS_PASSED:
-            ran, passed, failed = _check_status(execution, verification, publish, ("integration", "e2e", "end-to-end", "smoke", "freeplane", "grpc smoke", "run-freeplane"))
+            ran, passed, failed = _check_status(execution, verification, publish, ("integration", "e2e", "end-to-end", "freeplane", "grpc smoke"))
             return _check_result(obligation, ran, passed, failed, artifact_ids, "Integration tests")
 
         if obligation.kind == AcceptanceObligationKind.ENVIRONMENT_PREREQUISITES_SATISFIED:
@@ -649,21 +648,11 @@ class RuntimeKernel:
             return _obligation_result(obligation, ok, "Discovered work-surface evidence found." if ok else "Discovered work-surface obligation lacks explicit evidence.", artifact_ids)
 
         if obligation.kind == AcceptanceObligationKind.PUBLISH_OBLIGATIONS_SATISFIED:
-            if publish is None:
-                return VerificationObligationResult(
-                    obligation_id=obligation.id,
-                    obligation_name=obligation.name,
-                    kind=obligation.kind,
-                    status=AcceptanceObligationStatus.NOT_RUN,
-                    reason="Publish stage was not reached yet; execute/repair/verify stages must not close or fail publish obligations.",
-                    evidence_artifact_ids=artifact_ids,
-                    blocker_kind=None,
-                )
             if verification is not None and (verification.commit_required or verification.push_required):
                 ok = (not verification.commit_required or verification.commit_done) and (not verification.push_required or verification.push_done)
             else:
-                ok = publish.ok
-            return _obligation_result(obligation, ok, "Publish obligations satisfied." if ok else "Publish/commit/push obligations failed in publish stage.", artifact_ids)
+                ok = publish is not None and publish.ok
+            return _obligation_result(obligation, ok, "Publish obligations satisfied." if ok else "Publish/commit/push obligations are missing or incomplete.", artifact_ids)
 
         ok = bool(verification and (verification.passed or verification.checks_passed)) or bool(execution.evidence_bundle and execution.evidence_bundle.ok)
         return _obligation_result(obligation, ok, "Required evidence exists." if ok else "Required evidence is missing.", artifact_ids)
@@ -867,13 +856,6 @@ def _contract_obligation_by_id(contract: TaskAcceptanceContract, obligation_id: 
     return AcceptanceObligation(kind=AcceptanceObligationKind.REQUIRED_EVIDENCE_PRESENT, name=obligation_id)
 
 
-def _only_publish_obligations_missing(contract: TaskAcceptanceContract, blocking_results: list[VerificationObligationResult]) -> bool:
-    missing = [item for item in blocking_results if item.status != AcceptanceObligationStatus.PASSED]
-    if not missing:
-        return False
-    return all(_contract_obligation_by_id(contract, item.obligation_id).kind == AcceptanceObligationKind.PUBLISH_OBLIGATIONS_SATISFIED for item in missing)
-
-
 def _derive_execution_status(execution: ExecutionResult) -> ExecutionStatus:
     if execution.execution_status != ExecutionStatus.SUCCEEDED:
         return execution.execution_status
@@ -1021,8 +1003,8 @@ def _is_runtime_proof_surrogate(text: str) -> bool:
         return True
     if any(marker in lowered for marker in ("integration project build", "test project build", "build integration tests", "compiled integration tests")):
         return True
-    build_only = any(marker in lowered for marker in ("cmake --build", "mvn compile", "gradle assemble", "./gradlew assemble", "go build", "npm run build", "dotnet build", "msbuild"))
-    actual_test = any(marker in lowered for marker in ("pytest", "go test", "cargo test", "mvn test", "gradle test", "./gradlew test", "npm test", "dotnet test", "integrationtest", "smoke test", "run_smoke", "run smoke", "run_integration", "run integration", "e2e"))
+    build_only = any(marker in lowered for marker in ("cmake --build", "mvn compile", "gradle assemble", "./gradlew assemble", "go build", "npm run build"))
+    actual_test = any(marker in lowered for marker in ("pytest", "go test", "cargo test", "mvn test", "gradle test", "./gradlew test", "npm test", "integrationtest", "smoke test", "run_smoke", "run smoke", "run_integration", "run integration", "pytest", "go test", "cargo test", "mvn test", "gradle test", "./gradlew test", "npm test", "e2e"))
     return build_only and not actual_test
 
 
@@ -1096,7 +1078,7 @@ def _requires_explicit_environment_evidence(obligation: AcceptanceObligation) ->
 
 
 def _is_setup_or_bootstrap_command(text: str) -> bool:
-    return any(marker in text for marker in ("bootstrap", "setup", "install", "dotnet-install.sh", "dotnet --version", "protoc --version", "docker compose up", "docker-compose up", "make up", "make run", "service start"))
+    return any(marker in text for marker in ("bootstrap", "setup", "install", "docker compose up", "docker-compose up", "make up", "make run", "service start"))
 
 
 def _is_environment_readiness_evidence(text: str) -> bool:

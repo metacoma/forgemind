@@ -5,7 +5,7 @@ from collections.abc import Iterable
 
 from artifact_workflow_runtime.models import RoutingDecision, Task, TaskClassification
 
-from .models import FreshnessDecision, RetrievalMode, RetrievalSourceKind, SourcePreference
+from .models import FreshnessDecision, FreshnessStagePreference, RetrievalMode, RetrievalSourceKind, SourcePreference
 
 _VERSION_TERMS = (
     "latest",
@@ -63,28 +63,6 @@ _TOOL_TERMS = (
     "actions/checkout",
     "actions/setup-node",
     "actions/setup-python",
-    "actions/setup-dotnet",
-    ".net",
-    "dotnet",
-    "c#",
-    "csharp",
-    "grpc.net.client",
-    "google.protobuf",
-    "grpc.tools",
-    "nuget",
-    "xunit",
-    "moq",
-    "ci/cd",
-    "ci workflow",
-    "github workflow",
-    "workflow update",
-    "sdk version",
-    "language client library",
-    "client library",
-    "package versions",
-    "project files",
-    "csproj",
-    "sln",
     "docker compose",
     "compose",
     "kubernetes",
@@ -155,7 +133,14 @@ class FreshnessGate:
         targets = _dedupe([*route_targets, *_extract_targets(text), task.title or ""])
         if not targets and freshness_required:
             targets = [task.description[:160].strip()]
-        reason = self._reason(triggered, mode, targets)
+        stage_preference = self._stage_preference(
+            freshness_required=freshness_required,
+            route=route,
+            versions_required=versions_required,
+            docs_required=docs_required,
+            changelog_required=changelog_required,
+        )
+        reason = self._reason(triggered, mode, targets, stage_preference=stage_preference)
 
         return FreshnessDecision(
             freshness_required=freshness_required,
@@ -166,6 +151,7 @@ class FreshnessGate:
             docs_resolution_required=docs_required,
             changelog_resolution_required=changelog_required,
             web_resolution_required=web_required and mode == RetrievalMode.WEB,
+            stage_preference=stage_preference,
             targets=targets,
             triggered_by=_dedupe(triggered),
         )
@@ -183,6 +169,24 @@ class FreshnessGate:
         if web_required:
             return RetrievalMode.WEB
         return RetrievalMode.NONE
+
+
+    @staticmethod
+    def _stage_preference(
+        *,
+        freshness_required: bool,
+        route: RoutingDecision | None,
+        versions_required: bool,
+        docs_required: bool,
+        changelog_required: bool,
+    ) -> FreshnessStagePreference:
+        if not freshness_required:
+            return FreshnessStagePreference.PACKET_SCOPED
+        if route is not None and (route.needs_repository_observation or route.needs_world_observation):
+            return FreshnessStagePreference.AFTER_OBSERVE
+        if versions_required or docs_required or changelog_required:
+            return FreshnessStagePreference.IMMEDIATE
+        return FreshnessStagePreference.PACKET_SCOPED
 
     @staticmethod
     def source_preferences_for(mode: RetrievalMode) -> list[SourcePreference]:
@@ -206,11 +210,12 @@ class FreshnessGate:
         return out
 
     @staticmethod
-    def _reason(triggered: list[str], mode: RetrievalMode, targets: list[str]) -> str:
+    def _reason(triggered: list[str], mode: RetrievalMode, targets: list[str], *, stage_preference: FreshnessStagePreference) -> str:
         if not triggered:
             return "No freshness-sensitive indicators were detected; local/model knowledge is sufficient for routing."
         target_text = ", ".join(targets[:5]) if targets else "the task"
-        return f"Freshness lookup required by control-plane gate ({', '.join(_dedupe(triggered))}); mode={mode.value}; targets={target_text}."
+        stage_hint = f" stage_preference={stage_preference.value};"
+        return f"Freshness lookup required by control-plane gate ({', '.join(_dedupe(triggered))}); mode={mode.value};{stage_hint} targets={target_text}."
 
 
 def _normalize_text(value: str) -> str:

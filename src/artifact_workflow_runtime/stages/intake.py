@@ -117,8 +117,11 @@ class IntakeStageMixin:
             for artifact_id in added_artifacts:
                 artifact_ids = _append_artifact_id(artifact_ids, artifact_id)
             kernel = services.runtime_kernel or RuntimeKernel()
-            next_stage = kernel.next_after_route(parsed)
-            reason = freshness_decision.retrieval_reason if freshness_decision and freshness_decision.freshness_required else parsed.reasoning
+            next_stage = kernel.next_after_route(parsed, freshness_decision)
+            if next_stage == "observe" and freshness_decision is not None and freshness_decision.freshness_required:
+                reason = "Repository/world observation must happen before broad freshness retrieval so later research can be targeted by actual workspace facts."
+            else:
+                reason = freshness_decision.retrieval_reason if freshness_decision and freshness_decision.freshness_required else parsed.reasoning
             return {
                 "route_request": request.model_dump(mode="json"),
                 "route_result": result.model_dump(mode="json"),
@@ -135,4 +138,8 @@ class IntakeStageMixin:
             readiness_gate = self.readiness_gate
             decision = RoutingDecision.model_validate(state["route_decision"])
             kernel = services.runtime_kernel or RuntimeKernel()
-            return kernel.next_after_route(decision)
+            freshness_decision = None
+            if state.get("freshness_decision"):
+                from artifact_workflow_runtime.freshness import FreshnessDecision
+                freshness_decision = FreshnessDecision.model_validate(state["freshness_decision"])
+            return kernel.next_after_route(decision, freshness_decision)

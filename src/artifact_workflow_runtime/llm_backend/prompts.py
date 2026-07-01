@@ -164,7 +164,11 @@ def build_route_prompt(task: Task, classification: TaskClassification) -> str:
     )
 
 
-def build_plan_prompt(task: Task, context_packet: ContextPacket, task_intent: str, obligations: ObligationAnalysis) -> str:
+def build_plan_prompt(task: Task, context_packet: ContextPacket, task_intent: str, obligations: ObligationAnalysis, reconciliation: object | None = None) -> str:
+    reconciliation_block = ""
+    if reconciliation is not None:
+        payload = reconciliation.model_dump(mode="json") if hasattr(reconciliation, "model_dump") else reconciliation
+        reconciliation_block = "Workspace reconciliation:\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n\n"
     return (
         "Produce an execution plan for a controller-driven workflow.\n"
         "You only see text from a ContextPacket.\n"
@@ -173,6 +177,8 @@ def build_plan_prompt(task: Task, context_packet: ContextPacket, task_intent: st
         "Freshness/retrieval artifacts in the ContextPacket are the truth layer for current docs, versions, changelog, CLI flags, compatibility, and migration facts; do not override them with stale model memory.\n"
         "Preserve the user's actual intent.\n"
         "If task_intent is implement or modify, the plan must end in real world changes and must not degrade into design-only, outline-only, instructions-only, or documentation-only work.\n"
+        "If Workspace reconciliation says delivery_mode is continue_existing_candidate or complete_existing_candidate, treat the existing surface as adopted candidate work and continue with modify/repair/complete semantics; verify-only plans are forbidden.\n"
+        "When existing code is already present, do not reinterpret that as task completion. Use passed_obligations and unresolved_obligations to decide what still must change or be repaired.\n"
         "For repository_change implementation tasks, include concrete file changes, required dependency installation/setup steps, build/test actions, and expected repository outputs.\n"
         "If the change adds a new client, runtime, integration surface, or compatibility layer, require the necessary integration tests unless evidence proves they do not exist or cannot be run.\n"
         "If tests need extra dependencies inside Docker, include the setup steps explicitly.\n"
@@ -181,10 +187,10 @@ def build_plan_prompt(task: Task, context_packet: ContextPacket, task_intent: st
         "Return strict JSON matching this shape:\n"
         f"{json.dumps(PLAN_SCHEMA_HINT, ensure_ascii=False, indent=2)}\n\n"
         f"Task intent: {task_intent}\n\n"
-        f"Task:\n{task.description}\n\n"
-        f"ContextPacket:\n{context_packet.text}\n"
+        + reconciliation_block
+        + f"Task:\n{task.description}\n\n"
+        + f"ContextPacket:\n{context_packet.text}\n"
     )
-
 
 
 

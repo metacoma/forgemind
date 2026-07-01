@@ -86,15 +86,11 @@ class FinalReportBuilder:
                 packet.status == ExecutionPacketStatus.BLOCKED and packet.packet_type.value in {"setup", "integration", "verification"}
                 for packet in decomposition_plan.packets
             ) or _execution_has_environment_blocker(execution)
-            status = "implementation_passed_runtime_blocked" if (environment_blocked and execution and execution.ok) else ("needs_environment" if environment_blocked else "blocked")
+            status = "needs_environment" if environment_blocked else "blocked"
             summary = (
-                "Implementation/build evidence is usable, but runtime/setup environment proof is blocked: "
-                if status == "implementation_passed_runtime_blocked"
-                else (
-                    "Decomposition plan is blocked by runtime/setup environment prerequisites: "
-                    if environment_blocked
-                    else "Decomposition plan did not complete because blocked/failed packets remain: "
-                )
+                "Decomposition plan is blocked by runtime/setup environment prerequisites: "
+                if environment_blocked
+                else "Decomposition plan did not complete because blocked/failed packets remain: "
             ) + ", ".join(blocked_packets)
         elif decomposition_plan is not None and decomposition_plan.packets and any(packet.status not in {ExecutionPacketStatus.COMPLETED, ExecutionPacketStatus.SKIPPED} for packet in decomposition_plan.packets):
             status = "partially_completed"
@@ -114,9 +110,6 @@ class FinalReportBuilder:
         elif verification:
             status = "needs_human_review" if plan and (plan.requires_mutation or plan.must_change_world) else (verification.completion_status if verification.completion_status else ("completed" if verification.passed else "executed_unverified"))
             summary = verification.summary or "Verification completed, but no acceptance decision was recorded."
-        elif execution and execution.ok and _execution_has_environment_blocker(execution):
-            status = "implementation_passed_runtime_blocked"
-            summary = execution.summary or "Implementation evidence is usable, but runtime/integration proof is blocked by environment."
         elif execution and execution.ok:
             status = "implemented_only"
             summary = execution.summary or "Execution completed but verification did not run."

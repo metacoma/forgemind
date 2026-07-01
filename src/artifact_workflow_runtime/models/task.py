@@ -8,6 +8,7 @@ from .core import (
     Task,
     TaskClassification,
     RoutingDecision,
+    WorkspaceReconciliation,
     ObligationAnalysis,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "Task",
     "TaskClassification",
     "RoutingDecision",
+    "WorkspaceReconciliation",
     "ObligationAnalysis",
 ]

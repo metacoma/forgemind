@@ -36,7 +36,7 @@ def test_runtime_kernel_owns_route_decisions() -> None:
         can_plan_immediately=False,
         reasoning="Need current docs before repo observation.",
     )
-    assert kernel.next_after_route(decision) == "research"
+    assert kernel.next_after_route(decision) == "observe"
     assert kernel.next_after_research(decision) == "observe"
 
 

@@ -5,7 +5,7 @@ from typing import Any
 
 from artifact_workflow_runtime.artifacts import ArtifactStore
 from artifact_workflow_runtime.context import ContextBuilder
-from artifact_workflow_runtime.control_plane import RuntimeKernel
+from artifact_workflow_runtime.control_plane import RuntimeKernel, WorkspaceReconciler
 from artifact_workflow_runtime.done_contract import DoneContractCompiler
 from artifact_workflow_runtime.environment import EnvironmentDiscovery
 from artifact_workflow_runtime.freshness import FreshnessGate, RetrievalService
@@ -42,6 +42,7 @@ class WorkflowServices:
     event_sink: EventSink | None = None
     model_routing: ModelRoutingConfig | None = None
     runtime_kernel: RuntimeKernel | None = None
+    workspace_reconciler: WorkspaceReconciler | None = None
     checkpoint_recorder: WorkflowCheckpointRecorder | None = None
     strategy_governor: StrategyGovernor | None = None
     strategy_selection_mode: StrategySelectionMode = StrategySelectionMode.RULE_BASED

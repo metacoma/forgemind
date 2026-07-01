@@ -295,12 +295,6 @@ class MutationSummary(RuntimeModel):
     changed: bool = False
     summary: str = ""
     files_changed: list[str] = Field(default_factory=list)
-    created_by_run_id: str | None = None
-    created_by_stage: str | None = None
-    created_by_packet_id: str | None = None
-    first_seen_in_artifact_id: str | None = None
-    current_packet_delta: list[str] = Field(default_factory=list)
-    workflow_cumulative_delta: list[str] = Field(default_factory=list)
 
 
 class PostcheckSummary(RuntimeModel):
@@ -694,6 +688,19 @@ class RoutingDecision(RuntimeModel):
     reasoning: str
 
 
+class WorkspaceReconciliation(RuntimeModel):
+    id: str = Field(default_factory=lambda: new_id("ws_reconcile"))
+    task_id: str
+    task_intent_floor: str = "investigate"
+    delivery_mode: str = "new_implementation"
+    target_surfaces: list[str] = Field(default_factory=list)
+    existing_target_surfaces: list[str] = Field(default_factory=list)
+    adopt_existing_work: bool = False
+    passed_obligations: list[str] = Field(default_factory=list)
+    unresolved_obligations: list[str] = Field(default_factory=list)
+    freshness_scope: str = "none"
+    reasoning: str
+    created_at: str = Field(default_factory=utc_now)
 
 
 class ObligationAnalysis(RuntimeModel):

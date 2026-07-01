@@ -69,6 +69,10 @@ class ObservationContextStageMixin:
                 result = ObservationResult.model_validate(state["research_result"])
                 if not result.ok:
                     return "finalize"
+            if state.get("observation_result"):
+                observed = ObservationResult.model_validate(state["observation_result"])
+                if observed.ok:
+                    return "build_context"
             decision = RoutingDecision.model_validate(state["route_decision"])
             kernel = services.runtime_kernel or RuntimeKernel()
             return kernel.next_after_research(decision)
@@ -83,6 +87,29 @@ class ObservationContextStageMixin:
             await _emit(services, "stage_started", "observe", "Collecting world facts through OpenHands", task_id=task.id)
             request = services.observation_service.build_request(task, classification, route)
             result = await services.openhands_adapter.observe(request)
+            freshness_decision = None
+            if state.get("freshness_decision"):
+                from artifact_workflow_runtime.freshness import FreshnessDecision
+                freshness_decision = FreshnessDecision.model_validate(state["freshness_decision"])
+            reconciliation = None
+            reconcile_artifact = None
+            if services.workspace_reconciler is not None:
+                reconciliation = services.workspace_reconciler.reconcile(
+                    task=task,
+                    classification=classification,
+                    route=route,
+                    observation=result,
+                    freshness_decision=freshness_decision,
+                )
+                reconcile_artifact = services.artifact_store.add_json(
+                    "workspace_reconciliation",
+                    reconciliation.model_dump(mode="json"),
+                    metadata={"task_id": task.id},
+                )
+                result = result.model_copy(update={
+                    "artifacts": [*result.artifacts, reconcile_artifact],
+                    "primary_evidence_artifact_ids": [*result.primary_evidence_artifact_ids, reconcile_artifact.id],
+                })
             artifact_ids = list(state.get("artifact_ids") or [])
             artifact_ids.extend(artifact.id for artifact in result.artifacts)
             await _emit(
@@ -94,14 +121,18 @@ class ObservationContextStageMixin:
                 conversation_id=result.conversation_id,
                 evidence_kind=result.evidence_kind,
                 artifact_ids=[artifact.id for artifact in result.artifacts],
+                delivery_mode=(reconciliation.delivery_mode if reconciliation is not None else None),
             )
-            return {
+            update = {
                 "observation_request": request.model_dump(mode="json"),
                 "observation_result": result.model_dump(mode="json"),
                 "artifact_ids": artifact_ids,
                 "status": "observed",
                 "transitions": _append_transition(state, "observe", "observed", "World/repository observation evidence collected", [artifact.id for artifact in result.artifacts]),
             }
+            if reconciliation is not None:
+                update["workspace_reconciliation"] = reconciliation.model_dump(mode="json")
+            return update
 
     def observe_next(self, state: WorkflowState) -> str:
             services = self.services
@@ -110,6 +141,11 @@ class ObservationContextStageMixin:
                 result = ObservationResult.model_validate(state["observation_result"])
                 if not result.ok:
                     return "finalize"
+            if state.get("freshness_decision") and not state.get("research_result"):
+                from artifact_workflow_runtime.freshness import FreshnessDecision, FreshnessStagePreference
+                freshness_decision = FreshnessDecision.model_validate(state["freshness_decision"])
+                if freshness_decision.freshness_required and freshness_decision.stage_preference == FreshnessStagePreference.AFTER_OBSERVE:
+                    return "research"
             return "build_context"
 
     async def build_context_node(self, state: WorkflowState) -> dict[str, Any]:
