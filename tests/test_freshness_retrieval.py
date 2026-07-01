@@ -277,3 +277,25 @@ async def test_runtime_route_forces_retrieval_and_plan_execute_receive_grounding
     assert "retrieval_sources" in artifact_kinds
     assert "version_resolution" in artifact_kinds
     assert "retrieval_snapshot" in artifact_kinds
+
+
+def test_freshness_retrieval_request_actions_are_authorized_by_research_acl() -> None:
+    from artifact_workflow_runtime.models import ExecutionFamily, TaskClassification
+    from artifact_workflow_runtime.openhands_adapter.contracts import OpenHandsStageContractGate
+
+    task = Task(description="Add a C#/.NET gRPC client using current NuGet package versions.")
+    classification = TaskClassification(
+        normalized_task="Add C# .NET gRPC client",
+        needs_world_facts=True,
+        execution_family=ExecutionFamily.REPOSITORY_CHANGE,
+        task_intent="implement",
+        capabilities=[],
+        observation_focus=["grpc", "dotnet"],
+        reasoning="repository change with current package versions",
+        risk_level="low",
+    )
+    decision = FreshnessGate().decide(task=task, classification=classification)
+    request = RetrievalService().build_request(task=task, classification=classification, decision=decision)
+
+    assert {"inspect_release_notes", "inspect_package_registry"}.issubset(set(request.allowed_actions))
+    OpenHandsStageContractGate.validate_observation(request)
