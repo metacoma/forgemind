@@ -102,6 +102,17 @@ from .verification import (
 from .report import (
     FinalReport,
 )
+from artifact_workflow_runtime.decomposition.models import (
+    DecompositionComplexity,
+    DecompositionPlan,
+    DecompositionValidationResult,
+    DecompositionProgressDecision,
+    ExecutionPacket,
+    ExecutionPacketStatus,
+    ExecutionPacketType,
+    PacketHistoryEntry,
+    PacketSelection,
+)
 from artifact_workflow_runtime.strategy.models import (
     LLMStrategyRecommendation,
     StrategyAdvisorContext,
@@ -181,6 +192,15 @@ __all__ = [
     "VerificationRequest",
     "VerificationResult",
     "FinalReport",
+    "DecompositionComplexity",
+    "DecompositionPlan",
+    "DecompositionValidationResult",
+    "DecompositionProgressDecision",
+    "ExecutionPacket",
+    "ExecutionPacketStatus",
+    "ExecutionPacketType",
+    "PacketHistoryEntry",
+    "PacketSelection",
     "LLMStrategyRecommendation",
     "StrategyAdvisorContext",
     "StrategyAdvisorStatus",

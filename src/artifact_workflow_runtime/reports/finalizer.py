@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from artifact_workflow_runtime.decomposition.models import DecompositionPlan, DecompositionProgressDecision, ExecutionPacketStatus
 from artifact_workflow_runtime.models import (
     AcceptanceDecision,
     ApprovalRequest,
@@ -38,6 +39,8 @@ class FinalReportBuilder:
         verification: VerificationResult | None = None,
         acceptance_contract: TaskAcceptanceContract | None,
         acceptance_decision: AcceptanceDecision | None,
+        decomposition_plan: DecompositionPlan | None = None,
+        packet_progression: DecompositionProgressDecision | None = None,
         artifact_ids: list[str],
     ) -> FinalReport:
         if approval and approval.required and approval.approved is False:
@@ -55,6 +58,16 @@ class FinalReportBuilder:
         elif acceptance_decision:
             status = acceptance_decision.final_workflow_status
             summary = acceptance_decision.summary
+        elif packet_progression is not None and packet_progression.blocked:
+            status = "blocked"
+            summary = packet_progression.reason
+        elif decomposition_plan is not None and any(packet.status in {ExecutionPacketStatus.BLOCKED, ExecutionPacketStatus.FAILED} for packet in decomposition_plan.packets):
+            status = "blocked"
+            blocked_packets = [packet.packet_id for packet in decomposition_plan.packets if packet.status in {ExecutionPacketStatus.BLOCKED, ExecutionPacketStatus.FAILED}]
+            summary = "Decomposition plan did not complete because blocked/failed packets remain: " + ", ".join(blocked_packets)
+        elif decomposition_plan is not None and decomposition_plan.packets and any(packet.status not in {ExecutionPacketStatus.COMPLETED, ExecutionPacketStatus.SKIPPED} for packet in decomposition_plan.packets):
+            status = "partially_completed"
+            summary = "Decomposition plan has unfinished packets; workflow stopped before full verification/acceptance."
         elif execution and not execution.ok and execution.stage_failure is not None:
             status = "agent_failed"
             summary = execution.summary or "Execution did not produce usable operational evidence."

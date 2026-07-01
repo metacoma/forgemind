@@ -41,6 +41,7 @@ from artifact_workflow_runtime.models.core import (
 )
 from artifact_workflow_runtime.lifecycle.models import LifecycleTransitionDecision, PipelineLoopDecision
 from artifact_workflow_runtime.strategy.models import StrategyDecision, StrategyId
+from artifact_workflow_runtime.decomposition.models import DecompositionPlan, DecompositionProgressDecision, PacketHistoryEntry
 
 JsonDict = dict[str, Any]
 
@@ -159,7 +160,7 @@ STAGE_STATE_CONTRACTS: dict[CoreWorkflowStage, StageStateContract] = {
         _stage_contract(CoreWorkflowStage.BUILD_CONTEXT, ("task",), ("context_packet",), WorkflowStatus.CONTEXT_BUILT),
         _stage_contract(CoreWorkflowStage.OBLIGATIONS, ("task", "classification", "route_decision", "context_packet"), ("obligation_request", "obligation_result", "obligations"), WorkflowStatus.OBLIGATIONS_SYNTHESIZED),
         _stage_contract(CoreWorkflowStage.DONE_CONTRACT, ("task", "classification", "obligations"), ("done_contract",), WorkflowStatus.DONE_CONTRACT_BUILT),
-        _stage_contract(CoreWorkflowStage.PLAN, ("task", "classification", "context_packet", "obligations", "done_contract"), ("plan_request", "plan_result", "plan", "acceptance_contract"), WorkflowStatus.PLANNED),
+        _stage_contract(CoreWorkflowStage.PLAN, ("task", "classification", "context_packet", "obligations", "done_contract"), ("plan_request", "plan_result", "plan", "acceptance_contract", "decomposition_plan", "active_packet_id"), WorkflowStatus.PLANNED),
         _stage_contract(CoreWorkflowStage.POLICY, ("task", "classification", "route_decision", "plan"), ("policy_decision",), WorkflowStatus.POLICY_CHECKED),
         _stage_contract(CoreWorkflowStage.APPROVAL, ("policy_decision",), ("approval_request",), WorkflowStatus.APPROVAL_RESOLVED),
         _stage_contract(CoreWorkflowStage.WORKSPACE_PREPARE, ("task", "done_contract"), ("workspace_branch", "workspace_root", "environment_plan"), WorkflowStatus.WORKSPACE_PREPARED),
@@ -188,7 +189,7 @@ STATUS_REQUIRED_FIELDS: dict[WorkflowStatus, tuple[str, ...]] = {
     WorkflowStatus.CONTEXT_BUILT: ("task", "context_packet"),
     WorkflowStatus.OBLIGATIONS_SYNTHESIZED: ("task", "obligations"),
     WorkflowStatus.DONE_CONTRACT_BUILT: ("task", "done_contract"),
-    WorkflowStatus.PLANNED: ("task", "plan", "acceptance_contract"),
+    WorkflowStatus.PLANNED: ("task", "plan", "acceptance_contract", "decomposition_plan"),
     WorkflowStatus.POLICY_CHECKED: ("task", "plan", "policy_decision"),
     WorkflowStatus.APPROVAL_RESOLVED: ("task", "policy_decision", "approval_request"),
     WorkflowStatus.WORKSPACE_PREPARED: ("task", "workspace_branch", "workspace_root", "environment_plan"),
@@ -315,6 +316,10 @@ class WorkflowStateSnapshot(RuntimeModel):
     controller_decisions: list[ControllerDecision] = Field(default_factory=list)
     active_strategy: StrategyId | None = None
     strategy_decisions: list[StrategyDecision] = Field(default_factory=list)
+    decomposition_plan: DecompositionPlan | None = None
+    active_packet_id: str | None = None
+    packet_history: list[PacketHistoryEntry] = Field(default_factory=list)
+    packet_progression: DecompositionProgressDecision | None = None
     transitions: list[StageTransition] = Field(default_factory=list)
     artifact_ids: list[str] = Field(default_factory=list)
     status: WorkflowStatus = WorkflowStatus.CREATED
@@ -456,6 +461,10 @@ class WorkflowState(TypedDict, total=False):
     controller_decisions: list[JsonDict]
     active_strategy: str | None
     strategy_decisions: list[JsonDict]
+    decomposition_plan: JsonDict | None
+    active_packet_id: str | None
+    packet_history: list[JsonDict]
+    packet_progression: JsonDict | None
     transitions: list[JsonDict]
     artifact_ids: list[str]
     status: str

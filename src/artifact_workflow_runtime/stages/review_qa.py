@@ -7,6 +7,7 @@ from artifact_workflow_runtime.done_contract import DoneContract
 from artifact_workflow_runtime.environment import EnvironmentPlan
 from artifact_workflow_runtime.qa import QAExecutionReport, QAPlan, QAReview
 from artifact_workflow_runtime.state.workspace import workspace_root_from_state
+from artifact_workflow_runtime.decomposition import DecompositionPlan
 
 
 class ReviewQAStageMixin:
@@ -50,21 +51,48 @@ class ReviewQAStageMixin:
         review = QAReview(task_id=task.id, status=status, summary=" ".join(summary_parts), failing_checks=_unique(failing_checks), environment_blockers=_unique(env_blockers))
         artifact = services.artifact_store.add_json("review_result", review.model_dump(mode="json"), metadata={"task_id": task.id, "status": status})
         selected_next = "qa_plan" if status == "pass" else ("finalize" if status == "policy_violation" else "repair")
+        packet_progression = None
+        progression_artifact_id = None
+        next_active_packet_id = state.get("active_packet_id")
+        if status == "pass" and state.get("decomposition_plan") is not None:
+            decomposition_plan = DecompositionPlan.model_validate(state["decomposition_plan"])
+            packet_progression = kernel.evaluate_decomposition_progression(
+                decomposition_plan=decomposition_plan,
+                active_strategy=state.get("active_strategy"),
+                current_packet_id=state.get("active_packet_id"),
+            )
+            if packet_progression is not None:
+                selected_next = packet_progression.selected_next_stage
+                next_active_packet_id = packet_progression.selected_next_packet_id if selected_next == "execute" else None
+                progression_artifact = services.artifact_store.add_json(
+                    "packet_progression",
+                    packet_progression.model_dump(mode="json"),
+                    metadata={"task_id": task.id, "plan_id": decomposition_plan.plan_id, "stage": "review"},
+                )
+                progression_artifact_id = progression_artifact.id
         await _emit(services, "stage_completed", "review", "Execution review completed", status=status, failing_checks=review.failing_checks, next_stage=selected_next, artifact_id=artifact.id)
+        review_artifact_ids = _append_artifact_id(state.get("artifact_ids"), artifact.id)
+        if progression_artifact_id is not None:
+            review_artifact_ids = _append_artifact_id(review_artifact_ids, progression_artifact_id)
+        transition_artifacts = [artifact.id]
+        if progression_artifact_id is not None:
+            transition_artifacts.append(progression_artifact_id)
         update = {
             "review_result": review.model_dump(mode="json"),
             "execution_review_decision": lifecycle.model_dump(mode="json"),
-            "artifact_ids": _append_artifact_id(state.get("artifact_ids"), artifact.id),
+            "artifact_ids": review_artifact_ids,
+            "active_packet_id": next_active_packet_id,
+            **({"packet_progression": packet_progression.model_dump(mode="json")} if packet_progression is not None else {}),
             "status": "reviewed",
-            "transitions": _append_transition(state, "review", "reviewed", review.summary, [artifact.id]),
-            "controller_decisions": _append_controller_decision(state, kernel.controller_decision(stage="review", selected_next_stage=selected_next, reason=review.summary)),
+            "transitions": _append_transition(state, "review", "reviewed", review.summary, transition_artifacts),
+            "controller_decisions": _append_controller_decision(state, kernel.controller_decision(stage="review", selected_next_stage=selected_next, reason=(packet_progression.reason if packet_progression is not None else review.summary))),
         }
         if status == "policy_violation" and contract is not None:
             acceptance = kernel.acceptance_from_lifecycle_violation(contract=contract, execution=execution, decision=lifecycle)
             acceptance_artifact = services.artifact_store.add_json("acceptance_decision", acceptance.model_dump(mode="json"), metadata={"task_id": task.id, "source": "review_lifecycle_violation"})
             update["acceptance_decision"] = acceptance.model_dump(mode="json")
             update["artifact_ids"] = _append_artifact_id(update["artifact_ids"], acceptance_artifact.id)
-        if status != "pass" or missing:
+        if status != "pass" or missing or (packet_progression is not None and packet_progression.blocked):
             strategy_state = dict(state)
             strategy_state.update(update)
             strategy_update = await _record_strategy_checkpoint(services, strategy_state, checkpoint_stage="review")
@@ -74,7 +102,9 @@ class ReviewQAStageMixin:
     def review_next(self, state: WorkflowState) -> str:
         review = QAReview.model_validate(state["review_result"])
         if review.status == "pass":
-            return "qa_plan"
+            progression = state.get("packet_progression") or {}
+            next_stage = str(progression.get("selected_next_stage") or "qa_plan") if isinstance(progression, dict) else "qa_plan"
+            return next_stage if next_stage in {"execute", "qa_plan", "finalize"} else "qa_plan"
         if review.status == "fail_code":
             return "repair"
         return "finalize"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .common import *
+from artifact_workflow_runtime.decomposition import DecompositionPlan, DecompositionProgressDecision
 
 
 class VerificationAcceptanceStageMixin:
@@ -379,6 +380,8 @@ class VerificationAcceptanceStageMixin:
                 verification=VerificationResult.model_validate(state["verification_result"]) if state.get("verification_result") else None,
                 acceptance_contract=TaskAcceptanceContract.model_validate(state["acceptance_contract"]) if state.get("acceptance_contract") else None,
                 acceptance_decision=AcceptanceDecision.model_validate(state["acceptance_decision"]) if state.get("acceptance_decision") else None,
+                decomposition_plan=DecompositionPlan.model_validate(state["decomposition_plan"]) if state.get("decomposition_plan") else None,
+                packet_progression=DecompositionProgressDecision.model_validate(state["packet_progression"]) if state.get("packet_progression") else None,
                 artifact_ids=list(state.get("artifact_ids") or []),
             )
             artifact = services.artifact_store.add_json("final_report", report.model_dump(mode="json"))

@@ -49,7 +49,7 @@ def wire_workflow_graph(graph: Any, *, nodes: Mapping[str, NodeFn], routers: Map
     graph.add_conditional_edges("approval", routers["approval"], {"workspace_prepare": "workspace_prepare", "finalize": "finalize"})
     graph.add_edge("workspace_prepare", "execute")
     graph.add_conditional_edges("execute", routers["execute"], {"review": "review"})
-    graph.add_conditional_edges("review", routers["review"], {"qa_plan": "qa_plan", "repair": "repair", "finalize": "finalize"})
+    graph.add_conditional_edges("review", routers["review"], {"execute": "execute", "qa_plan": "qa_plan", "repair": "repair", "finalize": "finalize"})
     graph.add_edge("qa_plan", "qa_execute")
     graph.add_edge("qa_execute", "qa_review")
     graph.add_conditional_edges("qa_review", routers["qa_review"], {"acceptance": "acceptance", "repair": "repair", "finalize": "finalize", "research": "research", "observe": "observe", "build_context": "build_context", "obligations": "obligations", "plan": "plan"})

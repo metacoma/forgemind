@@ -44,6 +44,7 @@ from artifact_workflow_runtime.lifecycle import (
 )
 from artifact_workflow_runtime.policy import PolicyEngine
 from artifact_workflow_runtime.policy.evidence import EvidenceGate
+from artifact_workflow_runtime.decomposition import DecompositionPlan, DecompositionProgressDecision, progression_decision
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +201,21 @@ class RuntimeKernel:
 
     def next_after_execution_review(self, decision: LifecycleTransitionDecision) -> str:
         return decision.graph_next
+
+    def evaluate_decomposition_progression(
+        self,
+        *,
+        decomposition_plan: DecompositionPlan | None,
+        active_strategy: str | None,
+        current_packet_id: str | None,
+    ) -> DecompositionProgressDecision | None:
+        if decomposition_plan is None:
+            return None
+        return progression_decision(
+            decomposition_plan,
+            active_strategy=active_strategy,
+            current_packet_id=current_packet_id,
+        )
 
     def next_after_acceptance(
         self,
