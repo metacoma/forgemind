@@ -184,6 +184,27 @@ class EvidenceExtractor:
 
     def _from_json_contract(self, text: str, *, artifact_id: str | None = None) -> StructuredEvidence | None:
         payload = _extract_json_payload(text)
+        return self._from_payload_contract(payload, artifact_id=artifact_id)
+
+    def from_payload(
+        self,
+        payload: object,
+        *,
+        artifact_id: str | None = None,
+        changed_default: bool = False,
+        strict: bool = False,
+    ) -> StructuredEvidence:
+        structured = self._from_payload_contract(payload, artifact_id=artifact_id)
+        if structured is not None:
+            return structured
+        if strict:
+            raise EvidenceContractError(
+                "Strict evidence mode requires a JSON object with structured_evidence "
+                "or top-level evidence keys; prose/regex fallback is not accepted."
+            )
+        return self.from_text(json.dumps(payload, ensure_ascii=False) if isinstance(payload, (dict, list)) else str(payload), artifact_id=artifact_id, changed_default=changed_default)
+
+    def _from_payload_contract(self, payload: object, *, artifact_id: str | None = None) -> StructuredEvidence | None:
         if not isinstance(payload, Mapping):
             return None
         artifact_ids = [artifact_id] if artifact_id else []

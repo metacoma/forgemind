@@ -30,6 +30,7 @@ from artifact_workflow_runtime.models import (
 )
 
 from .contracts import OpenHandsStageContractGate
+from .gateway import OpenHandsResponseNormalizer
 from .instance import OpenHandsInstance
 from .result_gate import StageResultGate
 
@@ -119,6 +120,7 @@ class OpenHandsAdapter:
         self.evidence_extractor = EvidenceExtractor()
         self.contract_gate = OpenHandsStageContractGate()
         self.result_gate = StageResultGate(artifact_store)
+        self.response_normalizer = OpenHandsResponseNormalizer(artifact_store, self.evidence_extractor)
 
     async def _run_json_handoff_followup(self, *, stage: str, request: object, run) -> object | None:
         response_contract = _response_contract_for_request(request)
@@ -179,6 +181,7 @@ class OpenHandsAdapter:
 
         bundle, bundle_artifact, selected_ok, selected_evidence_kind, strict_failure = self._evidence_bundle(
             stage=stage,
+            request=request,
             text=selected_text,
             raw_artifact_id=selected_artifact.id,
             request_id=request.id,
@@ -260,6 +263,7 @@ class OpenHandsAdapter:
         self,
         *,
         stage: str,
+        request: object,
         text: str,
         raw_artifact_id: str,
         request_id: str,
@@ -272,20 +276,25 @@ class OpenHandsAdapter:
         strict_failure: OpenHandsRunFailure | None = None
         effective_ok = ok
         effective_evidence_kind = evidence_kind
-        try:
-            structured = self.evidence_extractor.from_agent_output(
-                text,
-                artifact_id=raw_artifact_id,
-                changed_default=changed_default,
-                strict=self.strict_evidence,
-            )
-        except EvidenceContractError as exc:
+        normalized = self.response_normalizer.normalize(
+            stage=stage,
+            request_id=request_id,
+            raw_text=text,
+            raw_artifact_id=raw_artifact_id,
+            response_contract=_response_contract_for_request(request),
+            strict=self.strict_evidence,
+            changed_default=changed_default,
+        )
+        if normalized.structured_evidence is not None:
+            structured = normalized.structured_evidence
+        else:
             effective_ok = False
             effective_evidence_kind = "evidence_contract_missing"
+            reason = str(normalized.validation_result.get("reason") or "Structured OpenHands response did not satisfy the response contract.")
             structured = StructuredEvidence(
                 blockers=[
                     BlockerEvidence(
-                        summary=str(exc),
+                        summary=reason,
                         severity="high",
                         blocker_kind=BlockerKind.MISSING_EVIDENCE,
                         artifact_ids=[raw_artifact_id],
@@ -297,7 +306,7 @@ class OpenHandsAdapter:
                 request_id=request_id,
                 work_packet_kind=work_packet_kind,
                 failure_kind=StageFailureKind.EVIDENCE_CONTRACT_MISSING,
-                summary=str(exc),
+                summary=reason,
                 retryable=True,
                 evidence_kind=effective_evidence_kind,
                 diagnostic_artifact_id=raw_artifact_id,
@@ -314,6 +323,10 @@ class OpenHandsAdapter:
             raw_text_artifact_id=raw_artifact_id,
             blockers=[item.summary for item in structured.blockers],
         )
+        if normalized.extracted_payload_artifact_id:
+            bundle.artifact_ids.append(normalized.extracted_payload_artifact_id)
+        if normalized.normalized_payload_artifact_id:
+            bundle.artifact_ids.append(normalized.normalized_payload_artifact_id)
         artifact = self.artifact_store.add_json(
             "structured_evidence_bundle",
             bundle.model_dump(mode="json"),
@@ -322,6 +335,12 @@ class OpenHandsAdapter:
                 "work_packet_kind": work_packet_kind.value,
                 "backend": BackendKind.OPENHANDS.value,
                 "strict_evidence": self.strict_evidence,
+                "raw_artifact_id": raw_artifact_id,
+                "extracted_payload_artifact_id": normalized.extracted_payload_artifact_id,
+                "normalized_payload_artifact_id": normalized.normalized_payload_artifact_id,
+                "extraction_mode": normalized.extraction_mode,
+                "fallback_extraction_used": normalized.fallback_extraction_used,
+                "contract_status": normalized.contract_status,
             },
         )
         bundle.artifact_ids.append(artifact.id)
