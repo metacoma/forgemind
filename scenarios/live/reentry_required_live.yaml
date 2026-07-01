@@ -1,0 +1,28 @@
+scenario_id: live_reentry_required_docs_gap
+title: Live re-entry required after docs gap
+description: Live benchmark where late discovered documentation impact must re-enter obligations/plan/setup instead of linear finalization.
+task_text: Add a public feature and keep the repository complete.
+live_task_text_override: |
+  Run a live repository benchmark for a public feature change. If verification discovers a documentation obligation late, re-enter obligations/planning and complete the docs work before acceptance.
+tags: [repo, docs, reentry_required, live]
+execution_family: repository_change
+difficulty: medium
+target_runtime_profile: repo_reentry_docs_gap
+environment_profile: docker_container
+live_environment_profile: isolated_repo
+expected_obligations: [documentation_updated, tests_passed]
+required_evidence: [commands_run, files_changed, tests]
+required_stage_patterns: [observe, obligations, plan, execute, verify, acceptance]
+allowed_terminal_statuses: [completed]
+live_allowed_terminal_statuses: [completed, needs_environment, blocked]
+forbidden_terminal_statuses: [failed]
+expected_reentry_behavior: [must_reenter_obligations_if_docs_gap_found]
+expected_packet_patterns: [implementation, docs]
+success_criteria: [reentry_occurs, docs_fixed]
+requires_live_repo: true
+requires_live_openhands: true
+safe_for_live: true
+needs_isolated_repo: true
+live_timeout_seconds: 1200
+notes: First-class re-entry benchmark scenario.
+live_notes: Safe only in isolated benchmark repository.

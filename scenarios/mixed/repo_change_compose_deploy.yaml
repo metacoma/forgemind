@@ -1,0 +1,30 @@
+scenario_id: mixed_repo_change_compose_deploy
+title: Repository change plus compose deployment verification
+description: Mixed-flow benchmark covering repository edit, compose/bootstrap path, and post-deploy verification evidence.
+task_text: Update the repository compose service definition and verify service health through the supported compose path.
+live_task_text_override: |
+  Run this only in an isolated benchmark host/repository. Update the repository compose service definition, use repo-supported bootstrap/run scripts, and collect real post-deploy health evidence. Do not publish or touch shared environments.
+tags: [mixed, repo, compose_deploy, postcheck]
+execution_family: host_operation
+difficulty: medium
+target_runtime_profile: compose_deploy_postcheck
+environment_profile: host
+live_environment_profile: isolated_repo_and_host
+expected_obligations: [tests_passed, documentation_updated]
+required_evidence: [commands_run, files_changed, postcheck_summary]
+required_stage_patterns: [observe, obligations, plan, execute, verify, acceptance]
+allowed_terminal_statuses: [completed, needs_environment, blocked]
+live_allowed_terminal_statuses: [completed, needs_environment, blocked]
+forbidden_terminal_statuses: [failed]
+expected_reentry_behavior: []
+expected_packet_patterns: [implementation]
+success_criteria: [repo_change_done, compose_bootstrap_attempted, postcheck_recorded]
+requires_live_repo: true
+requires_live_host: true
+requires_live_openhands: true
+requires_approval_for_live: true
+needs_isolated_repo: true
+needs_isolated_host: true
+live_timeout_seconds: 1800
+notes: Mixed repo+runtime scenario; scripted profile reuses compose postcheck behavior.
+live_notes: Requires explicit approval and isolated host because compose deployment is a host mutation.

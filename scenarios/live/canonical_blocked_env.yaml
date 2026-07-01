@@ -1,0 +1,29 @@
+scenario_id: live_canonical_blocked_env
+title: Live canonical blocked environment
+description: Live benchmark where missing runtime environment must become needs_environment/blocked, not false success.
+task_text: Add a C++ gRPC client and validate it with Freeplane integration tests.
+live_task_text_override: |
+  Treat this as a live benchmark for an integration-required repository change. If Freeplane/runtime integration is unavailable, attempt the repository-supported setup/bootstrap path when present, then return needs_environment/blocked with concrete evidence instead of build-only success.
+tags: [repo, integration, blocked_env, live]
+execution_family: repository_change
+difficulty: medium
+target_runtime_profile: repo_integration_required
+environment_profile: docker_container
+live_environment_profile: isolated_repo_with_missing_runtime
+expected_obligations: [tests_passed]
+required_evidence: [commands_run, files_changed, blockers]
+live_required_evidence: [commands_run, blockers]
+required_stage_patterns: [observe, obligations, plan, execute, verify, acceptance]
+allowed_terminal_statuses: [needs_environment, blocked]
+live_allowed_terminal_statuses: [needs_environment, blocked]
+forbidden_terminal_statuses: [completed]
+expected_reentry_behavior: [must_not_finalize_if_env_missing]
+expected_packet_patterns: [implementation, integration]
+success_criteria: [environment_block_detected, no_false_success]
+requires_live_repo: true
+requires_live_openhands: true
+safe_for_live: true
+needs_isolated_repo: true
+live_timeout_seconds: 1200
+notes: Canonical blocked-env regression catcher for scripted and live modes.
+live_notes: Requires isolated repository workspace; must not publish or touch host services.
