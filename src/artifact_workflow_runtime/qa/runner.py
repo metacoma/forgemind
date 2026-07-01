@@ -16,7 +16,7 @@ class DeterministicQARunner:
         workdir = cwd or infer_workspace_root_from_environment_plan(environment_plan) or os.getcwd()
         workspace_problem = self._workspace_problem(workdir)
         for check in plan.checks:
-            if workspace_problem is not None and check.kind in {"command", "runtime_proof", "ci_config_check"}:
+            if workspace_problem is not None and check.kind in {"command", "bootstrap", "runtime_proof", "ci_config_check"}:
                 items.append(
                     QAExecutionItem(
                         check_id=check.id,
@@ -30,6 +30,9 @@ class DeterministicQARunner:
                 continue
             if check.kind == "command" and check.command:
                 items.append(self._run_command(check_id=check.id, name=check.name, command=check.command, cwd=workdir))
+                continue
+            if check.kind == "bootstrap":
+                items.append(self._run_bootstrap(check_id=check.id, name=check.name, command=check.command, cwd=workdir))
                 continue
             if check.kind == "runtime_proof":
                 items.append(self._run_runtime_proof(check_id=check.id, name=check.name, environment_plan=environment_plan, cwd=workdir))
@@ -66,15 +69,31 @@ class DeterministicQARunner:
         except Exception as exc:  # pragma: no cover - defensive
             return QAExecutionItem(check_id=check_id, name=name, kind="command", status="blocked", command=command, output=str(exc), reason=f"Deterministic QA runner failed to execute command in workspace {cwd}.")
 
+    def _run_bootstrap(self, *, check_id: str, name: str, command: str | None, cwd: str) -> QAExecutionItem:
+        if not command:
+            return QAExecutionItem(check_id=check_id, name=name, kind="bootstrap", status="blocked", reason="Bootstrap was required but no executable bootstrap command was resolved.")
+        missing = self._missing_relative_executable(command, cwd)
+        if missing is not None:
+            return QAExecutionItem(
+                check_id=check_id,
+                name=name,
+                kind="bootstrap",
+                status="blocked",
+                command=command,
+                reason=f"Bootstrap command {missing!r} is not present in workspace {cwd}.",
+            )
+        item = self._run_command(check_id=check_id, name=name, command=command, cwd=cwd)
+        return item.model_copy(update={"kind": "bootstrap"})
+
     def _run_runtime_proof(self, *, check_id: str, name: str, environment_plan: EnvironmentPlan | None, cwd: str) -> QAExecutionItem:
         command = None
         if environment_plan is not None:
             for item in environment_plan.items:
-                if item.bootstrap_command:
-                    command = item.bootstrap_command
+                if item.runtime_probe_command:
+                    command = item.runtime_probe_command
                     break
         if not command:
-            return QAExecutionItem(check_id=check_id, name=name, kind="runtime_proof", status="blocked", reason="No bootstrap/runtime proof command available.")
+            return QAExecutionItem(check_id=check_id, name=name, kind="runtime_proof", status="blocked", reason="No runtime/smoke proof command available after setup; bootstrap path existence is not runtime proof.")
         missing = self._missing_relative_executable(command, cwd)
         if missing is not None:
             return QAExecutionItem(
@@ -85,7 +104,25 @@ class DeterministicQARunner:
                 command=command,
                 reason=f"Runtime proof command {missing!r} is not present in workspace {cwd}.",
             )
-        return self._run_command(check_id=check_id, name=name, command=command, cwd=cwd)
+        if self._is_static_or_build_only_surrogate(command):
+            return QAExecutionItem(
+                check_id=check_id,
+                name=name,
+                kind="runtime_proof",
+                status="blocked",
+                command=command,
+                reason="Runtime/smoke proof cannot be satisfied by syntax-check or build-only command.",
+            )
+        item = self._run_command(check_id=check_id, name=name, command=command, cwd=cwd)
+        return item.model_copy(update={"kind": "runtime_proof"})
+
+    def _is_static_or_build_only_surrogate(self, command: str) -> bool:
+        text = command.lower()
+        if "bash -n" in text or "sh -n" in text or "syntax" in text:
+            return True
+        build_only = any(marker in text for marker in ("cmake --build", "gradle assemble", "./gradlew assemble", "mvn compile", "go build", "npm run build"))
+        actual_test = any(marker in text for marker in ("pytest", "go test", "cargo test", "mvn test", "gradle test", "./gradlew test", "npm test", "run_smoke", "run smoke", "run_integration", "run integration", "pytest", "go test", "cargo test", "mvn test", "gradle test", "./gradlew test", "npm test", "e2e"))
+        return build_only and not actual_test
 
     def _missing_relative_executable(self, command: str, cwd: str) -> str | None:
         try:

@@ -12,6 +12,10 @@ class EnvironmentPlanItem(RuntimeModel):
     bootstrap_possible: bool = False
     bootstrap_source: str | None = None
     bootstrap_command: str | None = None
+    bootstrap_attempted: bool = False
+    bootstrap_status: str = "not_attempted"
+    runtime_usable: bool = False
+    runtime_probe_command: str | None = None
     failure_mode: str = "needs_environment"
 
 

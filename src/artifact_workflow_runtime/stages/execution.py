@@ -63,7 +63,9 @@ class ExecutionStageMixin:
                 "Ground your work in the evidence below.\n"
                 "The original task intent is primary; do not silently degrade implementation work into analysis-only output.\n"
                 "This is the execute stage only: edit files, install required local dependencies, and run build/unit/integration checks.\n"
-                "Repository publication is handled by a later publish stage. Do not commit, push, create a PR, wait for PR checks, or report missing publication as an execute blocker.\n\n"
+                "Repository publication is handled by a later publish stage. Do not commit, push, create a PR, wait for PR checks, or report missing publication as an execute blocker.\n"
+                "Runtime/bootstrap obligation: when the task or packet requires runtime, smoke, integration, post-deploy, or environment-sensitive proof, do not replace it with syntax checks, compile-only/build-only evidence, script existence, or an 'environment unavailable' claim before attempting any repository-supported bootstrap/setup/run path you discover.\n"
+                "Setup completion requires evidence that bootstrap/setup was actually attempted and either made the prerequisite usable, failed with concrete output, or was inapplicable for a demonstrated reason. Found scripts alone are not setup success.\n\n"
                 f"Task: {task.description}\n\n"
                 f"ContextPacket:\n{context_text}\n\n"
                 f"Observation evidence:\n{observation_text}\n\n"
@@ -77,7 +79,7 @@ class ExecutionStageMixin:
                 + "\n\nThe environment is a Docker container. Install any dependencies required to run the required test levels inside the container.\n"
                 + f"Required setup steps: {plan.required_setup_steps}\n"
                 + f"Required test levels: {plan.required_test_levels}\n"
-                + "\nWhen finished, report concrete evidence: changed files, commands run, outputs, setup/install steps, test/build results, blockers. Do not list deferred publication as a blocker."
+                + "\nWhen finished, report concrete evidence: changed files, commands run, outputs, setup/bootstrap attempts and outcomes, test/build/runtime results, blockers. Do not list deferred publication as a blocker."
             )
             request = ExecutionRequest(
                 task_id=task.id,

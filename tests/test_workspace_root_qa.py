@@ -94,7 +94,7 @@ def test_runtime_proof_missing_relative_script_is_environment_blocker(tmp_path) 
     report = DeterministicQARunner().run(plan=plan, environment_plan=env)
 
     assert report.items[0].status == "blocked"
-    assert "not present in workspace" in report.items[0].reason
+    assert "bootstrap path existence is not runtime proof" in report.items[0].reason
 
 
 def test_qa_execute_stage_requires_workspace_root_in_canonical_contract() -> None:

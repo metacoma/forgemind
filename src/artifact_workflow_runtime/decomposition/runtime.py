@@ -106,9 +106,14 @@ def packet_from_state(state: Mapping[str, Any], plan: DecompositionPlan) -> Exec
 
 def status_from_execution_result(result: ExecutionResult) -> ExecutionPacketStatus:
     status_text = str(result.execution_status.value if hasattr(result.execution_status, "value") else result.execution_status).lower()
-    if result.ok and status_text not in {"failed", "blocked"}:
+    blocker_text = " ".join(getattr(item, "summary", "") for item in result.structured_evidence.blockers).lower()
+    env_blocked = any(
+        marker in blocker_text
+        for marker in ("environment", "runtime prerequisite", "bootstrap", "setup", "dependency", "not installed", "not found", "integration unavailable")
+    )
+    if result.ok and status_text in {"succeeded", "partial"} and not result.structured_evidence.blockers:
         return ExecutionPacketStatus.COMPLETED
-    if status_text == "blocked":
+    if status_text == "blocked" or env_blocked:
         return ExecutionPacketStatus.BLOCKED
     return ExecutionPacketStatus.FAILED
 
@@ -186,17 +191,37 @@ def progression_decision(
         )
 
     if blocked_packets:
+        blocked_packet_models = [packet for packet in plan.packets if packet.status == ExecutionPacketStatus.BLOCKED]
+        blocked_implementation = any(packet.packet_type == ExecutionPacketType.IMPLEMENTATION for packet in blocked_packet_models)
+        if blocked_implementation:
+            reason = f"Decomposition packet is blocked by runtime/environment evidence; route to verification/acceptance instead of re-executing blindly: {', '.join(blocked_packets)}."
+            return DecompositionProgressDecision(
+                outcome=DecompositionOutcome.RUNTIME_PROOF_BLOCKED,
+                current_packet_id=current_packet_id,
+                selected_next_packet_id=None,
+                selected_next_stage="verify",
+                plan_completed=False,
+                terminal=False,
+                blocked=True,
+                final_status_hint="needs_environment",
+                blocked_reason="runtime_proof_blocked",
+                reason=reason,
+            )
+        environment_like = bool(blocked_packet_models)
+        outcome = DecompositionOutcome.NEEDS_ENVIRONMENT if environment_like else DecompositionOutcome.BLOCKED_TERMINAL
+        blocked_reason = "needs_environment" if environment_like else "blocked_packets_present"
+        final_status_hint = "needs_environment" if environment_like else "blocked"
         reason = f"Decomposition plan is blocked because blocked packets remain unresolved: {', '.join(blocked_packets)}."
         return DecompositionProgressDecision(
-            outcome=DecompositionOutcome.BLOCKED_TERMINAL,
+            outcome=outcome,
             current_packet_id=current_packet_id,
             selected_next_packet_id=None,
             selected_next_stage="finalize",
             plan_completed=False,
             terminal=True,
             blocked=True,
-            final_status_hint="blocked",
-            blocked_reason="blocked_packets_present",
+            final_status_hint=final_status_hint,
+            blocked_reason=blocked_reason,
             reason=reason,
         )
 

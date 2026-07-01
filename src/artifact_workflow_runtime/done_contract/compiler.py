@@ -52,10 +52,16 @@ class DoneContractCompiler:
 
         env_names = set(obligations.required_environment_conditions)
         setup_text = " ".join(obligations.required_setup_steps).lower()
+        runtime_text = " ".join([text, setup_text, " ".join(obligations.required_test_levels)]).lower()
         if "freeplane" in text or "freeplane" in setup_text:
             env_names.add("freeplane_runtime")
+        if runtime_policy.required and (
+            obligations.required_setup_steps
+            or any(marker in runtime_text for marker in ("bootstrap", "setup", "install", "smoke", "integration", "runtime", "run script"))
+        ):
+            env_names.add("verification_runtime")
         for name in sorted(env_names):
-            mode = "bootstrap_if_needed" if name == "freeplane_runtime" or "script" in text else "required"
+            mode = "bootstrap_if_needed" if name == "freeplane_runtime" or "script" in text or any(marker in runtime_text for marker in ("bootstrap", "setup", "install")) else "required"
             source = "repo_supported" if mode == "bootstrap_if_needed" else "task"
             env_reqs.append(EnvironmentRequirement(name=name, mode=mode, source=source))
 

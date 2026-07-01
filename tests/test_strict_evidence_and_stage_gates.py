@@ -190,3 +190,5 @@ def test_openhands_adapter_always_requests_json_handoff_when_followup_is_availab
     assert "Return JSON only." in instance.followup_prompts[0]
     assert "Return exactly one JSON object" not in request.compiled_prompt()
     assert "response_format: json" not in request.compiled_prompt()
+    assert "BEGIN_JSON_SCHEMA" not in request.compiled_prompt()
+    assert "OpenHandsMachineHandoff" not in request.compiled_prompt()

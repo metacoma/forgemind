@@ -322,13 +322,14 @@ def _missing_deliverables(done_contract: DoneContract, execution: ExecutionResul
             execution.evidence_text,
             " ".join(item.path for item in execution.structured_evidence.files_changed),
             " ".join(item.name for item in execution.structured_evidence.tests),
+            " ".join((item.command or "") for item in execution.structured_evidence.tests),
             " ".join(item.command for item in execution.structured_evidence.commands_run),
         ]
     ).lower()
     missing: list[str] = []
-    if "runtime_proof" in done_contract.deliverables and not any(marker in evidence_text for marker in ("smoke", "integration", "handshake", "freeplane", "grpc")):
+    if "runtime_proof" in done_contract.deliverables and not _has_real_runtime_proof(execution):
         missing.append("runtime_proof")
-    if "integration_test_or_equivalent" in done_contract.deliverables and not any(marker in evidence_text for marker in ("integration", "e2e", "smoke")):
+    if "integration_test_or_equivalent" in done_contract.deliverables and not _has_real_integration_or_smoke_proof(execution):
         missing.append("integration_test_or_equivalent")
     if "ci_update_if_tests_added" in done_contract.deliverables and ".github/workflows" not in evidence_text and "workflow" not in evidence_text:
         missing.append("ci_update_if_tests_added")
@@ -337,6 +338,36 @@ def _missing_deliverables(done_contract: DoneContract, execution: ExecutionResul
     if "example_update" in done_contract.deliverables and not any(marker in evidence_text for marker in ("example", "sample", "snippet")):
         missing.append("example_update")
     return _unique(missing)
+
+
+def _has_real_runtime_proof(execution: ExecutionResult) -> bool:
+    return _has_real_integration_or_smoke_proof(execution) or any(
+        _is_runtime_evidence_text(f"{test.name} {test.command or ''} {test.output_excerpt or ''}")
+        and str(test.status).lower() in {"passed", "success", "succeeded", "ok"}
+        for test in execution.structured_evidence.tests
+    )
+
+
+def _has_real_integration_or_smoke_proof(execution: ExecutionResult) -> bool:
+    for test in execution.structured_evidence.tests:
+        text = f"{test.name} {test.command or ''} {test.output_excerpt or ''}"
+        if str(test.status).lower() in {"passed", "success", "succeeded", "ok"} and _is_runtime_evidence_text(text):
+            return True
+    for command in execution.structured_evidence.commands_run:
+        text = f"{command.command} {command.output_excerpt or ''}"
+        if command.exit_code == 0 and _is_runtime_evidence_text(text):
+            return True
+    return False
+
+
+def _is_runtime_evidence_text(text: str) -> bool:
+    lowered = text.lower()
+    if any(marker in lowered for marker in ("bash -n", "sh -n", "syntax check", "script exists", "found script", "integration project build", "test project build", "build integration tests", "compiled integration tests")):
+        return False
+    build_only = any(marker in lowered for marker in ("cmake --build", "mvn compile", "gradle assemble", "./gradlew assemble", "go build", "npm run build"))
+    runtime_marker = any(marker in lowered for marker in ("smoke", "integration", "e2e", "end-to-end", "handshake", "freeplane", "grpc", "runtime proof"))
+    actual_execution = any(marker in lowered for marker in ("pytest", "go test", "cargo test", "mvn test", "gradle test", "./gradlew test", "npm test", "run_smoke", "run smoke", "run_integration", "run integration", "smoke test"))
+    return runtime_marker and (actual_execution or not build_only)
 
 
 def _qa_review_from_verification(*, task_id: str, result: VerificationResult, report: QAExecutionReport, execution: ExecutionResult | None = None) -> QAReview:

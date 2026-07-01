@@ -625,7 +625,16 @@ def _render_openhands_compiled_contract(*, title: str, packet_kind: WorkPacketKi
         "forbidden_actions": stage_contract.forbidden_actions,
         "expected_outputs": stage_contract.required_outputs,
         "stage_contract": "\n" + stage_contract.render(),
-        "machine_json_handoff_schema": "\n" + render_openhands_machine_handoff_schema_block(),
+        "machine_handoff_policy": (
+            "First OpenHands pass must return a concise human-readable operational report only. "
+            "Do not emit final JSON, schemas, markdown JSON fences, or machine contracts here; "
+            "the controller will request the canonical JSON handoff in a separate follow-up."
+        ),
+        "runtime_bootstrap_obligation": (
+            "Runtime/bootstrap obligation: when runtime, smoke, integration, post-deploy, or environment-sensitive proof is required, "
+            "do not replace it with syntax checks, compile-only/build-only evidence, script existence, or an environment-unavailable claim before attempting any repository-supported bootstrap/setup/run path. "
+            "Found scripts alone are not setup success."
+        ),
     }
     return _render_compiled_contract(title=title, fields=fields, narrative=narrative)
 

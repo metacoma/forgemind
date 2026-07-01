@@ -50,6 +50,9 @@ class DecompositionComplexity(str, Enum):
 class DecompositionOutcome(str, Enum):
     RUNNABLE_PACKET = "runnable_packet"
     DECOMPOSITION_COMPLETED = "decomposition_completed"
+    BOOTSTRAP_REQUIRED = "bootstrap_required"
+    RUNTIME_PROOF_BLOCKED = "runtime_proof_blocked"
+    NEEDS_ENVIRONMENT = "needs_environment"
     BLOCKED_TERMINAL = "blocked_terminal"
     FAILED_TERMINAL = "failed_terminal"
     REPAIR_REQUIRED = "repair_required"

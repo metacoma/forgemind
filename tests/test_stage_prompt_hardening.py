@@ -29,6 +29,12 @@ def _assert_stage_contract(prompt: str) -> None:
     assert "if an action is not explicitly allowed, treat it as forbidden" in prompt
     assert "Return exactly one JSON object" not in prompt
     assert "response_format: json" not in prompt
+    assert "BEGIN_JSON_SCHEMA" not in prompt
+    assert "END_JSON_SCHEMA" not in prompt
+    assert "OpenHandsMachineHandoff" not in prompt
+    assert "machine_json_handoff_schema" not in prompt
+    assert "First OpenHands pass must return a concise human-readable operational report only" in prompt
+    assert "the controller will request the canonical JSON handoff in a separate follow-up" in prompt
 
 
 def test_observe_prompt_is_read_only_and_forbids_git_mutation() -> None:
@@ -83,6 +89,9 @@ def test_execute_prompt_forbids_git_push_without_publish_packet() -> None:
     assert "git rebase" in compiled
     assert "create_pr" in compiled
     assert "commit/push/PR publication" in compiled
+    assert "Runtime/bootstrap obligation" in compiled
+    assert "syntax checks, compile-only/build-only evidence, script existence" in compiled
+    assert "Found scripts alone are not setup success" in compiled
 
 
 def test_execute_contract_validator_rejects_missing_git_push_guard() -> None:

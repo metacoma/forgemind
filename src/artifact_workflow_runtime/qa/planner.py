@@ -16,6 +16,17 @@ class QAPlanner:
         environment_plan: EnvironmentPlan | None = None,
     ) -> QAPlan:
         checks: list[QACheck] = []
+        if environment_plan is not None:
+            for item in environment_plan.items:
+                if item.bootstrap_possible and not item.already_present:
+                    checks.append(
+                        QACheck(
+                            name=f"bootstrap:{item.name}",
+                            kind="bootstrap",
+                            command=item.bootstrap_command,
+                            reason="Repository-supported environment bootstrap must be attempted before runtime/integration proof is declared blocked.",
+                        )
+                    )
         for level in execution_plan.required_test_levels:
             checks.append(QACheck(name=level, kind="level", reason=f"Required test level from plan: {level}"))
         for check in execution_plan.verification_checks:
@@ -31,10 +42,10 @@ class QAPlanner:
             command = None
             if environment_plan is not None:
                 for item in environment_plan.items:
-                    if item.name == "freeplane_runtime" and item.bootstrap_command:
-                        command = item.bootstrap_command
+                    if item.runtime_probe_command:
+                        command = item.runtime_probe_command
                         break
-            checks.append(QACheck(name="runtime_proof", kind="runtime_proof", command=command, reason="DoneContract requires runtime proof."))
+            checks.append(QACheck(name="runtime_proof", kind="runtime_proof", command=command, reason="DoneContract requires runtime proof distinct from bootstrap/setup."))
         if "ci_update_if_tests_added" in done_contract.deliverables and not any(item.name == "ci_config_check" for item in checks):
             checks.append(QACheck(name="ci_config_check", kind="ci_config_check", reason="DoneContract requires CI wiring for newly added checks."))
         return QAPlan(task_id=task_id, checks=_dedupe_checks(checks))

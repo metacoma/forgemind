@@ -4,6 +4,7 @@ from artifact_workflow_runtime.decomposition.models import DecompositionOutcome,
 from artifact_workflow_runtime.models import (
     AcceptanceDecision,
     ApprovalRequest,
+    BlockerKind,
     ExecutionPlan,
     ExecutionResult,
     FinalReport,
@@ -18,6 +19,24 @@ from artifact_workflow_runtime.models import (
     TaskClassification,
     VerificationResult,
 )
+
+
+def _execution_has_environment_blocker(execution: ExecutionResult | None) -> bool:
+    if execution is None:
+        return False
+    env_kinds = {
+        BlockerKind.MISSING_ENVIRONMENT_DEPENDENCY,
+        BlockerKind.MISSING_RUNTIME_PREREQUISITE,
+        BlockerKind.INTEGRATION_ENVIRONMENT_UNAVAILABLE,
+    }
+    for blocker in execution.structured_evidence.blockers:
+        if blocker.blocker_kind in env_kinds:
+            return True
+        text = blocker.summary.lower()
+        if any(marker in text for marker in ("environment unavailable", "missing dependency", "not installed", "not found", "runtime prerequisite", "bootstrap")):
+            return True
+    text = f"{execution.summary} {execution.evidence_text}".lower()
+    return any(marker in text for marker in ("environment unavailable", "missing dependency", "not installed", "not found", "runtime prerequisite", "bootstrap required"))
 
 
 class FinalReportBuilder:
@@ -62,9 +81,17 @@ class FinalReportBuilder:
             status = packet_progression.final_status_hint or ("failed" if packet_progression.outcome == DecompositionOutcome.FAILED_TERMINAL else "blocked")
             summary = packet_progression.reason
         elif decomposition_plan is not None and any(packet.status in {ExecutionPacketStatus.BLOCKED, ExecutionPacketStatus.FAILED} for packet in decomposition_plan.packets):
-            status = "blocked"
             blocked_packets = [packet.packet_id for packet in decomposition_plan.packets if packet.status in {ExecutionPacketStatus.BLOCKED, ExecutionPacketStatus.FAILED}]
-            summary = "Decomposition plan did not complete because blocked/failed packets remain: " + ", ".join(blocked_packets)
+            environment_blocked = any(
+                packet.status == ExecutionPacketStatus.BLOCKED and packet.packet_type.value in {"setup", "integration", "verification"}
+                for packet in decomposition_plan.packets
+            ) or _execution_has_environment_blocker(execution)
+            status = "needs_environment" if environment_blocked else "blocked"
+            summary = (
+                "Decomposition plan is blocked by runtime/setup environment prerequisites: "
+                if environment_blocked
+                else "Decomposition plan did not complete because blocked/failed packets remain: "
+            ) + ", ".join(blocked_packets)
         elif decomposition_plan is not None and decomposition_plan.packets and any(packet.status not in {ExecutionPacketStatus.COMPLETED, ExecutionPacketStatus.SKIPPED} for packet in decomposition_plan.packets):
             status = "partially_completed"
             summary = "Decomposition plan has unfinished packets; workflow stopped before full verification/acceptance."

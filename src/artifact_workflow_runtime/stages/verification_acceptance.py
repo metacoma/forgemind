@@ -104,7 +104,8 @@ class VerificationAcceptanceStageMixin:
                     prompt = (
                         "You are performing a bounded world verification packet for the controller.\n"
                         "Do not choose the next workflow step. Do not expand task scope. Do not publish.\n"
-                        "Run only the checks requested by the controller and report commands, outputs, statuses, blockers, and missing evidence.\n\n"
+                        "Run only the checks requested by the controller and report commands, outputs, statuses, blockers, and missing evidence.\n"
+                        "Do not count syntax checks, compile-only/build-only commands, script existence, or integration-test-project builds as runtime/smoke/integration proof. If a repository-supported bootstrap path exists and the runtime is not ready, attempt bootstrap before reporting runtime/environment blockage.\n\n"
                         f"Task: {task.description}\n\n"
                         f"ContextPacket:\n{context_packet.text}\n\n"
                         f"Execution summary: {execution.summary}\n"

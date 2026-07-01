@@ -62,7 +62,7 @@ class ProseThenMachineJsonInstance:
         )
 
 
-def test_openhands_initial_packets_include_machine_json_schema() -> None:
+def test_openhands_initial_packets_do_not_include_machine_json_schema() -> None:
     requests = [
         ObservationRequest(task_id="task", execution_family=ExecutionFamily.REPOSITORY_CHANGE, prompt="observe"),
         ExecutionRequest(task_id="task", execution_family=ExecutionFamily.REPOSITORY_CHANGE, prompt="execute"),
@@ -77,10 +77,13 @@ def test_openhands_initial_packets_include_machine_json_schema() -> None:
     ]
     for request in requests:
         prompt = request.compiled_prompt()
-        assert "BEGIN_JSON_SCHEMA" in prompt
-        assert "END_JSON_SCHEMA" in prompt
-        assert "OpenHandsMachineHandoff" in prompt
-        assert "additionalProperties" in prompt
+        assert "BEGIN_JSON_SCHEMA" not in prompt
+        assert "END_JSON_SCHEMA" not in prompt
+        assert "OpenHandsMachineHandoff" not in prompt
+        assert "additionalProperties" not in prompt
+        assert "First OpenHands pass must return a concise human-readable operational report only" in prompt
+        assert "the controller will request the canonical JSON handoff in a separate follow-up" in prompt
+        assert "Return JSON only." not in prompt
 
 
 def test_openhands_followup_prompt_includes_machine_json_schema(tmp_path) -> None:
@@ -98,10 +101,13 @@ def test_openhands_followup_prompt_includes_machine_json_schema(tmp_path) -> Non
     )
 
     assert result.ok is True
-    assert instance.initial_prompts and "BEGIN_JSON_SCHEMA" in instance.initial_prompts[0]
+    assert instance.initial_prompts
+    assert "BEGIN_JSON_SCHEMA" not in instance.initial_prompts[0]
+    assert "Return JSON only." not in instance.initial_prompts[0]
     assert instance.followup_prompts and "BEGIN_JSON_SCHEMA" in instance.followup_prompts[0]
     assert "END_JSON_SCHEMA" in instance.followup_prompts[0]
     assert "additionalProperties" in instance.followup_prompts[0]
+    assert "Return JSON only." in instance.followup_prompts[0]
 
 
 def test_strict_extractor_accepts_real_openhands_fenced_handoff_shape() -> None:
