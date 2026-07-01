@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from artifact_workflow_runtime.policy import PolicyEnforcementPoint, RuntimeResource, RuntimeSubject
+from artifact_workflow_runtime.policy.action_policy import ActionPolicyEnforcer
 
 from artifact_workflow_runtime.models import (
     BackendKind,
@@ -21,6 +22,7 @@ DESTRUCTIVE_PUBLISH_GUARDS = {"git push --force", "git tag", "git merge", "git r
 
 
 class OpenHandsStageContractGate:
+    action_policy = ActionPolicyEnforcer()
     """Pre-flight contract gate for bounded OpenHands packets.
 
     This is intentionally outside ``adapter.py`` so the adapter can stay focused
@@ -91,7 +93,9 @@ class OpenHandsStageContractGate:
         cls.require_forbidden_actions(request, {"edit_files", "write_files", "commit", "push", "git push", "create_pr", "open_pull_request", "publish"}, "Observation")
         if request.evidence_requirements.require_structured is not True:
             raise ValueError("Observation packets must require structured evidence as the operational output")
-        cls.require_allowed_actions_authorized(request, stage="research" if request.work_packet_kind == WorkPacketKind.RESEARCH else "observe", label="Observation")
+        stage = "research" if request.work_packet_kind == WorkPacketKind.RESEARCH else "observe"
+        cls.require_allowed_actions_authorized(request, stage=stage, label="Observation")
+        cls.action_policy.validate_request(request, stage=stage, label="Observation")
         cls.validate_compiled_prompt_contains_contract(request, label="Observation")
 
     @classmethod
@@ -107,6 +111,7 @@ class OpenHandsStageContractGate:
         if request.evidence_requirements.require_structured is not True:
             raise ValueError("Execution packets must require structured evidence as the operational output")
         cls.require_allowed_actions_authorized(request, stage="execute", label="Execution")
+        cls.action_policy.validate_request(request, stage="execute", label="Execution")
         cls.validate_compiled_prompt_contains_contract(request, label="Execution")
 
     @classmethod
@@ -124,6 +129,7 @@ class OpenHandsStageContractGate:
         if request.evidence_requirements.require_structured is not True:
             raise ValueError("Publish packets must require structured evidence as the operational output")
         cls.require_allowed_actions_authorized(request, stage="publish", label="Publish")
+        cls.action_policy.validate_request(request, stage="publish", label="Publish")
         cls.validate_compiled_prompt_contains_contract(request, label="Publish")
 
     @classmethod
@@ -136,6 +142,7 @@ class OpenHandsStageContractGate:
         if request.evidence_requirements.require_structured is not True:
             raise ValueError("Repair packets must require structured evidence as the operational output")
         cls.require_allowed_actions_authorized(request, stage="repair", label="Repair")
+        cls.action_policy.validate_request(request, stage="repair", label="Repair")
         cls.validate_compiled_prompt_contains_contract(request, label="Repair")
 
     @classmethod
@@ -152,4 +159,5 @@ class OpenHandsStageContractGate:
         if request.evidence_requirements.require_structured is not True:
             raise ValueError("World verification packets must require structured evidence as the operational output")
         cls.require_allowed_actions_authorized(request, stage="verify", label="World verification")
+        cls.action_policy.validate_request(request, stage="verify", label="World verification")
         cls.validate_compiled_prompt_contains_contract(request, label="World verification")

@@ -85,6 +85,9 @@ class PipelineLoopTriggerKind(str, Enum):
     INTEGRATION_SCOPE_DISCOVERED = "integration_scope_discovered"
     SETUP_GAP_DISCOVERED = "setup_gap_discovered"
     PUBLISH_DEEPER_PLANNING_REQUIRED = "publish_deeper_planning_required"
+    ENVIRONMENT_PREREQUISITE_MISSING = "environment_prerequisite_missing"
+    PACKET_REPLANNING_REQUIRED = "packet_replanning_required"
+    REPAIR_EXHAUSTED_REDISCOVERY_REQUIRED = "repair_exhausted_rediscovery_required"
 
 
 class PipelineReentryTarget(str, Enum):
@@ -94,13 +97,36 @@ class PipelineReentryTarget(str, Enum):
     BUILD_CONTEXT = "build_context"
     OBLIGATIONS = "obligations"
     PLAN = "plan"
+    EXECUTE = "execute"
+    VERIFY = "verify"
     FINALIZE = "finalize"
 
+
+
+
+class LoopTerminalOutcome(str, Enum):
+    NONE = "none"
+    LOOP_EXHAUSTED = "loop_exhausted"
+    BLOCKED = "blocked"
+    FAILED = "failed"
+    MANUAL_INTERVENTION_REQUIRED = "manual_intervention_required"
+
+
+class PipelineLoopTrigger(RuntimeModel):
+    kind: PipelineLoopTriggerKind = PipelineLoopTriggerKind.NONE
+    reason: str
+    missing_evidence: list[str] = Field(default_factory=list)
+    missing_obligations: list[str] = Field(default_factory=list)
+    blocker_ids: list[str] = Field(default_factory=list)
+    discovered_impacts: list[str] = Field(default_factory=list)
+    blocker_summaries: list[str] = Field(default_factory=list)
+    environment_gaps: list[str] = Field(default_factory=list)
 
 class PipelineLoopBudget(RuntimeModel):
     global_limit: int = 3
     per_trigger_limit: int = 1
     per_source_stage_limit: int = 2
+    per_target_limit: int = 2
 
 
 class PipelineLoopDecision(RuntimeModel):
@@ -108,6 +134,7 @@ class PipelineLoopDecision(RuntimeModel):
     source_stage: str
     target_stage: PipelineReentryTarget = PipelineReentryTarget.CONTINUE
     trigger_kind: PipelineLoopTriggerKind = PipelineLoopTriggerKind.NONE
+    trigger: PipelineLoopTrigger | None = None
     reason: str
     allowed: bool = True
     automatic: bool = False
@@ -117,10 +144,13 @@ class PipelineLoopDecision(RuntimeModel):
     loop_count: int = 0
     trigger_count: int = 0
     source_stage_count: int = 0
+    target_stage_count: int = 0
     global_limit: int = 3
     per_trigger_limit: int = 1
     per_source_stage_limit: int = 2
+    per_target_limit: int = 2
     budget_exhausted: bool = False
+    terminal_outcome: LoopTerminalOutcome = LoopTerminalOutcome.NONE
     policy_decision: LifecyclePolicyDecision | None = None
     created_at: str = Field(default_factory=utc_now)
 
@@ -171,6 +201,8 @@ class LifecycleFacts(RuntimeModel):
     pipeline_loop_global_limit: int = 3
     pipeline_loop_per_trigger_limit: int = 1
     pipeline_loop_per_source_stage_limit: int = 2
+    pipeline_loop_per_target_limit: int = 2
+    target_stage_loop_count: int = 0
     control_plane_violations: list[PolicyViolation] = Field(default_factory=list)
 
 

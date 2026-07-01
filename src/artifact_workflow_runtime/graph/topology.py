@@ -6,6 +6,32 @@ NodeFn = Callable[..., Any]
 RouteFn = Callable[..., str]
 
 
+PIPELINE_ENTRY_POINTS = (
+    "intake",
+    "classify",
+    "route",
+    "research",
+    "observe",
+    "build_context",
+    "obligations",
+    "done_contract",
+    "plan",
+    "policy",
+    "approval",
+    "workspace_prepare",
+    "execute",
+    "review",
+    "qa_plan",
+    "qa_execute",
+    "qa_review",
+    "repair",
+    "acceptance",
+    "publish",
+    "post_publish_verify",
+    "finalize",
+)
+
+
 PIPELINE_NODE_ORDER = (
     "intake",
     "classify",
@@ -33,9 +59,11 @@ PIPELINE_NODE_ORDER = (
 
 
 def wire_workflow_graph(graph: Any, *, nodes: Mapping[str, NodeFn], routers: Mapping[str, RouteFn], end: object) -> Any:
+    graph.add_node("dispatch", nodes["dispatch"])
     for name in PIPELINE_NODE_ORDER:
         graph.add_node(name, nodes[name])
 
+    graph.add_conditional_edges("dispatch", routers["dispatch"], {name: name for name in PIPELINE_ENTRY_POINTS})
     graph.add_edge("intake", "classify")
     graph.add_edge("classify", "route")
     graph.add_conditional_edges("route", routers["route"], {"research": "research", "observe": "observe", "build_context": "build_context"})

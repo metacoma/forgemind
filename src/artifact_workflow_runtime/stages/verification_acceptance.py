@@ -264,8 +264,8 @@ class VerificationAcceptanceStageMixin:
             if decisions:
                 decision = PipelineLoopDecision.model_validate(decisions[-1])
                 if decision.source_stage == "verify":
-                    target = _reentry_target(decision)
-                    if target in {"research", "observe", "build_context", "obligations", "plan", "finalize"}:
+                    target = (self.services.runtime_kernel or RuntimeKernel()).next_stage_after_pipeline_loop(decision)
+                    if target in {"research", "observe", "build_context", "obligations", "plan", "execute", "verify", "finalize"}:
                         return target
             return "acceptance"
 
@@ -347,8 +347,8 @@ class VerificationAcceptanceStageMixin:
             if loop_decisions:
                 loop = PipelineLoopDecision.model_validate(loop_decisions[-1])
                 if loop.source_stage == "acceptance":
-                    target = _reentry_target(loop)
-                    if target in {"research", "observe", "build_context", "obligations", "plan", "finalize"}:
+                    target = (self.services.runtime_kernel or RuntimeKernel()).next_stage_after_pipeline_loop(loop)
+                    if target in {"research", "observe", "build_context", "obligations", "plan", "execute", "verify", "finalize"}:
                         return target
             decisions = state.get("lifecycle_decisions") or []
             if decisions:

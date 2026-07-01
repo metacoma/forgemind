@@ -45,6 +45,7 @@ from artifact_workflow_runtime.lifecycle import (
 from artifact_workflow_runtime.policy import PolicyEngine
 from artifact_workflow_runtime.policy.evidence import EvidenceGate
 from artifact_workflow_runtime.decomposition import DecompositionOutcome, DecompositionPlan, DecompositionProgressDecision, progression_decision
+from artifact_workflow_runtime.control_plane.loop_policy import PipelineLoopPolicy
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,9 +71,10 @@ class RuntimeKernel:
     return hints/evidence, but this kernel decides which workflow edge is taken.
     """
 
-    def __init__(self, *, evidence_gate: EvidenceGate | None = None, lifecycle_machine: LifecycleMachine | None = None) -> None:
+    def __init__(self, *, evidence_gate: EvidenceGate | None = None, lifecycle_machine: LifecycleMachine | None = None, loop_policy: PipelineLoopPolicy | None = None) -> None:
         self.evidence_gate = evidence_gate or EvidenceGate()
         self.lifecycle_machine = lifecycle_machine or LifecycleMachine()
+        self.loop_policy = loop_policy or PipelineLoopPolicy(policy_evaluator=self.lifecycle_machine.policy_evaluator)
 
 
     def fact_readiness(self, snapshot: WorkflowStateSnapshot) -> StateReadiness:
@@ -302,6 +304,8 @@ class RuntimeKernel:
         pipeline_loop_global_limit: int = 3,
         pipeline_loop_per_trigger_limit: int = 1,
         pipeline_loop_per_source_stage_limit: int = 2,
+        target_stage_loop_count: int = 0,
+        pipeline_loop_per_target_limit: int = 2,
     ) -> LifecycleFacts:
         publish_required = _publish_required(plan) if plan is not None else False
         mutation_task = bool(plan and (plan.requires_mutation or plan.must_change_world or plan.expected_repo_changes))
@@ -367,6 +371,8 @@ class RuntimeKernel:
             pipeline_loop_global_limit=pipeline_loop_global_limit,
             pipeline_loop_per_trigger_limit=pipeline_loop_per_trigger_limit,
             pipeline_loop_per_source_stage_limit=pipeline_loop_per_source_stage_limit,
+            target_stage_loop_count=target_stage_loop_count,
+            pipeline_loop_per_target_limit=pipeline_loop_per_target_limit,
         )
 
     def acceptance_from_lifecycle_violation(
@@ -650,77 +656,19 @@ class RuntimeKernel:
         loop_decisions: list[PipelineLoopDecision | dict[str, object]] | None = None,
         budget: PipelineLoopBudget | None = None,
     ) -> PipelineLoopDecision:
-        """Decide whether the workflow must re-enter an earlier pipeline stage.
-
-        This is the pipeline-wide loop controller. Local repair is still handled
-        by publish_review -> repair, but newly discovered work surfaces, missing
-        discovery, missing context, or deeper CI/setup/doc obligations are routed
-        back through observe/build_context/obligations/plan under explicit budget.
-        """
-
-        budget = budget or PipelineLoopBudget()
-        prior = [_coerce_loop_decision(item) for item in (loop_decisions or [])]
-        trigger, target, reason, missing_evidence, missing_obligations = _detect_reentry_trigger(
+        return self.loop_policy.evaluate(
             source_stage=source_stage,
             plan=plan,
             obligations=obligations,
             verification=verification,
             acceptance=acceptance,
             publish=publish,
+            loop_decisions=loop_decisions,
+            budget=budget,
         )
-        if trigger == PipelineLoopTriggerKind.NONE:
-            return PipelineLoopDecision(
-                source_stage=source_stage,
-                target_stage=PipelineReentryTarget.CONTINUE,
-                trigger_kind=trigger,
-                reason="No pipeline-wide re-entry trigger detected.",
-                automatic=False,
-                allowed=True,
-                loop_count=len(prior),
-                global_limit=budget.global_limit,
-                per_trigger_limit=budget.per_trigger_limit,
-                per_source_stage_limit=budget.per_source_stage_limit,
-            )
 
-        trigger_count = sum(1 for item in prior if item.trigger_kind == trigger)
-        source_count = sum(1 for item in prior if item.source_stage == source_stage)
-        exhausted = len(prior) >= budget.global_limit or trigger_count >= budget.per_trigger_limit or source_count >= budget.per_source_stage_limit
-        facts = self.lifecycle_facts(
-            plan=plan,
-            verification=verification,
-            publish=publish,
-            acceptance=acceptance,
-            reentry_required=True,
-            reentry_target_stage=target,
-            reentry_trigger_kind=trigger,
-            reentry_budget_exhausted=exhausted,
-            pipeline_loop_count=len(prior),
-            trigger_loop_count=trigger_count,
-            source_stage_loop_count=source_count,
-            pipeline_loop_global_limit=budget.global_limit,
-            pipeline_loop_per_trigger_limit=budget.per_trigger_limit,
-            pipeline_loop_per_source_stage_limit=budget.per_source_stage_limit,
-        )
-        policy = self.lifecycle_machine.policy_evaluator.evaluate("can_reenter", facts)
-        allowed = policy.allowed and not exhausted
-        return PipelineLoopDecision(
-            source_stage=source_stage,
-            target_stage=target if allowed else PipelineReentryTarget.FINALIZE,
-            trigger_kind=trigger,
-            reason=reason if allowed else f"Pipeline re-entry requested for {trigger.value}, but loop budget/policy denied it.",
-            allowed=allowed,
-            automatic=allowed,
-            missing_evidence=missing_evidence,
-            missing_obligations=missing_obligations,
-            loop_count=len(prior),
-            trigger_count=trigger_count,
-            source_stage_count=source_count,
-            global_limit=budget.global_limit,
-            per_trigger_limit=budget.per_trigger_limit,
-            per_source_stage_limit=budget.per_source_stage_limit,
-            budget_exhausted=exhausted,
-            policy_decision=policy,
-        )
+    def next_stage_after_pipeline_loop(self, decision: PipelineLoopDecision) -> str | None:
+        return self.loop_policy.next_stage(decision)
 
     def verification_strategy(
         self,

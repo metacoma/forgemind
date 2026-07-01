@@ -320,6 +320,9 @@ class WorkflowStateSnapshot(RuntimeModel):
     active_packet_id: str | None = None
     packet_history: list[PacketHistoryEntry] = Field(default_factory=list)
     packet_progression: DecompositionProgressDecision | None = None
+    resume_next_stage: str | None = None
+    resume_checkpoint_id: str | None = None
+    recovered_from_checkpoint: bool = False
     transitions: list[StageTransition] = Field(default_factory=list)
     artifact_ids: list[str] = Field(default_factory=list)
     status: WorkflowStatus = WorkflowStatus.CREATED
@@ -465,6 +468,9 @@ class WorkflowState(TypedDict, total=False):
     active_packet_id: str | None
     packet_history: list[JsonDict]
     packet_progression: JsonDict | None
+    resume_next_stage: str | None
+    resume_checkpoint_id: str | None
+    recovered_from_checkpoint: bool
     transitions: list[JsonDict]
     artifact_ids: list[str]
     status: str

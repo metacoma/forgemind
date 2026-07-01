@@ -15,8 +15,9 @@ except Exception:  # pragma: no cover - exercised when langgraph is absent
 def build_workflow_graph(services: WorkflowServices):
     nodes = WorkflowStageNodes(services)
     graph = StateGraph(WorkflowState)
-    graph.set_entry_point("intake")
+    graph.set_entry_point("dispatch")
     stage_nodes = {
+        "dispatch": nodes.dispatch_node,
         "intake": nodes.intake_node,
         "classify": nodes.classify_node,
         "route": nodes.route_node,
@@ -48,6 +49,7 @@ def build_workflow_graph(services: WorkflowServices):
         graph,
         nodes=checkpointed_nodes,
         routers={
+            "dispatch": nodes.dispatch_next,
             "route": nodes.route_next,
             "research": nodes.research_next,
             "observe": nodes.observe_next,

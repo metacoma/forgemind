@@ -7,8 +7,10 @@ from .models import (
     LifecycleTransitionDecision,
     PipelineLoopBudget,
     PipelineLoopDecision,
+    PipelineLoopTrigger,
     PipelineLoopTriggerKind,
     PipelineReentryTarget,
+    LoopTerminalOutcome,
     PolicyViolation,
 )
 from .policy import OpaPolicyEvaluator
@@ -22,8 +24,10 @@ __all__ = [
     "LifecycleTransitionDecision",
     "PipelineLoopBudget",
     "PipelineLoopDecision",
+    "PipelineLoopTrigger",
     "PipelineLoopTriggerKind",
     "PipelineReentryTarget",
+    "LoopTerminalOutcome",
     "PolicyViolation",
     "OpaPolicyEvaluator",
 ]

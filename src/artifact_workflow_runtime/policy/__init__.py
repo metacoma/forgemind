@@ -68,3 +68,12 @@ from .acl import (
     PolicyEnforcementPoint,
     PolicyEnforcementError,
 )
+
+from .action_policy import ActionPolicyEnforcer, StageActionPolicyProfile
+
+__all__ = [
+    "ApprovalProvider", "StaticApprovalProvider", "PolicyEngine",
+    "RuntimeAction", "RuntimeSubject", "RuntimeResource", "ActionDecision",
+    "PolicyDecisionPoint", "StaticStagePolicyDecisionPoint", "PolicyEnforcementPoint", "PolicyEnforcementError",
+    "ActionPolicyEnforcer", "StageActionPolicyProfile",
+]

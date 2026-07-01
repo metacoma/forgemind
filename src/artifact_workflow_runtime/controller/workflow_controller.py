@@ -19,6 +19,7 @@ from artifact_workflow_runtime.reports import FinalReportBuilder
 from artifact_workflow_runtime.runtime_events import EventSink
 from artifact_workflow_runtime.model_routing import ModelRoutingConfig
 from artifact_workflow_runtime.state import WorkflowCheckpointRecorder
+from artifact_workflow_runtime.control_plane.recovery import CheckpointStore, RecoveredRuntimeState
 from artifact_workflow_runtime.strategy import StrategyArbitrator, StrategyGovernor, StrategySelectionMode
 from artifact_workflow_runtime.decomposition import DecompositionPlanner, PacketSelector, DecompositionValidator
 
@@ -56,28 +57,45 @@ class WorkflowController:
             from artifact_workflow_runtime.policy import StaticApprovalProvider
             self.services.approval_provider = StaticApprovalProvider(approve=False)
         self.graph = build_workflow_graph(self.services)
+        self.checkpoint_store = CheckpointStore(self.artifact_store)
 
-    async def run(self, task: Task) -> FinalReport:
-        initial_snapshot = WorkflowStateSnapshot(task=task)
+    async def _run_snapshot(self, initial_snapshot: WorkflowStateSnapshot) -> FinalReport:
         try:
             result_state = await self.graph.ainvoke(initial_snapshot.to_graph_state())
         except ContractViolationError as exc:
             artifact = self.artifact_store.add_json(
                 "contract_violation",
                 exc.result.model_dump(mode="json"),
-                metadata={"task_id": task.id, "source": "direct_llm_contract_gateway"},
+                metadata={"task_id": initial_snapshot.task.id, "source": "direct_llm_contract_gateway"},
             )
             report = FinalReport(
-                task_id=task.id,
+                task_id=initial_snapshot.task.id,
                 status="contract_violation",
                 summary=str(exc),
                 artifact_ids=[artifact.id],
             )
-            self.artifact_store.add_json("final_report", report.model_dump(mode="json"), metadata={"task_id": task.id, "status": report.status})
-            self.artifact_store.add_json("workflow_state_snapshot", initial_snapshot.model_dump(mode="json"), metadata={"task_id": task.id, "status": "contract_violation"})
+            self.artifact_store.add_json("final_report", report.model_dump(mode="json"), metadata={"task_id": initial_snapshot.task.id, "status": report.status})
+            self.artifact_store.add_json("workflow_state_snapshot", initial_snapshot.model_dump(mode="json"), metadata={"task_id": initial_snapshot.task.id, "status": "contract_violation"})
             return report
         final_snapshot = validate_workflow_state(result_state, final=True)
-        self.artifact_store.add_json("workflow_state_snapshot", final_snapshot.model_dump(mode="json"), metadata={"task_id": task.id})
+        self.artifact_store.add_json("workflow_state_snapshot", final_snapshot.model_dump(mode="json"), metadata={"task_id": initial_snapshot.task.id})
         if final_snapshot.final_report is None:
             raise RuntimeError("workflow finished without a final_report")
         return final_snapshot.final_report
+
+    async def run(self, task: Task) -> FinalReport:
+        return await self._run_snapshot(WorkflowStateSnapshot(task=task))
+
+    def recover(self, task_id: str) -> RecoveredRuntimeState:
+        return self.checkpoint_store.recover(task_id=task_id)
+
+    async def resume(self, task_id: str) -> FinalReport:
+        recovered = self.recover(task_id)
+        if not recovered.resume.allowed:
+            raise RuntimeError(recovered.resume.reason)
+        snapshot = recovered.snapshot.model_copy(update={
+            "resume_next_stage": recovered.resume.resume_from_stage,
+            "resume_checkpoint_id": recovered.resume.checkpoint_id,
+            "recovered_from_checkpoint": True,
+        })
+        return await self._run_snapshot(snapshot)

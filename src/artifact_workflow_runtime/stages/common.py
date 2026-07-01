@@ -140,14 +140,17 @@ def _clear_for_reentry(target: str) -> dict[str, Any]:
         "verification_request": None,
         "verification_check_requests": [],
         "verification_check_results": [],
-        "acceptance_decision": None,
     }
     if target in {"research", "observe", "build_context", "obligations"}:
-        common.update({"obligations": None, "plan": None, "acceptance_contract": None})
+        common.update({"obligations": None, "plan": None, "acceptance_contract": None, "decomposition_plan": None, "active_packet_id": None, "packet_progression": None})
     if target == "plan":
-        common.update({"plan": None, "acceptance_contract": None})
+        common.update({"plan": None, "acceptance_contract": None, "decomposition_plan": None, "active_packet_id": None, "packet_progression": None})
     if target in {"research", "observe", "build_context"}:
         common.update({"context_packet": None})
+    if target == "execute":
+        common.update({"execution_request": None, "execution_result": None, "review_result": None, "qa_plan": None, "qa_execution_report": None, "qa_review_result": None, "packet_progression": None})
+    if target == "verify":
+        common.update({"verification_request": None, "verification_result": None, "acceptance_decision": None, "publish_request": None, "publish_result": None, "publish_review_decision": None})
     return common
 
 
