@@ -35,6 +35,11 @@ def _assert_stage_contract(prompt: str) -> None:
     assert "machine_json_handoff_schema" not in prompt
     assert "First OpenHands pass must return a concise human-readable operational report only" in prompt
     assert "the controller will request the canonical JSON handoff in a separate follow-up" in prompt
+    assert "Hard editing policy" in prompt
+    assert "never rewrite large files or large sections in one pass" in prompt
+    assert "about 2 KB" in prompt
+    assert "small local patch-style edit units" in prompt
+    assert "Do not replace an entire file unless it is strictly unavoidable" in prompt
 
 
 def test_observe_prompt_is_read_only_and_forbids_git_mutation() -> None:

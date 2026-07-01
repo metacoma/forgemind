@@ -23,6 +23,7 @@ from artifact_workflow_runtime.models.core import (
     ObligationAnalysis,
     ObservationRequest,
     ObservationResult,
+    OpenHandsRunFailure,
     PolicyDecision,
     PublishRequest,
     PublishResult,
@@ -43,6 +44,7 @@ from artifact_workflow_runtime.lifecycle.models import LifecycleTransitionDecisi
 from artifact_workflow_runtime.strategy.models import StrategyDecision, StrategyId
 from artifact_workflow_runtime.decomposition.models import DecompositionPlan, DecompositionProgressDecision, PacketHistoryEntry
 from artifact_workflow_runtime.freshness.models import FreshnessDecision, RetrievalSnapshot
+from artifact_workflow_runtime.control_plane.agent_retry import AgentRetryDecision
 
 JsonDict = dict[str, Any]
 
@@ -330,6 +332,11 @@ class WorkflowStateSnapshot(RuntimeModel):
     transitions: list[StageTransition] = Field(default_factory=list)
     artifact_ids: list[str] = Field(default_factory=list)
     status: WorkflowStatus = WorkflowStatus.CREATED
+    agent_retry_count: int = 0
+    agent_retry_budget: int = 3
+    agent_retry_history: list[AgentRetryDecision] = Field(default_factory=list)
+    last_retryable_agent_failure: OpenHandsRunFailure | None = None
+    retry_origin_stage: str | None = None
     errors: list[str] = Field(default_factory=list)
 
     @classmethod
@@ -480,6 +487,11 @@ class WorkflowState(TypedDict, total=False):
     recovered_from_checkpoint: bool
     transitions: list[JsonDict]
     artifact_ids: list[str]
+    agent_retry_count: int
+    agent_retry_budget: int
+    agent_retry_history: list[JsonDict]
+    last_retryable_agent_failure: JsonDict | None
+    retry_origin_stage: str | None
     status: str
     errors: list[str]
 

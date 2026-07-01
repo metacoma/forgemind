@@ -635,6 +635,11 @@ def _render_openhands_compiled_contract(*, title: str, packet_kind: WorkPacketKi
             "do not replace it with syntax checks, compile-only/build-only evidence, script existence, or an environment-unavailable claim before attempting any repository-supported bootstrap/setup/run path. "
             "Found scripts alone are not setup success."
         ),
+        "bounded_editing_policy": (
+            "Hard editing policy: never rewrite large files or large sections in one pass. When file mutation is allowed, make changes incrementally using small local patch-style edit units; "
+            "limit each textual edit block to about 2 KB of text. Prefer several sequential small edits over one bulk replacement. "
+            "Do not replace an entire file unless it is strictly unavoidable; for large files, modify only the necessary fragments and check syntactic coherence after each series of small edits."
+        ),
     }
     return _render_compiled_contract(title=title, fields=fields, narrative=narrative)
 

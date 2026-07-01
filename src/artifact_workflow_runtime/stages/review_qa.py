@@ -7,7 +7,8 @@ from artifact_workflow_runtime.done_contract import DoneContract
 from artifact_workflow_runtime.environment import EnvironmentPlan
 from artifact_workflow_runtime.qa import QAExecutionReport, QAPlan, QAReview
 from artifact_workflow_runtime.state.workspace import workspace_root_from_state
-from artifact_workflow_runtime.decomposition import DecompositionPlan, DecompositionProgressDecision
+from artifact_workflow_runtime.decomposition import DecompositionPlan, DecompositionProgressDecision, ExecutionPacketStatus
+from artifact_workflow_runtime.control_plane.agent_retry import AgentRetryPolicy
 
 
 class ReviewQAStageMixin:
@@ -24,15 +25,28 @@ class ReviewQAStageMixin:
         await _emit(services, "stage_started", "review", "Reviewing execution against done contract", task_id=task.id)
         lifecycle = kernel.review_execution(plan=plan, execution=execution, acceptance_contract=contract)
         missing = _missing_deliverables(done_contract, execution)
+        retry_policy = AgentRetryPolicy()
+        retry_count = int(state.get("agent_retry_count") or 0)
+        retry_budget = int(state.get("agent_retry_budget") or 3)
+        retry_decision = retry_policy.decide(
+            origin_stage="execute",
+            failure=execution.stage_failure,
+            current_retry_count=retry_count,
+            retry_budget=retry_budget,
+        )
         status = "pass"
         summary_parts = []
         failing_checks: list[str] = []
         env_blockers: list[str] = []
-        if not lifecycle.allowed:
+        if retry_decision.retry_allowed:
+            status = "agent_retry"
+            summary_parts.append(retry_decision.reason)
+            failing_checks.append(retry_decision.failure_kind or "retryable_agent_failure")
+        elif not lifecycle.allowed:
             status = "policy_violation"
             summary_parts.append(lifecycle.reason)
             failing_checks.extend(item.code for item in lifecycle.violations)
-        repairable_failures = _execution_repair_failure_summaries(execution)
+        repairable_failures = [] if status == "agent_retry" else _execution_repair_failure_summaries(execution)
         if repairable_failures and status == "pass":
             status = "fail_code"
             summary_parts.append("Execution produced repairable build/test/code failures: " + "; ".join(repairable_failures))
@@ -50,10 +64,47 @@ class ReviewQAStageMixin:
             summary_parts.append("Execution evidence satisfies review gate and can enter QA planning.")
         review = QAReview(task_id=task.id, status=status, summary=" ".join(summary_parts), failing_checks=_unique(failing_checks), environment_blockers=_unique(env_blockers))
         artifact = services.artifact_store.add_json("review_result", review.model_dump(mode="json"), metadata={"task_id": task.id, "status": status})
-        selected_next = "qa_plan" if status == "pass" else ("finalize" if status == "policy_violation" else "repair")
+        selected_next = "execute" if status == "agent_retry" else ("qa_plan" if status == "pass" else ("finalize" if status == "policy_violation" else "repair"))
         packet_progression = None
         progression_artifact_id = None
         next_active_packet_id = state.get("active_packet_id")
+        retry_artifact_id = None
+        packet_retry_artifact_id = None
+        retry_history = list(state.get("agent_retry_history") or [])
+        retry_count_out = int(state.get("agent_retry_count") or 0)
+        retry_origin_stage = state.get("retry_origin_stage")
+        last_retryable_agent_failure = state.get("last_retryable_agent_failure")
+        updated_decomposition_for_retry = state.get("decomposition_plan")
+        packet_history = list(state.get("packet_history") or [])
+        if status == "agent_retry":
+            retry_artifact = services.artifact_store.add_json(
+                "agent_retry_decision",
+                retry_decision.model_dump(mode="json"),
+                metadata={"task_id": task.id, "origin_stage": retry_decision.origin_stage, "next_retry_count": retry_decision.next_retry_count},
+            )
+            retry_artifact_id = retry_artifact.id
+            retry_history.append(retry_decision.model_dump(mode="json"))
+            retry_count_out = retry_decision.next_retry_count
+            retry_origin_stage = retry_decision.origin_stage
+            last_retryable_agent_failure = execution.stage_failure.model_dump(mode="json") if execution.stage_failure is not None else None
+            if state.get("decomposition_plan") is not None and state.get("active_packet_id"):
+                decomposition_plan_for_retry = DecompositionPlan.model_validate(state["decomposition_plan"])
+                updated_plan, retry_history_entry = _update_packet_status(
+                    decomposition_plan_for_retry,
+                    packet_id=str(state.get("active_packet_id")),
+                    new_status=ExecutionPacketStatus.PENDING,
+                    reason=retry_decision.reason,
+                    stage="agent_retry",
+                    execution_result_id=execution.id,
+                )
+                updated_decomposition_for_retry = updated_plan.model_dump(mode="json")
+                packet_history = _append_packet_history(state, retry_history_entry)
+                packet_retry_artifact = services.artifact_store.add_json(
+                    "packet_status_update",
+                    retry_history_entry.model_dump(mode="json"),
+                    metadata={"task_id": task.id, "packet_id": state.get("active_packet_id"), "stage": "agent_retry"},
+                )
+                packet_retry_artifact_id = packet_retry_artifact.id
         if status == "pass" and state.get("decomposition_plan") is not None:
             decomposition_plan = DecompositionPlan.model_validate(state["decomposition_plan"])
             packet_progression = kernel.evaluate_decomposition_progression(
@@ -74,14 +125,29 @@ class ReviewQAStageMixin:
         review_artifact_ids = _append_artifact_id(state.get("artifact_ids"), artifact.id)
         if progression_artifact_id is not None:
             review_artifact_ids = _append_artifact_id(review_artifact_ids, progression_artifact_id)
+        if retry_artifact_id is not None:
+            review_artifact_ids = _append_artifact_id(review_artifact_ids, retry_artifact_id)
+        if packet_retry_artifact_id is not None:
+            review_artifact_ids = _append_artifact_id(review_artifact_ids, packet_retry_artifact_id)
         transition_artifacts = [artifact.id]
         if progression_artifact_id is not None:
             transition_artifacts.append(progression_artifact_id)
+        if retry_artifact_id is not None:
+            transition_artifacts.append(retry_artifact_id)
+        if packet_retry_artifact_id is not None:
+            transition_artifacts.append(packet_retry_artifact_id)
         update = {
             "review_result": review.model_dump(mode="json"),
             "execution_review_decision": lifecycle.model_dump(mode="json"),
             "artifact_ids": review_artifact_ids,
             "active_packet_id": next_active_packet_id,
+            "agent_retry_count": retry_count_out,
+            "agent_retry_budget": retry_budget,
+            "agent_retry_history": retry_history,
+            "last_retryable_agent_failure": last_retryable_agent_failure,
+            "retry_origin_stage": retry_origin_stage,
+            "packet_history": packet_history,
+            "decomposition_plan": updated_decomposition_for_retry,
             **({"packet_progression": packet_progression.model_dump(mode="json")} if packet_progression is not None else {}),
             "status": "reviewed",
             "transitions": _append_transition(state, "review", "reviewed", review.summary, transition_artifacts),
@@ -106,6 +172,8 @@ class ReviewQAStageMixin:
             kernel = self.services.runtime_kernel or RuntimeKernel()
             next_stage = kernel.next_stage_after_decomposition_progression(progression)
             return next_stage if next_stage in {"execute", "qa_plan", "finalize"} else "qa_plan"
+        if review.status == "agent_retry":
+            return "execute"
         if review.status == "fail_code":
             return "repair"
         return "finalize"

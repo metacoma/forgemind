@@ -446,7 +446,7 @@ async def test_html_execution_evidence_fails_verification_without_second_openhan
         artifact_store,
         scripts={
             "observe": ["Repo observed normally."],
-            "execute": ["<!DOCTYPE html><html><body>OpenHands SPA</body></html>"],
+            "execute": ["<!DOCTYPE html><html><body>OpenHands SPA</body></html>", "<!DOCTYPE html><html><body>OpenHands SPA</body></html>", "<!DOCTYPE html><html><body>OpenHands SPA</body></html>", "<!DOCTYPE html><html><body>OpenHands SPA</body></html>"],
         },
     )
     controller = WorkflowController(
@@ -464,6 +464,7 @@ async def test_html_execution_evidence_fails_verification_without_second_openhan
     assert report.acceptance_decision is not None
     assert report.acceptance_decision.accepted is False
     assert len(openhands.calls["verify"]) == 0
+    assert len(openhands.calls["execute"]) == 4
 
 
 async def test_planner_cannot_degrade_implementation_task_into_documentation_only(tmp_path) -> None:
