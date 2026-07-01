@@ -12,15 +12,19 @@ from textual.reactive import reactive
 from textual.widgets import Button, Checkbox, DataTable, Footer, Header, Input, Label, RichLog, Static, TabbedContent, TabPane, TextArea
 from rich.text import Text
 from artifact_workflow_runtime.models import FinalReport, Task
-from artifact_workflow_runtime.openhands_adapter.client import OpenHandsClient, extract_message_text, run_followup_message_and_collect
+from artifact_workflow_runtime.openhands_adapter.client import OpenHandsClient, run_followup_message_and_collect
 from artifact_workflow_runtime.runtime_events import RuntimeEvent
 from artifact_workflow_runtime.runtime_factory import build_controller
+from artifact_workflow_runtime.graph.topology import PIPELINE_NODE_ORDER
+from artifact_workflow_runtime.tui.conversations import build_conversation_details, format_conversation_messages
+from artifact_workflow_runtime.tui.evidence import artifact_backing, artifact_display_text, artifact_meta_text, artifact_stage, artifact_summary_line, artifact_summary_text
+from artifact_workflow_runtime.tui.presentation import CockpitInputs, build_cockpit_view, build_stage_detail
 DEFAULT_TASK = (
     "Работай с репозиторием metacoma/freeplane_plugin_grpc.\n"
     "Сначала собери факты через observation, затем спланируй и только потом меняй мир.\n"
     "Всегда оставляй evidence, changed files, commands и verification summary."
 )
-STAGES = ["intake", "classify", "route", "research", "observe", "build_context", "obligations", "plan", "policy", "approval", "execute", "publish", "verify", "finalize"]
+STAGES = list(PIPELINE_NODE_ORDER)
 class RuntimeEventMessage(Message):
     def __init__(self, event: RuntimeEvent) -> None:
         self.event = event
@@ -73,141 +77,66 @@ class ForgeMindTUI(App[None]):
         color: $accent;
         margin: 1 0 0 0;
     }
-    #task-pane {
+    #task-pane, #cockpit-pane, #stages-pane, #events-pane, #transport-pane, #artifacts-pane, #conversations-pane, #report-pane, #errors-pane {
         padding: 0 1;
     }
     #task-editor {
         height: 14;
         border: round $panel;
     }
-    #task-actions {
+    #task-actions, #config-columns, #artifact-filter-bar, #conversation-actions {
         height: auto;
         margin: 1 0;
     }
-    #config-columns {
-        height: auto;
-        margin: 1 0 0 0;
-    }
-    .config-card {
+    .config-card, .cockpit-card {
         width: 1fr;
         border: round $panel;
         padding: 1;
         margin: 0 1 0 0;
     }
-    .config-card:last-child {
+    .config-card:last-child, .cockpit-card:last-child {
         margin: 0;
     }
     Input, Checkbox, Button {
         margin: 0 0 1 0;
     }
-    #overview-pane, #events-pane, #transport-pane, #artifacts-pane, #conversations-pane, #report-pane, #errors-pane {
-        padding: 0 1;
-    }
-    #overview-top {
-        height: 10;
+    #cockpit-top, #cockpit-middle, #cockpit-bottom, #transport-top, #artifact-header {
+        height: auto;
         margin: 0 0 1 0;
     }
-    #pipeline-progress-view {
-        height: 5;
-        border: round $panel;
-        padding: 1;
-        margin: 0 0 1 0;
-    }
-    #workflow-path-view {
-        height: 14;
-        border: round $panel;
-        padding: 1;
-        margin: 0 0 1 0;
-    }
-    #completion-reason-view {
-        height: 9;
-        border: round $panel;
-        padding: 1;
-        margin: 0 0 1 0;
-    }
-    #overview-split {
+    #packet-split, #artifact-split, #conversation-split, #stages-split {
         height: 1fr;
     }
-    #stage-detail-view {
-        height: 1fr;
-        border: round $panel;
-    }
-    .overview-card {
+    #packet-column, #state-column, #conversation-detail-pane {
         width: 1fr;
+    }
+    #conversation-detail-pane {
+        width: 2fr;
+    }
+    #pipeline-view, #decision-view, #obligations-view, #blockers-view, #evidence-cockpit-view, #backend-activity-view, #transport-summary, #transport-last-event, #artifact-summary, #artifact-meta, #conversation-meta, #conversation-chat-view {
         border: round $panel;
         padding: 1;
-        margin: 0 1 0 0;
     }
-    .overview-card:last-child {
-        margin: 0;
+    #pipeline-view, #decision-view {
+        height: 16;
     }
-    #stage-table, #artifacts-table, #conversation-table {
+    #obligations-view, #blockers-view, #evidence-cockpit-view, #backend-activity-view {
+        height: 15;
+        margin: 0 0 1 0;
+    }
+    #packet-table, #stage-table, #artifacts-table, #conversation-table, #conversation-browser-table {
         height: 1fr;
+    }
+    #packet-detail-view, #stage-detail-view, #evidence-view, #report-view, #error-view {
+        height: 1fr;
+        border: round $panel;
     }
     #event-log, #transport-log {
         height: 1fr;
         border: round $panel;
     }
-    #transport-top {
-        height: 12;
-        margin: 0 0 1 0;
-    }
-    #transport-summary, #transport-last-event {
-        border: round $panel;
-        padding: 1;
-        width: 1fr;
-        margin: 0 1 0 0;
-    }
-    #transport-last-event {
-        margin: 0;
-    }
-    #artifact-filter-bar {
-        height: auto;
-        margin: 0 0 1 0;
-    }
-    #artifact-filter-bar Button {
-        margin: 0 1 0 0;
-    }
-    #artifact-header {
-        height: 11;
-        margin: 0 0 1 0;
-    }
-    #artifact-summary, #artifact-meta {
-        border: round $panel;
-        padding: 1;
-        width: 1fr;
-        margin: 0 1 0 0;
-    }
-    #artifact-meta {
-        margin: 0;
-    }
-    #artifact-split {
-        height: 1fr;
-    }
-    #conversation-split {
-        height: 1fr;
-    }
-    #conversation-detail-pane {
-        width: 2fr;
-    }
-    #conversation-meta, #conversation-chat-view {
-        border: round $panel;
-        padding: 1;
-        margin: 0 0 1 0;
-    }
-    #conversation-chat-view {
-        height: 1fr;
-    }
     #conversation-input {
         height: 8;
-        border: round $panel;
-    }
-    #conversation-actions {
-        height: auto;
-        margin: 1 0 0 0;
-    }
-    #evidence-view, #report-view {
-        height: 1fr;
         border: round $panel;
     }
     """
@@ -228,6 +157,7 @@ class ForgeMindTUI(App[None]):
         self.stage_message: dict[str, str] = {stage: "" for stage in STAGES}
         self.stage_started_at: dict[str, str] = {stage: "" for stage in STAGES}
         self.stage_payloads: dict[str, dict[str, Any]] = {stage: {} for stage in STAGES}
+        self.event_history: list[RuntimeEvent] = []
         self.artifact_rows: list[dict[str, Any]] = []
         self.visible_artifact_indexes: list[int] = []
         self.artifact_filter: str = "all"
@@ -235,6 +165,7 @@ class ForgeMindTUI(App[None]):
         self.conversation_rows: list[dict[str, Any]] = []
         self.browser_conversation_rows: list[dict[str, Any]] = []
         self.selected_conversation_id: str | None = None
+        self.selected_packet_key: str | None = None
         self.final_report: FinalReport | None = None
         self.last_error: str | None = None
         self.error_history: list[str] = []
@@ -251,6 +182,7 @@ class ForgeMindTUI(App[None]):
             "followups": 0,
             "last_message": "",
         }
+
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static("Run: idle | Current stage: idle | Status: idle", id="status-bar")
@@ -282,17 +214,30 @@ class ForgeMindTUI(App[None]):
                             yield Input(value=str(self.initial_config.get("conversation_id", "") or ""), id="conversation-id", placeholder="Pinned conversation id")
                             yield Checkbox("Reuse sandbox", value=bool(self.initial_config.get("reuse", True)), id="reuse")
                             yield Checkbox("Auto approve mutations", value=bool(self.initial_config.get("auto_approve", True)), id="auto-approve")
-            with TabPane("Overview", id="overview"):
-                with Vertical(id="overview-pane"):
-                    with Horizontal(id="overview-top"):
-                        yield Static(id="run-summary", classes="overview-card")
-                        yield Static(id="transport-compact", classes="overview-card")
-                        yield Static(id="final-compact", classes="overview-card")
-                    yield Static(id="pipeline-progress-view")
-                    yield Static(id="workflow-path-view")
-                    yield Static(id="completion-reason-view")
+            with TabPane("Cockpit", id="cockpit"):
+                with Vertical(id="cockpit-pane"):
+                    with Horizontal(id="cockpit-top"):
+                        yield Static(id="run-summary", classes="cockpit-card")
+                        yield Static(id="backend-compact", classes="cockpit-card")
+                        yield Static(id="acceptance-compact", classes="cockpit-card")
+                    with Horizontal(id="cockpit-middle"):
+                        yield Static(id="pipeline-view", classes="cockpit-card")
+                        yield Static(id="decision-view", classes="cockpit-card")
+                    with Horizontal(id="packet-split"):
+                        with Vertical(id="packet-column"):
+                            yield Label("Decomposition / packets", classes="section-title")
+                            yield DataTable(id="packet-table")
+                            yield TextArea("", id="packet-detail-view")
+                        with Vertical(id="state-column"):
+                            yield Static(id="obligations-view")
+                            yield Static(id="blockers-view")
+                    with Horizontal(id="cockpit-bottom"):
+                        yield Static(id="evidence-cockpit-view", classes="cockpit-card")
+                        yield Static(id="backend-activity-view", classes="cockpit-card")
+            with TabPane("Stages", id="stages"):
+                with Vertical(id="stages-pane"):
                     yield Label("Pipeline stages", classes="section-title")
-                    with Horizontal(id="overview-split"):
+                    with Horizontal(id="stages-split"):
                         yield DataTable(id="stage-table")
                         yield TextArea("", id="stage-detail-view")
             with TabPane("Events", id="events"):
@@ -346,7 +291,10 @@ class ForgeMindTUI(App[None]):
                     yield Label("Errors / tracebacks", classes="section-title")
                     yield TextArea("", id="error-view")
         yield Footer()
+
     def on_mount(self) -> None:
+        packet_table = self.query_one("#packet-table", DataTable)
+        packet_table.add_columns("Packet", "Type", "Status", "Depends", "Why now")
         stage_table = self.query_one("#stage-table", DataTable)
         stage_table.add_columns("Stage", "Status", "Last update", "Message")
         self._rebuild_stage_table()
@@ -356,6 +304,7 @@ class ForgeMindTUI(App[None]):
         conversation_table.add_columns("When", "Mode", "Conversation", "Sandbox", "WebSocket", "Status")
         conversation_browser_table = self.query_one("#conversation-browser-table", DataTable)
         conversation_browser_table.add_columns("Updated", "Title", "Conversation", "Sandbox", "Status")
+        self.query_one("#packet-detail-view", TextArea).read_only = True
         self.query_one("#evidence-view", TextArea).read_only = True
         self.query_one("#stage-detail-view", TextArea).read_only = True
         self.query_one("#conversation-chat-view", TextArea).read_only = True
@@ -363,13 +312,11 @@ class ForgeMindTUI(App[None]):
         self.query_one("#error-view", TextArea).read_only = True
         self._refresh_log_path()
         self._refresh_status_bar()
-        self._refresh_summary_cards()
         self._refresh_transport_panels()
-        self._set_static_text("#pipeline-progress-view", self._pipeline_progress_text())
-        self._set_static_text("#workflow-path-view", self._workflow_path_text())
-        self._set_static_text("#completion-reason-view", self._completion_reason_text())
         self._refresh_artifact_filter_buttons()
-        self._set_static_text("#artifact-summary", self._artifact_summary_text())
+        self._rebuild_artifact_table()
+        self._refresh_cockpit()
+        self._set_static_text("#artifact-summary", artifact_summary_text(self.artifact_rows))
         self._set_static_text("#artifact-meta", "Select an evidence item to inspect why it exists, what stage produced it, and whether it is stored inline or as a file.")
         self.query_one("#evidence-view", TextArea).text = "Select an evidence item to inspect its body, file contents, metadata and run context."
         self._set_static_text("#conversation-meta", "No conversation selected")
@@ -392,7 +339,7 @@ class ForgeMindTUI(App[None]):
             self._start_run()
     @on(Button.Pressed, "#open-cockpit")
     def _on_open_cockpit(self) -> None:
-        self.query_one("#workflow-tabs", TabbedContent).active = "overview"
+        self.query_one("#workflow-tabs", TabbedContent).active = "cockpit"
     @on(Button.Pressed, "#reset")
     def _on_reset(self) -> None:
         self.stage_status = {stage: "pending" for stage in STAGES}
@@ -403,6 +350,7 @@ class ForgeMindTUI(App[None]):
         self.final_report = None
         self.last_error = None
         self.error_history.clear()
+        self.event_history.clear()
         self.artifact_rows.clear()
         self.visible_artifact_indexes.clear()
         self.selected_artifact_index = None
@@ -420,16 +368,19 @@ class ForgeMindTUI(App[None]):
             "followups": 0,
             "last_message": "",
         })
+        self.query_one("#packet-table", DataTable).clear(columns=False)
+        self.query_one("#packet-detail-view", TextArea).text = "No decomposition packets yet."
         self.query_one("#artifacts-table", DataTable).clear(columns=False)
         self._refresh_artifact_filter_buttons()
         self.query_one("#conversation-table", DataTable).clear(columns=False)
         self.browser_conversation_rows.clear()
         self.selected_conversation_id = None
+        self.selected_packet_key = None
         self.query_one("#conversation-browser-table", DataTable).clear(columns=False)
         self.query_one("#event-log", RichLog).clear()
         self.query_one("#transport-log", RichLog).clear()
         self.query_one("#evidence-view", TextArea).text = "Select an evidence item to inspect its body, file contents, metadata and run context."
-        self._set_static_text("#artifact-summary", self._artifact_summary_text())
+        self._set_static_text("#artifact-summary", artifact_summary_text(self.artifact_rows))
         self._set_static_text("#artifact-meta", "Select an evidence item to inspect its metadata and body.")
         self.query_one("#conversation-meta", Static).update(Text("No conversation selected"))
         self.query_one("#conversation-chat-view", TextArea).text = ""
@@ -452,33 +403,15 @@ class ForgeMindTUI(App[None]):
             api_key=self.query_one("#openhands-api-key", Input).value or None,
         )
     def _format_conversation_messages(self, messages: list[dict[str, Any]]) -> str:
-        lines: list[str] = []
-        for item in messages:
-            role = str(item.get("role") or item.get("source") or item.get("type") or "message")
-            text = extract_message_text(item).strip()
-            if not text:
-                llm_message = item.get("llm_message")
-                if isinstance(llm_message, dict):
-                    role = str(llm_message.get("role") or role)
-                text = json.dumps(item, ensure_ascii=False, indent=2)
-            lines.append(f"[{role}]\n{text}")
-        return "\n\n".join(lines) if lines else "No messages available for this conversation."
+        return format_conversation_messages(messages)
+
     def _build_conversation_details(self, row: dict[str, Any]) -> str:
-        details = {
-            "conversation_id": row.get("conversation_id", ""),
-            "sandbox_id": row.get("sandbox_id", ""),
-            "status": row.get("status", ""),
-            "title": row.get("title", ""),
-            "updated_at": row.get("updated_at", ""),
-            "mode": row.get("mode", ""),
-            "websocket_url": row.get("websocket_url", ""),
-        }
-        return json.dumps(details, ensure_ascii=False, indent=2)
+        return build_conversation_details(row)
     def _select_browser_conversation(self, row_index: int) -> None:
         if 0 <= row_index < len(self.browser_conversation_rows):
             row = self.browser_conversation_rows[row_index]
             self.selected_conversation_id = str(row.get("conversation_id") or "") or None
-            self._set_static_text("#conversation-meta", self._build_conversation_details(row))
+            self._set_static_text("#conversation-meta", build_conversation_details(row))
             conversation_id = self.selected_conversation_id
             if conversation_id:
                 self.run_worker(self._load_conversation_detail(conversation_id), exclusive=False, thread=False)
@@ -486,7 +419,7 @@ class ForgeMindTUI(App[None]):
         self.artifact_filter = value
         self._refresh_artifact_filter_buttons()
         self._rebuild_artifact_table()
-        self._set_static_text("#artifact-summary", self._artifact_summary_text())
+        self._set_static_text("#artifact-summary", artifact_summary_text(self.artifact_rows))
         if self.visible_artifact_indexes:
             preferred = self.selected_artifact_index if self.selected_artifact_index in self.visible_artifact_indexes else self.visible_artifact_indexes[-1]
             self._show_artifact_by_index(preferred)
@@ -546,47 +479,10 @@ class ForgeMindTUI(App[None]):
             return {}
 
     def _artifact_stage(self, row: dict[str, Any]) -> str:
-        kind = str(row.get("kind") or "").lower()
-        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-        request_id = str(metadata.get("request_id") or "").lower()
-        if kind == "task":
-            return "intake"
-        if "classification" in kind:
-            return "classify"
-        if "route" in kind:
-            return "route"
-        if "context" in kind:
-            return "build_context"
-        if "plan" in kind:
-            return "plan"
-        if "policy" in kind:
-            return "policy"
-        if "approval" in kind:
-            return "approval"
-        if "publish" in kind:
-            return "publish"
-        if "verification" in kind or "verify" in kind:
-            return "verify"
-        if "research" in kind or request_id.startswith("research"):
-            return "research"
-        if "observation" in kind or "observe" in kind or request_id.startswith("observe"):
-            return "observe"
-        if "execution" in kind or "exec" in kind or request_id.startswith("exec"):
-            return "execute"
-        if "final" in kind:
-            return "finalize"
-        return "artifact"
+        return artifact_stage(row)
 
     def _artifact_backing(self, row: dict[str, Any]) -> str:
-        raw_path = str(row.get("path") or "").strip()
-        if not raw_path:
-            return "inline"
-        path = Path(raw_path)
-        if path.exists() and path.is_file():
-            return "file"
-        if path.exists() and path.is_dir():
-            return "dir"
-        return "missing"
+        return artifact_backing(row)
 
     def _artifact_summary_line(self, row: dict[str, Any]) -> str:
         preview = str(row.get("preview") or "").strip().replace("\n", " ")
@@ -695,74 +591,60 @@ class ForgeMindTUI(App[None]):
         if 0 <= visible_row_index < len(self.visible_artifact_indexes):
             self._show_artifact_by_index(self.visible_artifact_indexes[visible_row_index])
     def _stage_detail_text(self, stage: str) -> str:
-        parts = [
-            f"Stage: {stage}",
-            f"Status: {self.stage_status.get(stage, 'pending')}",
-            f"Last update: {self.stage_started_at.get(stage, '')}",
-            "",
-            "Message:",
-            self.stage_message.get(stage, ''),
-        ]
-        payload = self.stage_payloads.get(stage) or {}
-        if payload:
-            parts += [
-                "",
-                "Latest event payload:",
-                json.dumps(payload, ensure_ascii=False, indent=2),
-            ]
-        if self.final_report is not None:
-            if stage == "route" and self.final_report.route is not None:
-                parts += [
-                    "",
-                    "Route decision:",
-                    json.dumps(self.final_report.route.model_dump(mode="json"), ensure_ascii=False, indent=2),
-                ]
-            elif stage == "research" and self.final_report.research is not None:
-                parts += [
-                    "",
-                    "Research result:",
-                    json.dumps(self.final_report.research.model_dump(mode="json"), ensure_ascii=False, indent=2),
-                ]
-            elif stage == "observe" and self.final_report.observation is not None:
-                parts += [
-                    "",
-                    "Observation result:",
-                    json.dumps(self.final_report.observation.model_dump(mode="json"), ensure_ascii=False, indent=2),
-                ]
-            elif stage == "obligations" and getattr(self.final_report, "obligations", None) is not None:
-                parts += [
-                    "",
-                    "Obligation analysis:",
-                    json.dumps(self.final_report.obligations.model_dump(mode="json"), ensure_ascii=False, indent=2),
-                ]
-            elif stage == "plan" and self.final_report.plan is not None:
-                parts += [
-                    "",
-                    "Execution plan:",
-                    json.dumps(self.final_report.plan.model_dump(mode="json"), ensure_ascii=False, indent=2),
-                ]
-            elif stage == "publish" and self.final_report.publish is not None:
-                parts += [
-                    "",
-                    "Publish result:",
-                    json.dumps(self.final_report.publish.model_dump(mode="json"), ensure_ascii=False, indent=2),
-                ]
-            elif stage == "verify" and self.final_report.verification is not None:
-                parts += [
-                    "",
-                    "Verification:",
-                    json.dumps(self.final_report.verification.model_dump(mode="json"), ensure_ascii=False, indent=2),
-                ]
-            elif stage == "finalize":
-                parts += [
-                    "",
-                    "Final report summary:",
-                    json.dumps(self.final_report.model_dump(mode="json"), ensure_ascii=False, indent=2),
-                ]
-        return "\n".join(str(part) for part in parts if part is not None)
+        return build_stage_detail(stage, self.stage_status, self.stage_started_at, self.stage_message, self.stage_payloads, self.final_report)
+
     def _show_stage_by_name(self, stage: str) -> None:
         if stage in STAGES:
             self.query_one("#stage-detail-view", TextArea).text = self._stage_detail_text(stage)
+
+    def _refresh_cockpit(self) -> None:
+        view = build_cockpit_view(
+            CockpitInputs(
+                current_stage=self.current_stage,
+                current_status=self.current_status,
+                last_error=self.last_error,
+                stage_status=self.stage_status,
+                stage_message=self.stage_message,
+                stage_started_at=self.stage_started_at,
+                stage_payloads=self.stage_payloads,
+                artifact_rows=self.artifact_rows,
+                transport_state=self.transport_state,
+                event_history=self.event_history,
+                final_report=self.final_report,
+                configured_direct_model=self.query_one("#direct-llm-model", Input).value if self.is_mounted else None,
+                configured_openhands_model=self.query_one("#openhands-model", Input).value if self.is_mounted else None,
+            )
+        )
+        self._set_static_text("#run-summary", view.run_card)
+        self._set_static_text("#backend-compact", view.backend_card)
+        self._set_static_text("#acceptance-compact", view.acceptance_card)
+        self._set_static_text("#pipeline-view", view.pipeline_text)
+        self._set_static_text("#decision-view", view.decision_text)
+        self._set_static_text("#obligations-view", view.obligations_text)
+        self._set_static_text("#blockers-view", view.blockers_text)
+        self._set_static_text("#evidence-cockpit-view", view.evidence_text)
+        self._set_static_text("#backend-activity-view", view.backend_activity_text)
+        self._rebuild_packet_table(view.packet_rows)
+        if view.packet_rows:
+            available = {row.packet_id for row in view.packet_rows}
+            key = self.selected_packet_key if self.selected_packet_key in available else (view.packet_rows[0].packet_id if view.packet_rows else None)
+            if key is not None:
+                self._show_packet_by_key(key, detail_map=view.packet_details, fallback=view.packet_detail_text)
+        else:
+            self.selected_packet_key = None
+            self.query_one("#packet-detail-view", TextArea).text = view.packet_detail_text
+
+    def _rebuild_packet_table(self, rows: list[Any]) -> None:
+        table = self.query_one("#packet-table", DataTable)
+        table.clear(columns=False)
+        for row in rows:
+            table.add_row(row.packet_id, row.packet_type, row.status, row.dependencies, row.selection_reason or "", key=row.packet_id)
+
+    def _show_packet_by_key(self, packet_key: str, *, detail_map: dict[str, str] | None = None, fallback: str = "") -> None:
+        self.selected_packet_key = packet_key
+        detail_map = detail_map or {}
+        self.query_one("#packet-detail-view", TextArea).text = detail_map.get(packet_key) or fallback or "No packet detail available."
+
     @on(Button.Pressed, "#artifact-filter-all")
     def _artifact_filter_all(self) -> None:
         self._set_artifact_filter("all")
@@ -786,6 +668,21 @@ class ForgeMindTUI(App[None]):
     @on(Button.Pressed, "#artifact-filter-other")
     def _artifact_filter_other(self) -> None:
         self._set_artifact_filter("other")
+
+    @on(DataTable.RowSelected, "#packet-table")
+    def _on_packet_selected(self, event: DataTable.RowSelected) -> None:
+        packet_key = str(getattr(event.row_key, "value", event.row_key))
+        self.selected_packet_key = packet_key
+        self._refresh_cockpit()
+
+    @on(DataTable.CellSelected, "#packet-table")
+    def _on_packet_cell_selected(self, event: DataTable.CellSelected) -> None:
+        try:
+            row = self.query_one("#packet-table", DataTable).get_row_at(event.coordinate.row)
+            self.selected_packet_key = str(row[0])
+            self._refresh_cockpit()
+        except Exception as exc:  # pragma: no cover - interactive path
+            self.post_message(InternalErrorMessage("packet_select", self._format_exception(exc)))
 
     @on(DataTable.RowSelected, "#artifacts-table")
     def _on_artifact_selected(self, event: DataTable.RowSelected) -> None:
@@ -875,6 +772,7 @@ class ForgeMindTUI(App[None]):
     def _on_runtime_event(self, message: RuntimeEventMessage) -> None:
         try:
             event = message.event
+            self.event_history.append(event)
             if event.stage == "transport":
                 self._append_transport_event(event)
                 self._refresh_transport_panels()
@@ -900,7 +798,7 @@ class ForgeMindTUI(App[None]):
             self._ingest_artifact_payload(event.payload)
             self._refresh_stage_table()
             if self.running and self.query_one("#workflow-tabs", TabbedContent).active == "task":
-                self.query_one("#workflow-tabs", TabbedContent).active = "overview"
+                self.query_one("#workflow-tabs", TabbedContent).active = "cockpit"
             self._show_stage_by_name(event.stage)
             self._refresh_status_bar()
             self._refresh_summary_cards()
@@ -918,8 +816,8 @@ class ForgeMindTUI(App[None]):
         self._refresh_status_bar()
         self._refresh_summary_cards()
         self._sync_artifacts_from_report(message.report)
-        self._set_static_text("#artifact-summary", self._artifact_summary_text())
-        self.query_one("#workflow-tabs", TabbedContent).active = "overview"
+        self._set_static_text("#artifact-summary", artifact_summary_text(self.artifact_rows))
+        self.query_one("#workflow-tabs", TabbedContent).active = "cockpit"
         self._show_stage_by_name("finalize")
     @on(RunFailedMessage)
     def _on_failed(self, message: RunFailedMessage) -> None:
@@ -969,8 +867,8 @@ class ForgeMindTUI(App[None]):
             row = next((r for r in self.browser_conversation_rows if r.get("conversation_id") == conversation_id), None)
             payload = row or {}
             payload = {**payload, "conversation_id": conversation_id, "sandbox_id": start.sandbox_id or payload.get("sandbox_id", ""), "websocket_url": start.conversation_url or start.agent_server_url or payload.get("websocket_url", "")}
-            details = self._build_conversation_details(payload)
-            transcript = self._format_conversation_messages(messages)
+            details = build_conversation_details(payload)
+            transcript = format_conversation_messages(messages)
             self.post_message(ConversationLoadedMessage(conversation_id, details, transcript))
         except Exception as exc:  # pragma: no cover - interactive path
             self.post_message(InternalErrorMessage("conversation_detail", self._format_exception(exc)))
@@ -986,7 +884,7 @@ class ForgeMindTUI(App[None]):
                 event_sink=lambda event: self.post_message(RuntimeEventMessage(event)),
             )
             messages = await client.get_conversation_messages(conversation_id)
-            transcript = self._format_conversation_messages(messages)
+            transcript = format_conversation_messages(messages)
             self.post_message(ConversationSentMessage(conversation_id, transcript, result.text))
         except Exception as exc:  # pragma: no cover - interactive path
             self.post_message(InternalErrorMessage("conversation_send", self._format_exception(exc)))
@@ -1062,7 +960,7 @@ class ForgeMindTUI(App[None]):
                     if not preview:
                         preview = matched.read_text(encoding="utf-8", errors="replace")[:400]
             self._add_artifact_row(artifact_id, kind, path_text, preview, media_type=media_type, created_at=created_at, metadata=metadata)
-        self._set_static_text("#artifact-summary", self._artifact_summary_text())
+        self._set_static_text("#artifact-summary", artifact_summary_text(self.artifact_rows))
 
     def _sync_artifacts_from_report(self, report: FinalReport) -> None:
         artifact_index = self._load_artifact_index()
@@ -1087,7 +985,7 @@ class ForgeMindTUI(App[None]):
                         continue
                     preview = path.read_text(encoding="utf-8", errors="replace")[:400]
                     self._add_artifact_row(path.stem, path.stem.split("_")[0], str(path), preview)
-        self._set_static_text("#artifact-summary", self._artifact_summary_text())
+        self._set_static_text("#artifact-summary", artifact_summary_text(self.artifact_rows))
         if self.artifact_rows:
             self._show_artifact_by_index(len(self.artifact_rows) - 1)
 
@@ -1328,57 +1226,8 @@ class ForgeMindTUI(App[None]):
             lines += ["", f"Current outcome -> stage={self.current_stage}, status={self.current_status}"]
         return "\n".join(lines)
     def _refresh_summary_cards(self) -> None:
-        run_lines = ["Workflow", "", f"current_stage: {self.current_stage}", f"status: {self.current_status}", f"artifacts_seen: {len(self.artifact_rows)}"]
-        if self.last_error:
-            run_lines.append(f"last_error: {self.last_error}")
-        self._set_static_text("#run-summary", "\n".join(run_lines))
-        transport_lines = [
-            "Transport",
-            "",
-            f"mode: {self.transport_state.get('mode', '')}",
-            f"conversation: {self.transport_state.get('conversation_id', '')}",
-            f"sandbox: {self.transport_state.get('sandbox_id', '')}",
-            f"followups: {self.transport_state.get('followups', 0)}",
-            f"events: {self.transport_state.get('event_count', 0)}",
-        ]
-        self._set_static_text("#transport-compact", "\n".join(transport_lines))
-        final_lines = ["Final / verification", ""]
-        if self.final_report is not None:
-            final_lines.append(f"final_status: {self.final_report.status}")
-            if self.final_report.route is not None:
-                final_lines.append(f"needs_research: {self.final_report.route.needs_fresh_external_research}")
-                final_lines.append(f"needs_repo_obs: {self.final_report.route.needs_repository_observation}")
-                final_lines.append(f"needs_world_obs: {self.final_report.route.needs_world_observation}")
-            if self.final_report.plan is not None:
-                final_lines.append(f"intent: {self.final_report.plan.task_intent}")
-                final_lines.append(f"deliverable: {self.final_report.plan.deliverable_kind}")
-            if self.final_report.verification is not None:
-                verdict = "PASS" if self.final_report.verification.passed else "FAIL"
-                final_lines.append(f"verification: {verdict}")
-                final_lines.append(f"confidence: {self.final_report.verification.confidence}")
-                if getattr(self.final_report.verification, "completion_status", None):
-                    final_lines.append(f"completion: {self.final_report.verification.completion_status}")
-                performed = getattr(self.final_report.verification, "performed_test_levels", None) or []
-                missing = getattr(self.final_report.verification, "missing_test_levels", None) or []
-                if performed:
-                    final_lines.append(f"tests_done: {', '.join(performed)}")
-                if missing:
-                    final_lines.append(f"tests_missing: {', '.join(missing)}")
-                missing_obligations = getattr(self.final_report.verification, "missing_obligations", None) or []
-                if missing_obligations:
-                    final_lines.append(f"obligations_missing: {len(missing_obligations)}")
-                pr_failed = getattr(self.final_report.verification, "pr_checks_failed", None) or []
-                pr_pending = getattr(self.final_report.verification, "pr_checks_pending", None) or []
-                if pr_failed:
-                    final_lines.append(f"pr_failed: {len(pr_failed)}")
-                if pr_pending:
-                    final_lines.append(f"pr_pending: {len(pr_pending)}")
-            if self.final_report.publish is not None:
-                final_lines.append(f"publish_ok: {self.final_report.publish.ok}")
-        else:
-            final_lines.append("no final report yet")
-        self._set_static_text("#final-compact", "\n".join(final_lines))
-        self._set_static_text("#workflow-path-view", self._workflow_path_text())
+        self._refresh_cockpit()
+
     def _refresh_transport_panels(self) -> None:
         lines = [
             "Transport state",
@@ -1444,8 +1293,8 @@ class ForgeMindTUI(App[None]):
         self.query_one("#open-cockpit", Button).disabled = True
         self._refresh_status_bar()
         self.query_one("#event-log", RichLog).write("Starting workflow run...")
-        self.query_one("#workflow-tabs", TabbedContent).active = "overview"
-        self.call_after_refresh(lambda: self.query_one("#stage-table", DataTable).focus())
+        self.query_one("#workflow-tabs", TabbedContent).active = "cockpit"
+        self.call_after_refresh(lambda: self.query_one("#packet-table", DataTable).focus())
         self.run_worker(self._run_workflow(), exclusive=True, thread=False)
     async def _run_workflow(self) -> None:
         def event_sink(event: RuntimeEvent) -> None:

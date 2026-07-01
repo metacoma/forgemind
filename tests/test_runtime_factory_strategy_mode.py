@@ -47,7 +47,8 @@ def test_build_controller_rejects_invalid_strategy_mode(tmp_path) -> None:
         _build(tmp_path, strategy_selection_mode="magic")
 
 
-def test_build_controller_installs_default_model_routing_without_config(tmp_path) -> None:
+def test_build_controller_installs_default_model_routing_without_config(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
     controller = build_controller(
         artifact_dir=str(tmp_path),
         direct_llm_endpoint="http://llm",
