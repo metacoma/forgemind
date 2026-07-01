@@ -7,7 +7,7 @@ from artifact_workflow_runtime.done_contract import DoneContract
 from artifact_workflow_runtime.environment import EnvironmentPlan
 from artifact_workflow_runtime.qa import QAExecutionReport, QAPlan, QAReview
 from artifact_workflow_runtime.state.workspace import workspace_root_from_state
-from artifact_workflow_runtime.decomposition import DecompositionPlan
+from artifact_workflow_runtime.decomposition import DecompositionPlan, DecompositionProgressDecision
 
 
 class ReviewQAStageMixin:
@@ -62,7 +62,7 @@ class ReviewQAStageMixin:
                 current_packet_id=state.get("active_packet_id"),
             )
             if packet_progression is not None:
-                selected_next = packet_progression.selected_next_stage
+                selected_next = kernel.next_stage_after_decomposition_progression(packet_progression)
                 next_active_packet_id = packet_progression.selected_next_packet_id if selected_next == "execute" else None
                 progression_artifact = services.artifact_store.add_json(
                     "packet_progression",
@@ -102,8 +102,9 @@ class ReviewQAStageMixin:
     def review_next(self, state: WorkflowState) -> str:
         review = QAReview.model_validate(state["review_result"])
         if review.status == "pass":
-            progression = state.get("packet_progression") or {}
-            next_stage = str(progression.get("selected_next_stage") or "qa_plan") if isinstance(progression, dict) else "qa_plan"
+            progression = DecompositionProgressDecision.model_validate(state["packet_progression"]) if state.get("packet_progression") else None
+            kernel = self.services.runtime_kernel or RuntimeKernel()
+            next_stage = kernel.next_stage_after_decomposition_progression(progression)
             return next_stage if next_stage in {"execute", "qa_plan", "finalize"} else "qa_plan"
         if review.status == "fail_code":
             return "repair"

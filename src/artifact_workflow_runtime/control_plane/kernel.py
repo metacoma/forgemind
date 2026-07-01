@@ -44,7 +44,7 @@ from artifact_workflow_runtime.lifecycle import (
 )
 from artifact_workflow_runtime.policy import PolicyEngine
 from artifact_workflow_runtime.policy.evidence import EvidenceGate
-from artifact_workflow_runtime.decomposition import DecompositionPlan, DecompositionProgressDecision, progression_decision
+from artifact_workflow_runtime.decomposition import DecompositionOutcome, DecompositionPlan, DecompositionProgressDecision, progression_decision
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +216,22 @@ class RuntimeKernel:
             active_strategy=active_strategy,
             current_packet_id=current_packet_id,
         )
+
+    def next_stage_after_decomposition_progression(self, decision: DecompositionProgressDecision | None) -> str:
+        if decision is None:
+            return "qa_plan"
+        return decision.selected_next_stage
+
+    def decomposition_terminal_status(self, decision: DecompositionProgressDecision | None) -> str | None:
+        if decision is None or not decision.terminal:
+            return None
+        if decision.final_status_hint:
+            return decision.final_status_hint
+        if decision.outcome == DecompositionOutcome.FAILED_TERMINAL:
+            return "failed"
+        if decision.outcome in {DecompositionOutcome.BLOCKED_TERMINAL, DecompositionOutcome.MANUAL_INTERVENTION_REQUIRED}:
+            return "blocked"
+        return None
 
     def next_after_acceptance(
         self,

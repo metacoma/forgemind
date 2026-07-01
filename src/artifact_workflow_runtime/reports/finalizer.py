@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from artifact_workflow_runtime.decomposition.models import DecompositionPlan, DecompositionProgressDecision, ExecutionPacketStatus
+from artifact_workflow_runtime.decomposition.models import DecompositionOutcome, DecompositionPlan, DecompositionProgressDecision, ExecutionPacketStatus
 from artifact_workflow_runtime.models import (
     AcceptanceDecision,
     ApprovalRequest,
@@ -58,8 +58,8 @@ class FinalReportBuilder:
         elif acceptance_decision:
             status = acceptance_decision.final_workflow_status
             summary = acceptance_decision.summary
-        elif packet_progression is not None and packet_progression.blocked:
-            status = "blocked"
+        elif packet_progression is not None and packet_progression.terminal:
+            status = packet_progression.final_status_hint or ("failed" if packet_progression.outcome == DecompositionOutcome.FAILED_TERMINAL else "blocked")
             summary = packet_progression.reason
         elif decomposition_plan is not None and any(packet.status in {ExecutionPacketStatus.BLOCKED, ExecutionPacketStatus.FAILED} for packet in decomposition_plan.packets):
             status = "blocked"

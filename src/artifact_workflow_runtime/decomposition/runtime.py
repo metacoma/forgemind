@@ -6,25 +6,37 @@ from artifact_workflow_runtime.models import ExecutionResult
 from artifact_workflow_runtime.strategy import StrategyId
 
 from .models import (
+    DecompositionOutcome,
     DecompositionPlan,
     DecompositionProgressDecision,
     ExecutionPacket,
     ExecutionPacketStatus,
+    ExecutionPacketType,
     PacketHistoryEntry,
 )
 
 
 def planner_for(services: Any):
     from .planner import DecompositionPlanner
+
     return getattr(services, "decomposition_planner", None) or DecompositionPlanner()
 
 
 def selector_for(services: Any):
     from .selector import PacketSelector
+
     return getattr(services, "packet_selector", None) or PacketSelector()
 
 
-def update_packet_status(plan: DecompositionPlan, *, packet_id: str, new_status: ExecutionPacketStatus, reason: str, stage: str, execution_result_id: str | None = None) -> tuple[DecompositionPlan, PacketHistoryEntry]:
+def update_packet_status(
+    plan: DecompositionPlan,
+    *,
+    packet_id: str,
+    new_status: ExecutionPacketStatus,
+    reason: str,
+    stage: str,
+    execution_result_id: str | None = None,
+) -> tuple[DecompositionPlan, PacketHistoryEntry]:
     packets: list[ExecutionPacket] = []
     previous = None
     for packet in plan.packets:
@@ -35,7 +47,14 @@ def update_packet_status(plan: DecompositionPlan, *, packet_id: str, new_status:
             packets.append(packet)
     if previous is None:
         raise KeyError(f"Unknown packet id: {packet_id}")
-    history = PacketHistoryEntry(packet_id=packet_id, previous_status=previous, new_status=new_status, reason=reason, stage=stage, execution_result_id=execution_result_id)
+    history = PacketHistoryEntry(
+        packet_id=packet_id,
+        previous_status=previous,
+        new_status=new_status,
+        reason=reason,
+        stage=stage,
+        execution_result_id=execution_result_id,
+    )
     return plan.model_copy(update={"packets": packets, "updated_at": history.created_at}), history
 
 
@@ -116,40 +135,107 @@ def progression_decision(
     strategy = StrategyId.coerce(active_strategy or plan.strategy_id or StrategyId.DEFAULT)
     if plan_completed(plan):
         return DecompositionProgressDecision(
+            outcome=DecompositionOutcome.DECOMPOSITION_COMPLETED,
             current_packet_id=current_packet_id,
             selected_next_packet_id=None,
             selected_next_stage="qa_plan",
             plan_completed=True,
+            terminal=False,
             blocked=False,
             reason="All execution packets are completed or skipped; runtime may continue to QA/verification.",
         )
 
     selection = PacketSelector().select(plan=plan, active_strategy=strategy)
+    selected_packet = _packet_by_id(plan, selection.selected_packet_id) if selection.selected_packet_id else None
     if selection.ready and selection.selected_packet_id:
+        outcome = (
+            DecompositionOutcome.REPAIR_REQUIRED
+            if strategy == StrategyId.REPAIR_ONLY or (selected_packet is not None and selected_packet.packet_type == ExecutionPacketType.REPAIR)
+            else DecompositionOutcome.RUNNABLE_PACKET
+        )
         return DecompositionProgressDecision(
+            outcome=outcome,
             current_packet_id=current_packet_id,
             selected_next_packet_id=selection.selected_packet_id,
             selected_next_stage="execute",
             plan_completed=False,
+            terminal=False,
             blocked=False,
+            repair_required=outcome == DecompositionOutcome.REPAIR_REQUIRED,
             reason=selection.reason,
         )
 
-    blocked_packets = [packet.packet_id for packet in plan.packets if packet.status in {ExecutionPacketStatus.BLOCKED, ExecutionPacketStatus.FAILED}]
+    failed_packets = [packet.packet_id for packet in plan.packets if packet.status == ExecutionPacketStatus.FAILED]
+    blocked_packets = [packet.packet_id for packet in plan.packets if packet.status == ExecutionPacketStatus.BLOCKED]
     pending_packets = [packet.packet_id for packet in plan.packets if packet.status == ExecutionPacketStatus.PENDING]
+
+    if failed_packets:
+        reason = f"Decomposition plan cannot continue because failed packets remain unresolved: {', '.join(failed_packets)}."
+        return DecompositionProgressDecision(
+            outcome=DecompositionOutcome.FAILED_TERMINAL,
+            current_packet_id=current_packet_id,
+            selected_next_packet_id=None,
+            selected_next_stage="finalize",
+            plan_completed=False,
+            terminal=True,
+            blocked=False,
+            failed=True,
+            final_status_hint="failed",
+            blocked_reason="failed_packets_present",
+            reason=reason,
+        )
+
     if blocked_packets:
-        reason = f"Decomposition plan is not complete and contains blocked/failed packets: {', '.join(blocked_packets)}."
-    elif pending_packets:
+        reason = f"Decomposition plan is blocked because blocked packets remain unresolved: {', '.join(blocked_packets)}."
+        return DecompositionProgressDecision(
+            outcome=DecompositionOutcome.BLOCKED_TERMINAL,
+            current_packet_id=current_packet_id,
+            selected_next_packet_id=None,
+            selected_next_stage="finalize",
+            plan_completed=False,
+            terminal=True,
+            blocked=True,
+            final_status_hint="blocked",
+            blocked_reason="blocked_packets_present",
+            reason=reason,
+        )
+
+    if pending_packets:
         reason = selection.reason or "Decomposition plan still has pending packets but none are runnable."
-    else:
-        reason = "Decomposition plan is not complete and no runnable packet could be selected."
+        return DecompositionProgressDecision(
+            outcome=DecompositionOutcome.MANUAL_INTERVENTION_REQUIRED,
+            current_packet_id=current_packet_id,
+            selected_next_packet_id=None,
+            selected_next_stage="finalize",
+            plan_completed=False,
+            terminal=True,
+            blocked=True,
+            manual_intervention_required=True,
+            final_status_hint="blocked",
+            blocked_reason=selection.blocked_reason or "no_runnable_packets",
+            pending_dependencies=list(selection.pending_dependencies),
+            reason=reason,
+        )
+
     return DecompositionProgressDecision(
+        outcome=DecompositionOutcome.BLOCKED_TERMINAL,
         current_packet_id=current_packet_id,
-        selected_next_packet_id=selection.selected_packet_id,
+        selected_next_packet_id=None,
         selected_next_stage="finalize",
         plan_completed=False,
+        terminal=True,
         blocked=True,
-        blocked_reason=selection.blocked_reason or ("failed_packets_present" if blocked_packets else "no_runnable_packets"),
+        final_status_hint="blocked",
+        blocked_reason=selection.blocked_reason or "no_runnable_packets",
         pending_dependencies=list(selection.pending_dependencies),
-        reason=reason,
+        reason="Decomposition plan is not complete and no runnable packet could be selected.",
     )
+
+
+def _packet_by_id(plan: DecompositionPlan, packet_id: str | None) -> ExecutionPacket | None:
+    if packet_id is None:
+        return None
+    for packet in plan.packets:
+        if packet.packet_id == packet_id:
+            return packet
+    return None

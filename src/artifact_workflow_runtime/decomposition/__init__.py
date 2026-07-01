@@ -1,5 +1,6 @@
 from .models import (
     DecompositionComplexity,
+    DecompositionOutcome,
     DecompositionPlan,
     DecompositionValidationResult,
     DecompositionProgressDecision,
@@ -16,6 +17,7 @@ from .runtime import packet_from_state, packet_metadata, packet_prompt_block, pl
 
 __all__ = [
     "DecompositionComplexity",
+    "DecompositionOutcome",
     "DecompositionPlan",
     "DecompositionValidationResult",
     "DecompositionProgressDecision",

@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from pydantic import Field, field_validator
-
-from artifact_workflow_runtime.models.base import RuntimeModel, utc_now
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 JsonDict = dict[str, Any]
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+class RuntimeModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True, arbitrary_types_allowed=True)
 
 
 class ExecutionPacketStatus(str, Enum):
@@ -28,6 +35,8 @@ class ExecutionPacketType(str, Enum):
     REPAIR = "repair"
     REFACTOR = "refactor"
     PUBLISH_PREPARATION = "publish_preparation"
+    INTEGRATION = "integration"
+    SETUP = "setup"
 
 
 class DecompositionComplexity(str, Enum):
@@ -36,6 +45,15 @@ class DecompositionComplexity(str, Enum):
     MEDIUM = "medium"
     LARGE = "large"
     UNKNOWN = "unknown"
+
+
+class DecompositionOutcome(str, Enum):
+    RUNNABLE_PACKET = "runnable_packet"
+    DECOMPOSITION_COMPLETED = "decomposition_completed"
+    BLOCKED_TERMINAL = "blocked_terminal"
+    FAILED_TERMINAL = "failed_terminal"
+    REPAIR_REQUIRED = "repair_required"
+    MANUAL_INTERVENTION_REQUIRED = "manual_intervention_required"
 
 
 class ExecutionPacket(RuntimeModel):
@@ -113,14 +131,18 @@ class PacketSelection(RuntimeModel):
         return text
 
 
-
-
 class DecompositionProgressDecision(RuntimeModel):
+    outcome: DecompositionOutcome = DecompositionOutcome.RUNNABLE_PACKET
     current_packet_id: str | None = None
     selected_next_packet_id: str | None = None
     selected_next_stage: str
     plan_completed: bool = False
+    terminal: bool = False
     blocked: bool = False
+    failed: bool = False
+    repair_required: bool = False
+    manual_intervention_required: bool = False
+    final_status_hint: str | None = None
     blocked_reason: str | None = None
     pending_dependencies: list[str] = Field(default_factory=list)
     reason: str

@@ -4,7 +4,7 @@ import hashlib
 import re
 from typing import TYPE_CHECKING, Iterable
 
-from artifact_workflow_runtime.models import AcceptanceObligationKind, ObligationAnalysis, Task, TaskAcceptanceContract
+from artifact_workflow_runtime.models import AcceptanceObligationKind, DiscoveredImpactKind, ObligationAnalysis, Task, TaskAcceptanceContract
 from artifact_workflow_runtime.strategy import StrategyId
 
 from .models import DecompositionComplexity, DecompositionPlan, ExecutionPacket, ExecutionPacketStatus, ExecutionPacketType
@@ -36,13 +36,7 @@ class DecompositionPlanner:
         complexity = _infer_complexity(task_obj.description, acceptance=acceptance, obligations=obligation_model, runtime_facts=runtime_facts)
         plan_id = _stable_plan_id(task_obj.description, strategy.value, complexity.value)
         flags = _obligation_flags(acceptance, obligation_model, runtime_facts=runtime_facts)
-        packets = self._packets_for_strategy(
-            plan_id=plan_id,
-            task=task_obj,
-            strategy=strategy,
-            complexity=complexity,
-            flags=flags,
-        )
+        packets = self._packets_for_strategy(plan_id=plan_id, task=task_obj, strategy=strategy, complexity=complexity, flags=flags)
         plan = DecompositionPlan(
             plan_id=plan_id,
             task_summary=task_obj.description,
@@ -52,18 +46,24 @@ class DecompositionPlanner:
             risks=_dedupe(flags["risks"]),
             assumptions=_dedupe(flags["assumptions"]),
             decomposition_reason=_decomposition_reason(strategy, complexity, flags),
-            metadata={"planner": "rule_based_v1", "task_id": task_obj.id, "runtime_facts": runtime_facts},
+            metadata={"planner": "rule_based_v2", "task_id": task_obj.id, "runtime_facts": runtime_facts},
         )
         validation = self.validator.validate(plan, fallback_to_single_packet=self.fallback_to_single_packet)
         return validation.normalized_plan or plan
 
-    def _packets_for_strategy(self, *, plan_id: str, task: Task, strategy: StrategyId, complexity: DecompositionComplexity, flags: dict[str, object]) -> list[ExecutionPacket]:
-        has_tests = bool(flags["has_tests"])
-        has_docs = bool(flags["has_docs"])
-        needs_verification = True
+    def _packets_for_strategy(
+        self,
+        *,
+        plan_id: str,
+        task: Task,
+        strategy: StrategyId,
+        complexity: DecompositionComplexity,
+        flags: dict[str, object],
+    ) -> list[ExecutionPacket]:
         allowed_files = list(flags["allowed_files"])
         target_areas = list(flags["target_areas"])
         base_forbidden = ["do not choose the next workflow step", "do not expand scope without controller approval"]
+        completed_types = set(flags["completed_packet_types"])
 
         if strategy == StrategyId.REPAIR_ONLY:
             return [
@@ -84,123 +84,212 @@ class DecompositionPlanner:
             ]
 
         packets: list[ExecutionPacket] = []
-        if strategy == StrategyId.BDD_INCREMENTAL:
-            packets.append(_packet(plan_id, 1, "capture behavior and tests", task.description,
-                scope="Define or update behavior-oriented tests/spec examples for the targeted feature before broader implementation.",
-                packet_type=ExecutionPacketType.TEST,
+        next_index = 1
+
+        def append_packet(
+            title: str,
+            *,
+            scope: str,
+            packet_type: ExecutionPacketType,
+            success_criteria: list[str],
+            required_evidence: list[str],
+            dependencies: list[str] | None = None,
+            prepend: bool = False,
+        ) -> ExecutionPacket:
+            nonlocal next_index, packets
+            packet = _packet(
+                plan_id,
+                next_index,
+                title,
+                task.description,
+                scope=scope,
+                packet_type=packet_type,
                 strategy_id=strategy.value,
-                success_criteria=["Behavior/test packet exists for the targeted change."],
-                required_evidence=["new or updated tests/spec examples"],
+                success_criteria=success_criteria,
+                required_evidence=required_evidence,
+                dependencies=dependencies,
                 allowed_files=allowed_files,
                 target_areas=target_areas,
-                forbidden_actions=base_forbidden))
-            packets.append(_packet(plan_id, 2, "implement behavior to satisfy tests", task.description,
-                scope="Implement the bounded feature required by the preceding behavior/tests.",
-                packet_type=ExecutionPacketType.IMPLEMENTATION,
-                strategy_id=strategy.value,
-                dependencies=[packets[0].packet_id],
-                success_criteria=["Implementation satisfies the behavior/test packet."],
-                required_evidence=["changed source files", "local test/build results"],
-                allowed_files=allowed_files,
-                target_areas=target_areas,
-                forbidden_actions=base_forbidden))
-        elif strategy == StrategyId.SPIKE_THEN_HARDEN:
-            packets.append(_packet(plan_id, 1, "spike discovery for feature", task.description,
-                scope="Run a bounded discovery/spike to understand the API, integration points, or environment before production hardening.",
-                packet_type=ExecutionPacketType.SPIKE,
-                strategy_id=strategy.value,
-                success_criteria=["Key unknowns are reduced and concrete next implementation areas are identified."],
-                required_evidence=["discovery findings", "affected areas", "bounded next-step notes"],
-                allowed_files=allowed_files,
-                target_areas=target_areas,
-                forbidden_actions=base_forbidden + ["avoid broad production refactors in the spike"]))
-            packets.append(_packet(plan_id, 2, "harden minimal implementation after spike", task.description,
-                scope="Use spike findings to produce the first bounded implementation slice.",
-                packet_type=ExecutionPacketType.IMPLEMENTATION,
-                strategy_id=strategy.value,
-                dependencies=[packets[0].packet_id],
-                success_criteria=["Bounded implementation slice exists after spike."],
-                required_evidence=["changed source files", "local checks"],
-                allowed_files=allowed_files,
-                target_areas=target_areas,
-                forbidden_actions=base_forbidden))
-        elif strategy == StrategyId.SAFE_REFACTOR:
-            packets.append(_packet(plan_id, 1, "characterize current behavior", task.description,
-                scope="Add or identify low-risk characterization checks before refactoring.",
-                packet_type=ExecutionPacketType.REFACTOR,
-                strategy_id=strategy.value,
-                success_criteria=["Characterization or refactor-prep evidence exists."],
-                required_evidence=["existing or added characterization tests/checks"],
-                allowed_files=allowed_files,
-                target_areas=target_areas,
-                forbidden_actions=base_forbidden))
-            packets.append(_packet(plan_id, 2, "apply small safe refactor", task.description,
-                scope="Perform a bounded low-risk refactor informed by characterization checks.",
-                packet_type=ExecutionPacketType.REFACTOR,
-                strategy_id=strategy.value,
-                dependencies=[packets[0].packet_id],
-                success_criteria=["Small refactor completed without regressions."],
-                required_evidence=["changed files", "characterization or regression checks"],
-                allowed_files=allowed_files,
-                target_areas=target_areas,
-                forbidden_actions=base_forbidden))
-        else:
-            first_scope = "Deliver the smallest coherent working slice for the requested task." if strategy == StrategyId.MVP_FIRST else "Implement the bounded requested change."
-            first_title = "minimal working slice" if strategy == StrategyId.MVP_FIRST else "bounded implementation"
-            packets.append(_packet(plan_id, 1, first_title, task.description,
-                scope=first_scope,
-                packet_type=ExecutionPacketType.IMPLEMENTATION,
-                strategy_id=strategy.value,
-                success_criteria=["A bounded implementation slice exists."],
-                required_evidence=["changed source files", "local build/test evidence"],
-                allowed_files=allowed_files,
-                target_areas=target_areas,
-                forbidden_actions=base_forbidden))
+                forbidden_actions=base_forbidden,
+            )
+            next_index += 1
+            if prepend:
+                packets = [packet, *[item.model_copy(update={"dependencies": [packet.packet_id, *item.dependencies] if not item.dependencies else item.dependencies}) for item in packets]]
+            else:
+                packets.append(packet)
+            return packet
+
+        if flags["has_setup"] and ExecutionPacketType.SETUP not in completed_types:
+            append_packet(
+                "prepare environment and setup prerequisites",
+                scope="Resolve bounded setup or environment prerequisites required before implementation/integration work.",
+                packet_type=ExecutionPacketType.SETUP,
+                success_criteria=["Required setup or environment prerequisites are satisfied for the bounded task."],
+                required_evidence=["setup steps", "environment verification evidence"],
+            )
 
         lead_id = packets[-1].packet_id if packets else None
-        if strategy in {StrategyId.DEFAULT, StrategyId.MVP_FIRST} and len(packets) == 1 and complexity in {DecompositionComplexity.TINY, DecompositionComplexity.SMALL, DecompositionComplexity.MEDIUM} and not has_docs and not bool(flags["has_ci"]):
+        implementation_completed = bool(flags["implementation_completed"])
+
+        if strategy == StrategyId.BDD_INCREMENTAL:
+            if ExecutionPacketType.TEST not in completed_types:
+                lead_id = append_packet(
+                    "capture behavior and tests",
+                    scope="Define or update behavior-oriented tests/spec examples for the targeted feature before broader implementation.",
+                    packet_type=ExecutionPacketType.TEST,
+                    success_criteria=["Behavior/test packet exists for the targeted change."],
+                    required_evidence=["new or updated tests/spec examples"],
+                    dependencies=[lead_id] if lead_id else None,
+                ).packet_id
+            if not implementation_completed:
+                lead_id = append_packet(
+                    "implement behavior to satisfy tests",
+                    scope="Implement the bounded feature required by the preceding behavior/tests.",
+                    packet_type=ExecutionPacketType.IMPLEMENTATION,
+                    success_criteria=["Implementation satisfies the behavior/test packet."],
+                    required_evidence=["changed source files", "local test/build results"],
+                    dependencies=[lead_id] if lead_id else None,
+                ).packet_id
+        elif strategy == StrategyId.SPIKE_THEN_HARDEN:
+            if ExecutionPacketType.SPIKE not in completed_types:
+                lead_id = append_packet(
+                    "spike discovery for feature",
+                    scope="Run a bounded discovery/spike to understand the API, integration points, or environment before production hardening.",
+                    packet_type=ExecutionPacketType.SPIKE,
+                    success_criteria=["Key unknowns are reduced and concrete next implementation areas are identified."],
+                    required_evidence=["discovery findings", "affected areas", "bounded next-step notes"],
+                    dependencies=[lead_id] if lead_id else None,
+                ).packet_id
+            if not implementation_completed:
+                lead_id = append_packet(
+                    "harden minimal implementation after spike",
+                    scope="Use spike findings to produce the first bounded implementation slice.",
+                    packet_type=ExecutionPacketType.IMPLEMENTATION,
+                    success_criteria=["Bounded implementation slice exists after spike."],
+                    required_evidence=["changed source files", "local checks"],
+                    dependencies=[lead_id] if lead_id else None,
+                ).packet_id
+        elif strategy == StrategyId.SAFE_REFACTOR:
+            if ExecutionPacketType.REFACTOR not in completed_types:
+                lead_id = append_packet(
+                    "characterize current behavior",
+                    scope="Add or identify low-risk characterization checks before refactoring.",
+                    packet_type=ExecutionPacketType.REFACTOR,
+                    success_criteria=["Characterization or refactor-prep evidence exists."],
+                    required_evidence=["existing or added characterization tests/checks"],
+                    dependencies=[lead_id] if lead_id else None,
+                ).packet_id
+            if not implementation_completed:
+                lead_id = append_packet(
+                    "apply small safe refactor",
+                    scope="Perform a bounded low-risk refactor informed by characterization checks.",
+                    packet_type=ExecutionPacketType.REFACTOR,
+                    success_criteria=["Small refactor completed without regressions."],
+                    required_evidence=["changed files", "characterization or regression checks"],
+                    dependencies=[lead_id] if lead_id else None,
+                ).packet_id
+        else:
+            if not implementation_completed:
+                first_scope = (
+                    "Deliver the smallest coherent working slice for the requested task."
+                    if strategy == StrategyId.MVP_FIRST
+                    else "Implement the bounded requested change."
+                )
+                first_title = "minimal working slice" if strategy == StrategyId.MVP_FIRST else "bounded implementation"
+                lead_id = append_packet(
+                    first_title,
+                    scope=first_scope,
+                    packet_type=ExecutionPacketType.IMPLEMENTATION,
+                    success_criteria=["A bounded implementation slice exists."],
+                    required_evidence=["changed source files", "local build/test evidence"],
+                    dependencies=[lead_id] if lead_id else None,
+                ).packet_id
+
+        if strategy in {StrategyId.DEFAULT, StrategyId.MVP_FIRST} and packets and not implementation_completed and complexity in {DecompositionComplexity.TINY, DecompositionComplexity.SMALL, DecompositionComplexity.MEDIUM} and not flags["has_setup"] and not flags["has_integration"] and not flags["has_docs"] and not flags["has_ci"]:
+            return packets
+
+        if flags["has_integration"] and ExecutionPacketType.INTEGRATION not in completed_types:
+            lead_id = append_packet(
+                "integrate bounded implementation surface",
+                scope="Update the bounded integration path, wiring, or end-to-end surface required by the discovered obligations.",
+                packet_type=ExecutionPacketType.INTEGRATION,
+                success_criteria=["Integration surface for the bounded change is updated or verified."],
+                required_evidence=["integration changes", "integration check evidence"],
+                dependencies=[lead_id] if lead_id else None,
+            ).packet_id
+
+        if flags["has_tests"] and ExecutionPacketType.TEST not in completed_types and strategy != StrategyId.BDD_INCREMENTAL:
+            lead_id = append_packet(
+                "verify tests for bounded change",
+                scope="Run or update the required bounded tests for this task.",
+                packet_type=ExecutionPacketType.TEST,
+                success_criteria=["Required tests for the bounded change are updated or executed."],
+                required_evidence=["test commands", "test results"],
+                dependencies=[lead_id] if lead_id else None,
+            ).packet_id
+
+        if flags["has_docs"] and ExecutionPacketType.DOCS not in completed_types:
+            lead_id = append_packet(
+                "update docs for bounded change",
+                scope="Update only the directly impacted documentation/examples for this bounded change.",
+                packet_type=ExecutionPacketType.DOCS,
+                success_criteria=["Relevant docs/examples are updated."],
+                required_evidence=["changed docs/examples"],
+                dependencies=[lead_id] if lead_id else None,
+            ).packet_id
+
+        if flags["has_ci"] and ExecutionPacketType.PUBLISH_PREPARATION not in completed_types:
+            lead_id = append_packet(
+                "update ci or build surface",
+                scope="Apply only the required CI/build changes for the bounded task surface.",
+                packet_type=ExecutionPacketType.PUBLISH_PREPARATION,
+                success_criteria=["Required CI/build surface updates are present."],
+                required_evidence=["ci/build changes", "build verification evidence"],
+                dependencies=[lead_id] if lead_id else None,
+            ).packet_id
+
+        if complexity != DecompositionComplexity.TINY and ExecutionPacketType.VERIFICATION not in completed_types:
+            lead_id = append_packet(
+                "verification checkpoint",
+                scope="Collect bounded verification evidence that the packet set satisfies its acceptance surface.",
+                packet_type=ExecutionPacketType.VERIFICATION,
+                success_criteria=["Verification evidence exists for the bounded packet set."],
+                required_evidence=["verification summary", "test/build status"],
+                dependencies=[lead_id] if lead_id else None,
+            ).packet_id
+
+        if not packets:
+            append_packet(
+                "verification checkpoint",
+                scope="Confirm the already completed bounded work still satisfies the current acceptance surface.",
+                packet_type=ExecutionPacketType.VERIFICATION,
+                success_criteria=["Verification evidence exists for the bounded work surface."],
+                required_evidence=["verification summary", "bounded evidence"],
+            )
+
+        if strategy in {StrategyId.DEFAULT, StrategyId.MVP_FIRST} and len(packets) == 1 and complexity in {DecompositionComplexity.TINY, DecompositionComplexity.SMALL, DecompositionComplexity.MEDIUM} and not flags["has_docs"] and not flags["has_ci"] and not flags["has_integration"] and not flags["has_setup"]:
             return packets
         if complexity in {DecompositionComplexity.TINY, DecompositionComplexity.SMALL} and len(packets) == 1:
             return packets
-        if has_tests:
-            packets.append(_packet(plan_id, len(packets)+1, "verify tests for bounded change", task.description,
-                scope="Run or update the required bounded tests for this task.",
-                packet_type=ExecutionPacketType.TEST,
-                strategy_id=strategy.value,
-                dependencies=[lead_id] if lead_id else [],
-                success_criteria=["Required tests for the bounded change are updated or executed."],
-                required_evidence=["test commands", "test results"],
-                allowed_files=allowed_files,
-                target_areas=target_areas,
-                forbidden_actions=base_forbidden))
-            lead_id = packets[-1].packet_id
-        if has_docs:
-            packets.append(_packet(plan_id, len(packets)+1, "update docs for bounded change", task.description,
-                scope="Update only the directly impacted documentation/examples for this bounded change.",
-                packet_type=ExecutionPacketType.DOCS,
-                strategy_id=strategy.value,
-                dependencies=[lead_id] if lead_id else [],
-                success_criteria=["Relevant docs/examples are updated."],
-                required_evidence=["changed docs/examples"],
-                allowed_files=allowed_files,
-                target_areas=target_areas,
-                forbidden_actions=base_forbidden))
-            lead_id = packets[-1].packet_id
-        if needs_verification and complexity != DecompositionComplexity.TINY:
-            packets.append(_packet(plan_id, len(packets)+1, "verification checkpoint", task.description,
-                scope="Collect bounded verification evidence that the packet set satisfies its acceptance surface.",
-                packet_type=ExecutionPacketType.VERIFICATION,
-                strategy_id=strategy.value,
-                dependencies=[lead_id] if lead_id else [],
-                success_criteria=["Verification evidence exists for the bounded packet set."],
-                required_evidence=["verification summary", "test/build status"],
-                allowed_files=allowed_files,
-                target_areas=target_areas,
-                forbidden_actions=base_forbidden))
         return packets[:5]
 
 
-def _packet(plan_id: str, index: int, title: str, task_summary: str, *, scope: str, packet_type: ExecutionPacketType, strategy_id: str, success_criteria: list[str], required_evidence: list[str], dependencies: list[str] | None = None, allowed_files: list[str] | None = None, target_areas: list[str] | None = None, forbidden_actions: list[str] | None = None) -> ExecutionPacket:
+def _packet(
+    plan_id: str,
+    index: int,
+    title: str,
+    task_summary: str,
+    *,
+    scope: str,
+    packet_type: ExecutionPacketType,
+    strategy_id: str,
+    success_criteria: list[str],
+    required_evidence: list[str],
+    dependencies: list[str] | None = None,
+    allowed_files: list[str] | None = None,
+    target_areas: list[str] | None = None,
+    forbidden_actions: list[str] | None = None,
+) -> ExecutionPacket:
     return ExecutionPacket(
         packet_id=_stable_packet_id(plan_id, index, title),
         title=title,
@@ -240,8 +329,10 @@ def _runtime_facts(snapshot: WorkflowStateSnapshot | None) -> dict[str, object]:
             "allowed_files": [],
             "environment_gaps": [],
             "completed_packet_ids": [],
+            "completed_packet_types": [],
             "mutation_scope": [],
             "has_existing_mutation": False,
+            "discovered_obligation_types": [],
         }
     blockers: list[str] = []
     evidence_gaps: list[str] = []
@@ -249,7 +340,9 @@ def _runtime_facts(snapshot: WorkflowStateSnapshot | None) -> dict[str, object]:
     allowed_files: list[str] = []
     environment_gaps: list[str] = []
     completed_packet_ids: list[str] = []
+    completed_packet_types: list[str] = []
     mutation_scope: list[str] = []
+    discovered_obligation_types: list[str] = []
     if snapshot.execution_result is not None:
         blockers.extend(item.summary for item in snapshot.execution_result.structured_evidence.blockers)
         target_areas.extend(item.path for item in snapshot.execution_result.structured_evidence.files_changed)
@@ -266,9 +359,27 @@ def _runtime_facts(snapshot: WorkflowStateSnapshot | None) -> dict[str, object]:
         target_areas.extend(snapshot.obligations.affected_surfaces)
         allowed_files.extend(snapshot.obligations.affected_surfaces)
         blockers.extend(snapshot.obligations.blocker_conditions)
-        environment_gaps.extend(snapshot.obligations.required_environment_conditions)
+        discovered_obligation_types.extend(["tests"] if snapshot.obligations.required_test_levels else [])
+        discovered_obligation_types.extend(["docs"] if snapshot.obligations.required_documentation_updates or snapshot.obligations.required_examples_updates else [])
+        discovered_obligation_types.extend(["ci"] if snapshot.obligations.required_ci_updates or snapshot.obligations.required_codegen_or_build_updates else [])
+        for impact in snapshot.obligations.discovered_impacts:
+            discovered_obligation_types.append(impact.kind.value)
+            target_areas.extend(impact.affected_paths)
+            if impact.kind == DiscoveredImpactKind.SETUP:
+                environment_gaps.append(impact.summary)
+            if impact.blocking:
+                blockers.append(impact.summary)
     if snapshot.packet_history:
-        completed_packet_ids.extend(item.packet_id for item in snapshot.packet_history if item.new_status == ExecutionPacketStatus.COMPLETED)
+        for item in snapshot.packet_history:
+            if item.new_status == ExecutionPacketStatus.COMPLETED:
+                completed_packet_ids.append(item.packet_id)
+    if snapshot.decomposition_plan is not None:
+        for packet in snapshot.decomposition_plan.packets:
+            if packet.status == ExecutionPacketStatus.COMPLETED:
+                completed_packet_ids.append(packet.packet_id)
+                completed_packet_types.append(packet.packet_type.value)
+                if packet.packet_type == ExecutionPacketType.IMPLEMENTATION:
+                    mutation_scope.extend(packet.allowed_files or packet.target_areas)
     return {
         "known_blockers": _dedupe(blockers),
         "evidence_gaps": _dedupe(evidence_gaps),
@@ -276,21 +387,63 @@ def _runtime_facts(snapshot: WorkflowStateSnapshot | None) -> dict[str, object]:
         "allowed_files": _dedupe(allowed_files or target_areas),
         "environment_gaps": _dedupe(environment_gaps),
         "completed_packet_ids": _dedupe(completed_packet_ids),
+        "completed_packet_types": _dedupe(completed_packet_types),
         "mutation_scope": _dedupe(mutation_scope),
         "has_existing_mutation": bool(mutation_scope),
+        "discovered_obligation_types": _dedupe(discovered_obligation_types),
     }
 
 
-def _obligation_flags(acceptance: TaskAcceptanceContract | None, obligations: ObligationAnalysis | None, *, runtime_facts: dict[str, object]) -> dict[str, object]:
+def _obligation_flags(
+    acceptance: TaskAcceptanceContract | None,
+    obligations: ObligationAnalysis | None,
+    *,
+    runtime_facts: dict[str, object],
+) -> dict[str, object]:
     kinds = {item.kind for item in acceptance.obligations} if acceptance is not None else set()
     evidence_gaps = [str(item).lower() for item in runtime_facts.get("evidence_gaps", [])]
-    has_tests = any(kind in kinds for kind in {AcceptanceObligationKind.RELEVANT_TESTS_RUN, AcceptanceObligationKind.RELEVANT_TESTS_PASSED, AcceptanceObligationKind.INTEGRATION_TESTS_RUN, AcceptanceObligationKind.INTEGRATION_TESTS_PASSED}) or bool(obligations and obligations.required_test_levels) or any("test" in item or "behavior" in item for item in evidence_gaps)
-    has_docs = any(kind in kinds for kind in {AcceptanceObligationKind.DOCUMENTATION_UPDATED, AcceptanceObligationKind.EXAMPLES_UPDATED}) or bool(obligations and (obligations.required_documentation_updates or obligations.required_examples_updates)) or any("doc" in item or "example" in item or "readme" in item for item in evidence_gaps)
-    has_ci = any(kind == AcceptanceObligationKind.CI_OR_BUILD_UPDATED for kind in kinds) or bool(obligations and obligations.required_ci_updates) or any("ci" in item or "build" in item for item in evidence_gaps)
+    discovered_types = set(str(item) for item in runtime_facts.get("discovered_obligation_types", []))
+    completed_packet_types = set(str(item) for item in runtime_facts.get("completed_packet_types", []))
+    has_tests = (
+        any(kind in kinds for kind in {AcceptanceObligationKind.RELEVANT_TESTS_RUN, AcceptanceObligationKind.RELEVANT_TESTS_PASSED, AcceptanceObligationKind.INTEGRATION_TESTS_RUN, AcceptanceObligationKind.INTEGRATION_TESTS_PASSED})
+        or bool(obligations and obligations.required_test_levels)
+        or any("test" in item or "behavior" in item for item in evidence_gaps)
+        or "tests" in discovered_types
+    )
+    has_docs = (
+        any(kind in kinds for kind in {AcceptanceObligationKind.DOCUMENTATION_UPDATED, AcceptanceObligationKind.EXAMPLES_UPDATED})
+        or bool(obligations and (obligations.required_documentation_updates or obligations.required_examples_updates))
+        or any("doc" in item or "example" in item or "readme" in item for item in evidence_gaps)
+        or "documentation" in discovered_types
+        or "examples" in discovered_types
+        or "docs" in discovered_types
+    )
+    has_ci = (
+        any(kind == AcceptanceObligationKind.CI_OR_BUILD_UPDATED for kind in kinds)
+        or bool(obligations and (obligations.required_ci_updates or obligations.required_codegen_or_build_updates))
+        or any("ci" in item or "build" in item for item in evidence_gaps)
+        or "ci_build" in discovered_types
+        or "ci" in discovered_types
+    )
+    has_integration = (
+        "integration" in discovered_types
+        or any("integration" in item for item in evidence_gaps)
+        or (
+            (any(kind in kinds for kind in {AcceptanceObligationKind.INTEGRATION_TESTS_RUN, AcceptanceObligationKind.INTEGRATION_TESTS_PASSED}) or bool(obligations and obligations.required_test_levels))
+            and bool(runtime_facts.get("has_existing_mutation"))
+        )
+    )
+    has_setup = (
+        bool(runtime_facts.get("environment_gaps"))
+        or "setup" in discovered_types
+        or (bool(obligations and obligations.required_setup_steps) and bool(runtime_facts.get("has_existing_mutation")))
+    )
     target_areas = list(obligations.affected_surfaces if obligations else []) + list(runtime_facts.get("target_areas", []))
     allowed_files = list(obligations.affected_surfaces if obligations else []) + list(runtime_facts.get("allowed_files", []))
     risks = list(obligations.blocker_conditions if obligations else []) + list(runtime_facts.get("known_blockers", []))
     assumptions = list(obligations.required_environment_conditions if obligations else []) + list(runtime_facts.get("environment_gaps", []))
+    if obligations is not None:
+        assumptions.extend(obligations.required_setup_steps)
     if has_ci:
         risks.append("ci/build surface may require dedicated follow-up")
     if runtime_facts.get("has_existing_mutation"):
@@ -299,10 +452,14 @@ def _obligation_flags(acceptance: TaskAcceptanceContract | None, obligations: Ob
         "has_tests": has_tests,
         "has_docs": has_docs,
         "has_ci": has_ci,
+        "has_integration": has_integration,
+        "has_setup": has_setup,
         "target_areas": _dedupe(target_areas),
         "allowed_files": _dedupe(allowed_files),
         "risks": _dedupe(risks),
         "assumptions": _dedupe(assumptions),
+        "completed_packet_types": completed_packet_types,
+        "implementation_completed": ExecutionPacketType.IMPLEMENTATION.value in completed_packet_types,
     }
 
 
@@ -314,8 +471,15 @@ def _infer_complexity(task_summary: str, *, acceptance: TaskAcceptanceContract |
     if any(word in text for word in ("feature", "implement", "integration", "migrate", "refactor", "pipeline", "workflow")):
         score += 1
     if obligations is not None:
-        score += min(3, int(bool(obligations.required_test_levels)) + int(bool(obligations.required_documentation_updates or obligations.required_examples_updates)) + int(bool(obligations.required_ci_updates)))
+        score += min(
+            4,
+            int(bool(obligations.required_test_levels))
+            + int(bool(obligations.required_documentation_updates or obligations.required_examples_updates))
+            + int(bool(obligations.required_ci_updates or obligations.required_codegen_or_build_updates))
+            + int(bool(obligations.required_environment_conditions or obligations.required_setup_steps)),
+        )
         score += 1 if len(obligations.affected_surfaces) >= 3 else 0
+        score += 1 if any(impact.kind in {DiscoveredImpactKind.INTEGRATION, DiscoveredImpactKind.SETUP} for impact in obligations.discovered_impacts) else 0
     if acceptance is not None and len(acceptance.obligations) >= 5:
         score += 1
     if any(word in text for word in ("large", "end-to-end", "end to end", "system-wide", "platform")):
@@ -324,23 +488,31 @@ def _infer_complexity(task_summary: str, *, acceptance: TaskAcceptanceContract |
         score += 1
     if len(runtime_facts.get("target_areas", [])) >= 3:
         score += 1
+    if runtime_facts.get("environment_gaps"):
+        score += 1
     if score <= 1:
         return DecompositionComplexity.TINY
     if score == 2:
         return DecompositionComplexity.SMALL
-    if score <= 4:
+    if score <= 5:
         return DecompositionComplexity.MEDIUM
     return DecompositionComplexity.LARGE
 
 
 def _decomposition_reason(strategy: StrategyId, complexity: DecompositionComplexity, flags: dict[str, object]) -> str:
     parts = [f"strategy={strategy.value}", f"complexity={complexity.value}"]
+    if flags.get("has_setup"):
+        parts.append("setup_obligation_present")
     if flags.get("has_tests"):
         parts.append("tests_obligation_present")
+    if flags.get("has_integration"):
+        parts.append("integration_obligation_present")
     if flags.get("has_docs"):
         parts.append("docs_obligation_present")
     if flags.get("has_ci"):
         parts.append("ci_obligation_present")
+    if flags.get("implementation_completed"):
+        parts.append("existing_implementation_work_detected")
     if flags.get("risks"):
         parts.append("runtime_risks_considered")
     return ", ".join(parts)

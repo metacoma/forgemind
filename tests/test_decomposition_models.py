@@ -17,6 +17,8 @@ from artifact_workflow_runtime.decomposition import (
 from artifact_workflow_runtime.models import (
     AcceptanceObligation,
     AcceptanceObligationKind,
+    DiscoveredImpact,
+    DiscoveredImpactKind,
     ExecutionFamily,
     ObligationAnalysis,
     Task,
@@ -238,3 +240,93 @@ def test_decomposition_validator_rejects_self_dependency_and_missing_scope() -> 
 
     assert result.valid is False
     assert any("depends on itself" in issue for issue in result.issues)
+
+
+def test_planner_derives_setup_docs_and_integration_packets_from_runtime_facts() -> None:
+    planner = DecompositionPlanner()
+    task = Task(description="implement feature X in repo Y")
+    obligations = ObligationAnalysis(
+        required_test_levels=["unit"],
+        required_setup_steps=["install freeplane runtime"],
+        required_documentation_updates=["README"],
+        affected_surfaces=["src/app.py", "docs/README.md"],
+        discovered_impacts=[
+            DiscoveredImpact(kind=DiscoveredImpactKind.INTEGRATION, summary="integration path must be updated", affected_paths=["src/integration.py"]),
+            DiscoveredImpact(kind=DiscoveredImpactKind.SETUP, summary="freeplane runtime must be installed", affected_paths=[]),
+        ],
+        reasoning_summary="setup, docs, and integration updates are required",
+    )
+    existing_plan = DecompositionPlan(
+        plan_id="existing_runtime_facts",
+        task_summary=task.description,
+        strategy_id=StrategyId.DEFAULT.value,
+        complexity=DecompositionComplexity.SMALL,
+        packets=[
+            ExecutionPacket(
+                packet_id="impl_done",
+                title="bounded implementation",
+                goal=task.description,
+                scope="bounded impl",
+                packet_type=ExecutionPacketType.IMPLEMENTATION,
+                status=ExecutionPacketStatus.COMPLETED,
+                strategy_id=StrategyId.DEFAULT.value,
+                success_criteria=["done"],
+                required_evidence=["changed files"],
+            )
+        ],
+        decomposition_reason="implementation already completed",
+    )
+    snapshot = WorkflowStateSnapshot(task=task, obligations=obligations, decomposition_plan=existing_plan, packet_history=[])
+
+    plan = planner.build_plan(task=task, strategy_id=StrategyId.DEFAULT, obligations=obligations, snapshot=snapshot)
+    packet_types = [packet.packet_type for packet in plan.packets]
+
+    assert ExecutionPacketType.SETUP in packet_types
+    assert ExecutionPacketType.INTEGRATION in packet_types
+    assert ExecutionPacketType.DOCS in packet_types
+
+
+def test_planner_avoids_redundant_implementation_packets_for_completed_work() -> None:
+    planner = DecompositionPlanner()
+    task = Task(description="implement feature X in repo Y")
+    existing_plan = DecompositionPlan(
+        plan_id="existing",
+        task_summary=task.description,
+        strategy_id=StrategyId.DEFAULT.value,
+        complexity=DecompositionComplexity.SMALL,
+        packets=[
+            ExecutionPacket(
+                packet_id="impl_done",
+                title="bounded implementation",
+                goal=task.description,
+                scope="bounded impl",
+                packet_type=ExecutionPacketType.IMPLEMENTATION,
+                status=ExecutionPacketStatus.COMPLETED,
+                strategy_id=StrategyId.DEFAULT.value,
+                success_criteria=["done"],
+                required_evidence=["changed files"],
+            )
+        ],
+        decomposition_reason="existing implementation already completed",
+    )
+    obligations = ObligationAnalysis(required_documentation_updates=["README"], reasoning_summary="docs still missing")
+    snapshot = WorkflowStateSnapshot(task=task, obligations=obligations, decomposition_plan=existing_plan, packet_history=[])
+
+    plan = planner.build_plan(task=task, strategy_id=StrategyId.DEFAULT, obligations=obligations, snapshot=snapshot)
+
+    assert all(packet.packet_type != ExecutionPacketType.IMPLEMENTATION for packet in plan.packets)
+    assert any(packet.packet_type == ExecutionPacketType.DOCS for packet in plan.packets)
+
+
+def test_decomposition_validator_flags_impossible_dependency_statuses() -> None:
+    validator = DecompositionValidator()
+    packets = [
+        ExecutionPacket(packet_id="p1", title="impl", goal="task", scope="impl", packet_type=ExecutionPacketType.IMPLEMENTATION, status=ExecutionPacketStatus.FAILED, success_criteria=["done"], required_evidence=["changed"]),
+        ExecutionPacket(packet_id="p2", title="tests", goal="task", scope="tests", packet_type=ExecutionPacketType.TEST, status=ExecutionPacketStatus.PENDING, dependencies=["p1"], success_criteria=["tests"], required_evidence=["tests"]),
+    ]
+    plan = DecompositionPlan(plan_id="plan_impossible", task_summary="task", strategy_id=StrategyId.DEFAULT.value, complexity=DecompositionComplexity.SMALL, packets=packets, decomposition_reason="invalid state")
+
+    result = validator.validate(plan, fallback_to_single_packet=False)
+
+    assert result.valid is False
+    assert any("pending behind failed dependency" in issue for issue in result.issues)

@@ -2,12 +2,7 @@ from __future__ import annotations
 
 from artifact_workflow_runtime.strategy import StrategyId
 
-from .models import (
-    DecompositionPlan,
-    DecompositionValidationResult,
-    ExecutionPacket,
-    ExecutionPacketType,
-)
+from .models import DecompositionPlan, DecompositionValidationResult, ExecutionPacket, ExecutionPacketStatus, ExecutionPacketType
 
 
 class DecompositionValidator:
@@ -40,14 +35,17 @@ class DecompositionValidator:
             for dep in packet.dependencies:
                 if dep not in known:
                     issues.append(f"packet {packet.packet_id} depends on unknown packet {dep}")
-            if packet.packet_type == ExecutionPacketType.REPAIR and not any(
-                action.strip().lower() == "do not expand scope" for action in packet.forbidden_actions
-            ):
+            if packet.packet_type == ExecutionPacketType.REPAIR and "do not expand scope" not in [action.strip().lower() for action in packet.forbidden_actions]:
                 issues.append(f"repair packet {packet.packet_id} must forbid scope expansion")
         if self._has_cycle(plan):
             issues.append("dependency cycle detected")
+        issues.extend(self._status_graph_issues(plan))
         if (plan.strategy_id or "").strip() == StrategyId.REPAIR_ONLY.value:
-            unrelated = [packet.packet_id for packet in plan.packets if packet.packet_type not in {ExecutionPacketType.REPAIR, ExecutionPacketType.VERIFICATION}]
+            unrelated = [
+                packet.packet_id
+                for packet in plan.packets
+                if packet.packet_type not in {ExecutionPacketType.REPAIR, ExecutionPacketType.VERIFICATION}
+            ]
             if unrelated:
                 issues.append("repair_only plan contains unrelated expansion packets")
         if not issues:
@@ -63,6 +61,7 @@ class DecompositionValidator:
             update={
                 "dependencies": [],
                 "strategy_id": strategy_id,
+                "status": ExecutionPacketStatus.PENDING,
                 "forbidden_actions": _dedupe(packet.forbidden_actions + ["do not expand scope"]),
             }
         )
@@ -87,11 +86,31 @@ class DecompositionValidator:
 
         return any(visit(node) for node in graph)
 
+    def _status_graph_issues(self, plan: DecompositionPlan) -> list[str]:
+        issues: list[str] = []
+        packets_by_id = {packet.packet_id: packet for packet in plan.packets}
+        for packet in plan.packets:
+            dependency_statuses = [packets_by_id[dep].status for dep in packet.dependencies if dep in packets_by_id]
+            if packet.status in {ExecutionPacketStatus.COMPLETED, ExecutionPacketStatus.SKIPPED}:
+                unresolved = [dep for dep in packet.dependencies if packets_by_id[dep].status not in {ExecutionPacketStatus.COMPLETED, ExecutionPacketStatus.SKIPPED}]
+                if unresolved:
+                    issues.append(f"packet {packet.packet_id} is terminal but depends on unresolved packets: {', '.join(unresolved)}")
+            if packet.status == ExecutionPacketStatus.PENDING and any(status == ExecutionPacketStatus.FAILED for status in dependency_statuses):
+                issues.append(f"packet {packet.packet_id} is pending behind failed dependency")
+            if packet.status == ExecutionPacketStatus.PENDING and any(status == ExecutionPacketStatus.BLOCKED for status in dependency_statuses):
+                issues.append(f"packet {packet.packet_id} is pending behind blocked dependency")
+        unfinished = [packet for packet in plan.packets if packet.status not in {ExecutionPacketStatus.COMPLETED, ExecutionPacketStatus.SKIPPED}]
+        if not unfinished and plan.packets:
+            terminal_packets = [packet for packet in plan.packets if packet.status in {ExecutionPacketStatus.BLOCKED, ExecutionPacketStatus.FAILED}]
+            if terminal_packets:
+                issues.append("plan has no unfinished packets but still contains blocked/failed packet statuses")
+        return issues
+
 
 def _dedupe(items: list[str]) -> list[str]:
     out: list[str] = []
     for item in items:
-        text = str(item).strip()
+        text = str(item).strip().lower()
         if text and text not in out:
             out.append(text)
     return out
