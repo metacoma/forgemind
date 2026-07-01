@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from .common import *
+from artifact_workflow_runtime.models import CommandRole, TestLevel
 from artifact_workflow_runtime.done_contract import DoneContract
 from artifact_workflow_runtime.environment import EnvironmentPlan
 from artifact_workflow_runtime.qa import QAExecutionReport, QAPlan, QAReview
@@ -410,32 +411,19 @@ def _missing_deliverables(done_contract: DoneContract, execution: ExecutionResul
 
 def _has_real_runtime_proof(execution: ExecutionResult) -> bool:
     return _has_real_integration_or_smoke_proof(execution) or any(
-        _is_runtime_evidence_text(f"{test.name} {test.command or ''} {test.output_excerpt or ''}")
-        and str(test.status).lower() in {"passed", "success", "succeeded", "ok"}
+        test.level == TestLevel.RUNTIME_PROBE and str(test.status).lower() in {"passed", "success", "succeeded", "ok"}
         for test in execution.structured_evidence.tests
     )
 
 
 def _has_real_integration_or_smoke_proof(execution: ExecutionResult) -> bool:
     for test in execution.structured_evidence.tests:
-        text = f"{test.name} {test.command or ''} {test.output_excerpt or ''}"
-        if str(test.status).lower() in {"passed", "success", "succeeded", "ok"} and _is_runtime_evidence_text(text):
+        if str(test.status).lower() in {"passed", "success", "succeeded", "ok"} and test.level in {TestLevel.INTEGRATION, TestLevel.SMOKE, TestLevel.RUNTIME_PROBE}:
             return True
     for command in execution.structured_evidence.commands_run:
-        text = f"{command.command} {command.output_excerpt or ''}"
-        if command.exit_code == 0 and _is_runtime_evidence_text(text):
+        if command.exit_code == 0 and command.role in {CommandRole.INTEGRATION_TEST, CommandRole.SMOKE_TEST, CommandRole.EXECUTED_RUNTIME_PROBE}:
             return True
     return False
-
-
-def _is_runtime_evidence_text(text: str) -> bool:
-    lowered = text.lower()
-    if any(marker in lowered for marker in ("bash -n", "sh -n", "syntax check", "script exists", "found script", "integration project build", "test project build", "build integration tests", "compiled integration tests")):
-        return False
-    build_only = any(marker in lowered for marker in ("cmake --build", "mvn compile", "gradle assemble", "./gradlew assemble", "go build", "npm run build"))
-    runtime_marker = any(marker in lowered for marker in ("smoke", "integration", "e2e", "end-to-end", "handshake", "freeplane", "grpc", "runtime proof"))
-    actual_execution = any(marker in lowered for marker in ("pytest", "go test", "cargo test", "mvn test", "gradle test", "./gradlew test", "npm test", "run_smoke", "run smoke", "run_integration", "run integration", "smoke test"))
-    return runtime_marker and (actual_execution or not build_only)
 
 
 def _qa_review_from_verification(*, task_id: str, result: VerificationResult, report: QAExecutionReport, execution: ExecutionResult | None = None) -> QAReview:
@@ -449,11 +437,6 @@ def _qa_review_from_verification(*, task_id: str, result: VerificationResult, re
     environment_like = bool(env_blockers)
     environment_like = environment_like or bool(result.missing_setup_steps)
     environment_like = environment_like or any(level in {"integration", "smoke", "e2e"} for level in result.missing_test_levels)
-    environment_like = environment_like or any(
-        token in str(item).lower()
-        for item in result.missing_obligations
-        for token in ("environment", "install", "bootstrap", "runtime prerequisite", "dependency", "freeplane")
-    )
     if result.passed:
         status = "pass"
     elif code_like:

@@ -32,11 +32,7 @@ def _execution_has_environment_blocker(execution: ExecutionResult | None) -> boo
     for blocker in execution.structured_evidence.blockers:
         if blocker.blocker_kind in env_kinds:
             return True
-        text = blocker.summary.lower()
-        if any(marker in text for marker in ("environment unavailable", "missing dependency", "not installed", "not found", "runtime prerequisite", "bootstrap")):
-            return True
-    text = f"{execution.summary} {execution.evidence_text}".lower()
-    return any(marker in text for marker in ("environment unavailable", "missing dependency", "not installed", "not found", "runtime prerequisite", "bootstrap required"))
+    return False
 
 
 class FinalReportBuilder:

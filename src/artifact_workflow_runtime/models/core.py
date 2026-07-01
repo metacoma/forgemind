@@ -164,6 +164,37 @@ class BlockerKind(str, Enum):
     EXECUTION_FAILURE = "execution_failure"
 
 
+class CommandRole(str, Enum):
+    OBSERVED_SETUP_PATH = "observed_setup_path"
+    OBSERVED_RUNTIME_PROBE = "observed_runtime_probe"
+    EXECUTED_SETUP = "executed_setup"
+    EXECUTED_RUNTIME_PROBE = "executed_runtime_probe"
+    BUILD = "build"
+    UNIT_TEST = "unit_test"
+    INTEGRATION_TEST = "integration_test"
+    SMOKE_TEST = "smoke_test"
+    OTHER = "other"
+
+
+class FileRole(str, Enum):
+    SETUP_SCRIPT = "setup_script"
+    RUNTIME_PROBE_SCRIPT = "runtime_probe_script"
+    INTEGRATION_HARNESS = "integration_harness"
+    SMOKE_HARNESS = "smoke_harness"
+    CI_WORKFLOW = "ci_workflow"
+    OTHER = "other"
+
+
+class TestLevel(str, Enum):
+    __test__ = False
+    BUILD = "build"
+    UNIT = "unit"
+    INTEGRATION = "integration"
+    SMOKE = "smoke"
+    RUNTIME_PROBE = "runtime_probe"
+    OTHER = "other"
+
+
 class StageFailureKind(str, Enum):
     AGENT_NO_RESULT = "agent_no_result"
     TERMINAL_WITHOUT_ANSWER = "terminal_without_answer"
@@ -251,6 +282,7 @@ class CommandEvidence(RuntimeModel):
     cwd: str | None = None
     exit_code: int | None = None
     output_excerpt: str | None = None
+    role: CommandRole | None = None
     output_artifact_ids: list[str] = Field(default_factory=list)
 
 
@@ -258,6 +290,7 @@ class FileEvidence(RuntimeModel):
     path: str
     action: str = "observed"
     summary: str | None = None
+    role: FileRole | None = None
     artifact_ids: list[str] = Field(default_factory=list)
 
 
@@ -276,11 +309,13 @@ class DiffEvidence(RuntimeModel):
 
 
 class TestCheckEvidence(RuntimeModel):
+    __test__ = False
     name: str
     command: str | None = None
     passed: bool | None = None
     status: str = "unknown"
     output_excerpt: str | None = None
+    level: TestLevel | None = None
     artifact_ids: list[str] = Field(default_factory=list)
 
 

@@ -2,8 +2,44 @@ from __future__ import annotations
 
 from .common import *
 from artifact_workflow_runtime.control_plane.stage_filters import execute_prompt_steps, execute_success_criteria as build_execute_success_criteria, execute_verification_commands
+from artifact_workflow_runtime.environment import EnvironmentPlan
 from artifact_workflow_runtime.state.workspace import infer_workspace_root_from_execution, workspace_root_from_state
 
+def _runtime_sensitive_levels(levels: list[str] | None) -> bool:
+    lowered = {str(level).strip().lower() for level in (levels or []) if str(level).strip()}
+    return bool(lowered & {"integration", "smoke", "e2e", "end-to-end", "runtime", "runtime_proof"})
+
+
+def _has_explicit_non_environment_failure(result: ExecutionResult) -> bool:
+    evidence = result.structured_evidence
+    for command in evidence.commands_run:
+        if command.exit_code not in (None, 0):
+            return True
+    for test in evidence.tests:
+        status = str(test.status).lower()
+        if status in {"failed", "error"}:
+            return True
+    return False
+
+
+def _packet_status_from_typed_execution_result(
+    result: ExecutionResult,
+    *,
+    required_test_levels: list[str] | None = None,
+    required_setup_steps: list[str] | None = None,
+) -> object:
+    status = _packet_status_from_execution_result(result)
+    if status.value != "failed":
+        return status
+    runtime_sensitive = _runtime_sensitive_levels(required_test_levels) or bool(required_setup_steps)
+    if not runtime_sensitive:
+        return status
+    if _has_explicit_non_environment_failure(result):
+        return status
+    if str(result.execution_status.value if hasattr(result.execution_status, "value") else result.execution_status).lower() in {"partial", "blocked"} and bool(result.structured_evidence.blockers):
+        from artifact_workflow_runtime.decomposition import ExecutionPacketStatus
+        return ExecutionPacketStatus.BLOCKED
+    return status
 
 class ExecutionStageMixin:
     async def execute_node(self, state: WorkflowState) -> dict[str, Any]:
@@ -52,8 +88,12 @@ class ExecutionStageMixin:
             active_packet_id = packet_selection.selected_packet_id
             packet = _packet_from_state({"active_packet_id": active_packet_id}, decomposition_plan)
             packet_block = _packet_prompt_block(packet)
+            env_plan = EnvironmentPlan.model_validate(state["environment_plan"]) if state.get("environment_plan") else None
             execute_steps = execute_prompt_steps(plan)
             execute_success = build_execute_success_criteria(plan)
+            setup_block = _environment_materialization_block(env_plan, packet=packet)
+            if setup_block["suggested_steps"]:
+                execute_steps = list(dict.fromkeys([*setup_block["suggested_steps"], *execute_steps]))
             if packet is not None and packet.success_criteria:
                 execute_success = list(dict.fromkeys([*execute_success, *packet.success_criteria]))
 
@@ -66,14 +106,17 @@ class ExecutionStageMixin:
                 "This is the execute stage only: edit files, install required local dependencies, and run build/unit/integration checks.\n"
                 "Repository publication is handled by a later publish stage. Do not commit, push, create a PR, wait for PR checks, or report missing publication as an execute blocker.\n"
                 "Runtime/bootstrap obligation: when the task or packet requires runtime, smoke, integration, post-deploy, or environment-sensitive proof, do not replace it with syntax checks, compile-only/build-only evidence, script existence, or an 'environment unavailable' claim before attempting any repository-supported bootstrap/setup/run path you discover.\n"
-                "Setup completion requires evidence that bootstrap/setup was actually attempted and either made the prerequisite usable, failed with concrete output, or was inapplicable for a demonstrated reason. Found scripts alone are not setup success.\n\n"
+                "Setup completion requires evidence that bootstrap/setup was actually attempted and either made the prerequisite usable, failed with concrete output, or was inapplicable for a demonstrated reason. Found scripts alone are not setup success.\n"
+                "In your final structured evidence, label each executed command in structured_evidence.commands_run.role and each executed check in structured_evidence.tests.level.\n\n"
                 f"Task: {task.description}\n\n"
                 f"ContextPacket:\n{context_text}\n\n"
                 f"Observation evidence:\n{observation_text}\n\n"
                 f"{strategy_block}\n\n"
                 f"{packet_block}\n\n"
-                f"Plan summary: {plan.summary}\n"
-                "Execute-stage steps:\n"
+                + setup_block["prompt_block"]
+                + "\n"
+                + f"Plan summary: {plan.summary}\n"
+                + "Execute-stage steps:\n"
                 + "\n".join(f"- {step}" for step in execute_steps)
                 + "\n\nExecute-stage success criteria:\n"
                 + "\n".join(f"- {item}" for item in execute_success)
@@ -108,7 +151,7 @@ class ExecutionStageMixin:
             packet_history = list(state.get("packet_history") or [])
             updated_decomposition = decomposition_plan
             if packet is not None:
-                packet_status = _packet_status_from_execution_result(result)
+                packet_status = _packet_status_from_typed_execution_result(result, required_test_levels=list(plan.required_test_levels), required_setup_steps=list(plan.required_setup_steps))
                 updated_decomposition, history_entry = _update_packet_status(
                     decomposition_plan,
                     packet_id=packet.packet_id,
@@ -245,7 +288,8 @@ class ExecutionStageMixin:
                 f"You are performing a bounded repair packet after {failure_source}.\n"
                 "Do not commit, push, create or update PRs, wait PR checks, or choose the next workflow step.\n"
                 "Make only the smallest source/test changes needed to address the controller-provided failed checks, then run the relevant local checks and return structured evidence.\n"
-                "If the failure is a build/compiler/test failure, inspect the exact generated/types involved and repair that failure before expanding scope.\n\n"
+                "If the failure is a build/compiler/test failure, inspect the exact generated/types involved and repair that failure before expanding scope.\n"
+                "In your final structured evidence, label each executed command in structured_evidence.commands_run.role and each executed check in structured_evidence.tests.level.\n\n"
                 f"Task: {task.description}\n\n"
                 f"Failed checks: {failed_checks}\n"
                 f"Blockers: {blocker_summaries}\n"
@@ -285,7 +329,7 @@ class ExecutionStageMixin:
                 updated_plan, history_entry = _update_packet_status(
                     decomposition_plan,
                     packet_id=packet.packet_id,
-                    new_status=_packet_status_from_execution_result(result.execution_result),
+                    new_status=_packet_status_from_typed_execution_result(result.execution_result, required_test_levels=list(plan.required_test_levels), required_setup_steps=list(plan.required_setup_steps)),
                     reason=result.execution_result.summary,
                     stage="repair",
                     execution_result_id=result.execution_result.id,
@@ -320,3 +364,26 @@ class ExecutionStageMixin:
                 "controller_decisions": _append_controller_decision(strategy_state, (services.runtime_kernel or RuntimeKernel()).controller_decision(stage="repair", selected_next_stage="review", reason="Repair completed; review must re-evaluate the candidate revision before QA.")),
             }
             return _merge_strategy_update(update, strategy_update)
+
+
+def _environment_materialization_block(env_plan: EnvironmentPlan | None, *, packet) -> dict[str, object]:
+    if env_plan is None or not env_plan.items:
+        return {"prompt_block": "", "suggested_steps": []}
+    packet_type = getattr(packet, "packet_type", None)
+    packet_type_value = getattr(packet_type, "value", str(packet_type or ""))
+    runtime_relevant = packet_type is None or packet_type_value in {"setup", "integration", "test", "implementation"}
+    prompt_lines: list[str] = ["Concrete environment/runtime materialization requirements:"]
+    steps: list[str] = []
+    for item in env_plan.items:
+        command = (item.bootstrap_command or "").strip()
+        probe = (item.runtime_probe_command or "").strip()
+        source = item.bootstrap_source or item.bootstrap_resolution or "unknown"
+        prompt_lines.append(f"- {item.name}: bootstrap_source={source}; bootstrap_command={command or 'none'}; runtime_probe={probe or 'none'}")
+        if not runtime_relevant:
+            continue
+        if command and item.bootstrap_resolution in {"observed_repo_path", "observed_context_command"}:
+            steps.append(f"Attempt repository-supported bootstrap for {item.name}: {command}")
+        if probe:
+            steps.append(f"After setup, prove runtime usability for {item.name}: {probe}")
+    prompt_lines.append("Never declare environment/setup blocked before attempting observed repository-supported bootstrap paths and then running at least one concrete runtime probe when available.")
+    return {"prompt_block": "\n".join(prompt_lines), "suggested_steps": steps}

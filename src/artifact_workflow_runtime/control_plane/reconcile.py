@@ -1,22 +1,16 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
 
 from artifact_workflow_runtime.freshness import FreshnessDecision, FreshnessStagePreference
-from artifact_workflow_runtime.models import ObservationResult, RoutingDecision, Task, TaskClassification, WorkspaceReconciliation
+from artifact_workflow_runtime.models import CommandRole, ObservationResult, RoutingDecision, Task, TaskClassification, TestLevel, WorkspaceReconciliation
 
 _PATHISH_RE = re.compile(r"(?<!https:)(?<!http:)(?<!git@)\b(?:\.?/?[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+)\b")
 _IGNORED_SEGMENTS = {"http", "https", "github.com", "gitlab.com", "docs", "api"}
 
 
 class WorkspaceReconciler:
-    """Derive a typed continuation/adoption view from observed workspace facts.
-
-    This is intentionally deterministic and conservative. It does not decide the
-    next workflow edge; it only explains whether the task looks like a fresh
-    implementation or continuation/repair of an already-present candidate.
-    """
+    """Derive a typed continuation/adoption view from observed workspace facts."""
 
     def reconcile(
         self,
@@ -29,8 +23,7 @@ class WorkspaceReconciler:
     ) -> WorkspaceReconciliation:
         intent_floor = _effective_task_intent(classification)
         target_surfaces = _target_surfaces(task.description)
-        evidence_text = _observation_text(observation)
-        existing_target_surfaces = [surface for surface in target_surfaces if _surface_exists(surface, observation, evidence_text)]
+        existing_target_surfaces = [surface for surface in target_surfaces if _surface_exists(surface, observation)]
         passed_obligations = _passed_obligations(observation)
         unresolved_obligations = _unresolved_obligations(classification=classification, route=route, passed=passed_obligations)
         adopt_existing = intent_floor in {"implement", "modify"} and bool(existing_target_surfaces)
@@ -66,47 +59,24 @@ def _target_surfaces(text: str) -> list[str]:
         if not candidate or candidate.startswith("workspace/"):
             continue
         head = candidate.split("/", 1)[0].lower()
-        if head in _IGNORED_SEGMENTS:
-            continue
-        if "/" not in candidate:
+        if head in _IGNORED_SEGMENTS or "/" not in candidate:
             continue
         if candidate.lower() not in {item.lower() for item in surfaces}:
             surfaces.append(candidate)
     return surfaces[:12]
 
 
-def _observation_text(observation: ObservationResult | None) -> str:
-    if observation is None:
-        return ""
-    parts = [observation.summary, observation.evidence_text]
-    structured = observation.structured_evidence
-    for item in structured.files_observed:
-        parts.append(item.path or "")
-        parts.append(item.summary or "")
-    for item in structured.extracted_facts:
-        parts.append(item.subject)
-        parts.append(item.fact)
-        parts.append(item.source or "")
-    for item in structured.commands_run:
-        parts.append(item.command or "")
-        parts.append(item.output_excerpt or "")
-    return "\n".join(part for part in parts if part)
-
-
-def _surface_exists(surface: str, observation: ObservationResult | None, evidence_text: str) -> bool:
-    lowered = evidence_text.lower()
-    surface_l = surface.lower()
-    if surface_l in lowered:
-        return True
+def _surface_exists(surface: str, observation: ObservationResult | None) -> bool:
     if observation is None:
         return False
-    for item in observation.structured_evidence.files_observed:
-        path = (item.path or "").replace("\\", "/").lower()
-        if surface_l in path:
+    surface_l = surface.lower().rstrip("/")
+    for item in [*observation.structured_evidence.files_observed, *observation.structured_evidence.files_changed]:
+        path = (item.path or "").replace("\\", "/").lower().rstrip("/")
+        if not path:
+            continue
+        if path == surface_l or path.startswith(surface_l + "/") or surface_l.startswith(path + "/"):
             return True
-    for fact in observation.structured_evidence.extracted_facts:
-        fact_text = f"{fact.subject} {fact.fact}".lower()
-        if surface_l in fact_text and any(marker in fact_text for marker in ("exists", "already", "present", "available")):
+        if f"/{surface_l}/" in f"/{path}/" or path.endswith("/" + surface_l):
             return True
     return False
 
@@ -115,34 +85,35 @@ def _passed_obligations(observation: ObservationResult | None) -> list[str]:
     if observation is None:
         return []
     passed: list[str] = []
-    sources = [f"{observation.summary} {observation.evidence_text}".lower()]
-    for command in observation.structured_evidence.commands_run:
-        command_text = f"{command.command or ''} {command.output_excerpt or ''}".lower()
-        sources.append(command_text)
-        exit_ok = command.exit_code in {0, None}
-        if not exit_ok:
+    for test in observation.structured_evidence.tests:
+        if not _evidence_passed(test.status, test.passed):
             continue
-        if any(marker in command_text for marker in (" build ", "dotnet build", "cargo build", "go build", "gradle build", "mvn package", "npm run build")):
+        if test.level == TestLevel.BUILD:
             _append_unique(passed, "build")
-        if any(marker in command_text for marker in ("dotnet test", "pytest", "go test", "cargo test", "gradle test", "mvn test", "npm test", "39 passed", "passed!")):
-            if any(marker in command_text for marker in ("integration", "smoke", "e2e", "freeplane")):
-                _append_unique(passed, "integration")
-                _append_unique(passed, "smoke")
-            else:
-                _append_unique(passed, "unit")
-        if any(marker in command_text for marker in ("smoke", "run_smoke", "run smoke", "modify_mindmap", "json_roundtrip")):
-            _append_unique(passed, "smoke")
-        if any(marker in command_text for marker in ("integration", "run_integration", "run integration")):
+        elif test.level == TestLevel.UNIT:
+            _append_unique(passed, "unit")
+        elif test.level == TestLevel.INTEGRATION:
             _append_unique(passed, "integration")
-    flat_text = " ".join(sources)
-    if any(marker in flat_text for marker in ("build passed", "build succeeded", "0 error(s)", "compile succeeded")):
-        _append_unique(passed, "build")
-    if any(marker in flat_text for marker in ("39 passed", "all tests pass", "unit tests pass", "dotnet test", "passed!")):
-        _append_unique(passed, "unit")
-    if any(marker in flat_text for marker in ("integration test passed", "smoke test passed", "json_roundtrip", "modify_mindmap")):
-        _append_unique(passed, "integration")
-        _append_unique(passed, "smoke")
+        elif test.level == TestLevel.SMOKE:
+            _append_unique(passed, "smoke")
+    for command in observation.structured_evidence.commands_run:
+        if command.exit_code not in {0, None}:
+            continue
+        if command.role == CommandRole.BUILD:
+            _append_unique(passed, "build")
+        elif command.role == CommandRole.UNIT_TEST:
+            _append_unique(passed, "unit")
+        elif command.role == CommandRole.INTEGRATION_TEST:
+            _append_unique(passed, "integration")
+        elif command.role == CommandRole.SMOKE_TEST:
+            _append_unique(passed, "smoke")
     return passed
+
+
+def _evidence_passed(status: str, passed: bool | None) -> bool:
+    if passed is True:
+        return True
+    return str(status or "").lower() in {"passed", "success", "succeeded", "ok"}
 
 
 def _unresolved_obligations(*, classification: TaskClassification, route: RoutingDecision, passed: list[str]) -> list[str]:
@@ -151,8 +122,8 @@ def _unresolved_obligations(*, classification: TaskClassification, route: Routin
         _append_unique(unresolved, "build")
     if classification.task_intent in {"implement", "modify"} and "unit" not in passed:
         _append_unique(unresolved, "unit")
-    focus_text = " ".join([*classification.observation_focus, *route.observation_focus, *route.required_evidence_types]).lower()
-    if any(marker in focus_text for marker in ("integration", "smoke", "runtime", "freeplane", "grpc")):
+    focus_values = {item.lower() for item in [*classification.observation_focus, *route.observation_focus, *route.required_evidence_types]}
+    if focus_values & {"integration", "integration_harness", "runtime", "runtime_proof", "smoke", "smoke_tests"}:
         if "integration" not in passed:
             _append_unique(unresolved, "integration")
         if "smoke" not in passed:

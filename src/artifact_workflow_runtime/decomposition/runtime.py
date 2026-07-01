@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from artifact_workflow_runtime.models import ExecutionResult
+from artifact_workflow_runtime.models import BlockerKind, ExecutionResult
 from artifact_workflow_runtime.strategy import StrategyId
 
 from .models import (
@@ -106,10 +106,13 @@ def packet_from_state(state: Mapping[str, Any], plan: DecompositionPlan) -> Exec
 
 def status_from_execution_result(result: ExecutionResult) -> ExecutionPacketStatus:
     status_text = str(result.execution_status.value if hasattr(result.execution_status, "value") else result.execution_status).lower()
-    blocker_text = " ".join(getattr(item, "summary", "") for item in result.structured_evidence.blockers).lower()
     env_blocked = any(
-        marker in blocker_text
-        for marker in ("environment", "runtime prerequisite", "bootstrap", "setup", "dependency", "not installed", "not found", "integration unavailable")
+        getattr(item, "blocker_kind", None) in {
+            BlockerKind.MISSING_ENVIRONMENT_DEPENDENCY,
+            BlockerKind.MISSING_RUNTIME_PREREQUISITE,
+            BlockerKind.INTEGRATION_ENVIRONMENT_UNAVAILABLE,
+        }
+        for item in result.structured_evidence.blockers
     )
     if result.ok and status_text in {"succeeded", "partial"} and not result.structured_evidence.blockers:
         return ExecutionPacketStatus.COMPLETED

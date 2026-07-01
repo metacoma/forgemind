@@ -15,8 +15,11 @@ from .core import (
     AcceptanceObligationStatus,
     AcceptanceObligationKind,
     BlockerKind,
+    CommandRole,
+    FileRole,
     StageFailureKind,
     DiscoveredImpactKind,
+    TestLevel,
 )
 
 __all__ = [
@@ -30,6 +33,9 @@ __all__ = [
     "AcceptanceObligationStatus",
     "AcceptanceObligationKind",
     "BlockerKind",
+    "CommandRole",
+    "FileRole",
     "StageFailureKind",
     "DiscoveredImpactKind",
+    "TestLevel",
 ]

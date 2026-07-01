@@ -345,11 +345,13 @@ def _runtime_facts(snapshot: WorkflowStateSnapshot | None) -> dict[str, object]:
     discovered_obligation_types: list[str] = []
     if snapshot.execution_result is not None:
         blockers.extend(item.summary for item in snapshot.execution_result.structured_evidence.blockers)
+        environment_gaps.extend(_environment_gap_summaries(snapshot.execution_result.structured_evidence.blockers))
         target_areas.extend(item.path for item in snapshot.execution_result.structured_evidence.files_changed)
         mutation_scope.extend(item.path for item in snapshot.execution_result.structured_evidence.files_changed)
     if snapshot.observation_result is not None:
         target_areas.extend(item.path for item in snapshot.observation_result.structured_evidence.files_changed)
         blockers.extend(item.summary for item in snapshot.observation_result.structured_evidence.blockers)
+        environment_gaps.extend(_environment_gap_summaries(snapshot.observation_result.structured_evidence.blockers))
     if snapshot.verification_result is not None:
         evidence_gaps.extend(snapshot.verification_result.missing_evidence)
         evidence_gaps.extend(snapshot.verification_result.missing_obligations)
@@ -436,7 +438,7 @@ def _obligation_flags(
     has_setup = (
         bool(runtime_facts.get("environment_gaps"))
         or "setup" in discovered_types
-        or (bool(obligations and obligations.required_setup_steps) and bool(runtime_facts.get("has_existing_mutation")))
+        or (bool(obligations and obligations.required_setup_steps) and (bool(runtime_facts.get("has_existing_mutation")) or bool(runtime_facts.get("environment_gaps"))))
     )
     target_areas = list(obligations.affected_surfaces if obligations else []) + list(runtime_facts.get("target_areas", []))
     allowed_files = list(obligations.affected_surfaces if obligations else []) + list(runtime_facts.get("allowed_files", []))
@@ -535,3 +537,16 @@ def _dedupe(items: Iterable[str]) -> list[str]:
         if text and text not in out:
             out.append(text)
     return out
+
+
+def _environment_gap_summaries(blockers: Iterable[object]) -> list[str]:
+    gaps: list[str] = []
+    for blocker in blockers:
+        raw_kind = getattr(blocker, "blocker_kind", "")
+        kind = str(getattr(raw_kind, "value", raw_kind) or "").lower()
+        summary = str(getattr(blocker, "summary", "") or "").strip()
+        if not summary:
+            continue
+        if kind in {"integration_environment_unavailable", "missing_environment_dependency", "missing_runtime_prerequisite"}:
+            gaps.append(summary)
+    return _dedupe(gaps)

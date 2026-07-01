@@ -15,12 +15,14 @@ from artifact_workflow_runtime.models import (
     AcceptanceObligation,
     AcceptanceObligationKind,
     AcceptanceStatus,
+    CommandRole,
     CommandEvidence,
     ExecutionFamily,
     ExecutionPlan,
     ExecutionResult,
     ExecutionStatus,
     StructuredEvidence,
+    TestLevel,
     TestCheckEvidence,
     BlockerEvidence,
     BlockerKind,
@@ -55,7 +57,9 @@ def test_qa_plan_requires_bootstrap_before_runtime_proof_when_repo_path_exists()
                 required_for=["runtime_proof"],
                 bootstrap_possible=True,
                 bootstrap_command="./scripts/bootstrap.sh",
+                bootstrap_source_kind="setup_script",
                 runtime_probe_command="./scripts/smoke.sh",
+                runtime_probe_source_kind="smoke_harness",
                 failure_mode="bootstrap_then_retry",
             )
         ],
@@ -85,14 +89,14 @@ def test_runtime_proof_blocks_syntax_check_surrogate(tmp_path) -> None:
     env = EnvironmentPlan(
         task_id="task",
         workspace_root=str(tmp_path),
-        items=[EnvironmentPlanItem(name="runtime", runtime_probe_command="bash -n ./scripts/smoke.sh")],
+        items=[EnvironmentPlanItem(name="runtime", runtime_probe_command="bash -n ./scripts/smoke.sh", runtime_probe_source_kind="other")],
     )
     qa_plan = QAPlan(task_id="task", checks=[QACheck(name="runtime_proof", kind="runtime_proof")])
 
     report = DeterministicQARunner().run(plan=qa_plan, environment_plan=env, cwd=str(tmp_path))
 
     assert report.items[0].status == "blocked"
-    assert "syntax-check or build-only" in report.items[0].reason
+    assert "typed runtime probe" in report.items[0].reason
 
 
 def test_partial_environment_blocker_marks_packet_blocked_not_completed() -> None:
@@ -154,9 +158,9 @@ def test_acceptance_rejects_integration_project_build_as_integration_pass() -> N
         ],
     )
     execution = _execution_result(
-        tests=[TestCheckEvidence(name="integration tests project build", command="cmake --build build/integration-tests", status="passed")]
+        tests=[TestCheckEvidence(name="integration tests project build", command="cmake --build build/integration-tests", status="passed", level=TestLevel.BUILD)]
     ).model_copy(update={"structured_evidence": StructuredEvidence(
-        tests=[TestCheckEvidence(name="integration tests project build", command="cmake --build build/integration-tests", status="passed")],
+        tests=[TestCheckEvidence(name="integration tests project build", command="cmake --build build/integration-tests", status="passed", level=TestLevel.BUILD)],
         # Mutation evidence must pass so the failure is specifically integration proof.
         commands_run=[],
     )})
@@ -183,7 +187,7 @@ def test_environment_prerequisite_not_satisfied_by_script_existence_or_syntax_ch
         ],
     )
     execution = _execution_result(
-        commands=[CommandEvidence(command="bash -n scripts/install.sh", exit_code=0, output_excerpt="syntax ok")]
+        commands=[CommandEvidence(command="bash -n scripts/install.sh", exit_code=0, output_excerpt="syntax ok", role=CommandRole.OTHER)]
     )
 
     decision = RuntimeKernel().evaluate_acceptance(contract=contract, execution=execution, verification=None)

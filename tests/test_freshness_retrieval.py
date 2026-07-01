@@ -11,13 +11,18 @@ from artifact_workflow_runtime.freshness import FreshnessGate, RetrievalMode, Re
 from artifact_workflow_runtime.llm_backend import ScriptedLLMBackend
 from artifact_workflow_runtime.models import (
     Capability,
+    CommandEvidence,
+    CommandRole,
     ExecutionFamily,
     ExtractedFact,
+    FileEvidence,
     ObservationResult,
     RoutingDecision,
     StructuredEvidence,
     Task,
     TaskClassification,
+    TestCheckEvidence,
+    TestLevel,
     WorkPacketKind,
 )
 from artifact_workflow_runtime.openhands_adapter import FakeOpenHandsAdapter
@@ -304,8 +309,9 @@ def test_workspace_reconciler_adopts_existing_candidate_and_marks_continuation()
         summary="grpc/csharp already exists and dotnet test passed",
         evidence_text="grpc/csharp already exists. dotnet test grpc/csharp/tests/FreeplaneGrpcClient.Tests.csproj passed with 39 passed.",
         structured_evidence=StructuredEvidence(
-            files_observed=[],
-            commands_run=[],
+            files_observed=[FileEvidence(path="/workspace/freeplane_plugin_grpc/grpc/csharp/src/FreeplaneGrpcClient.csproj")],
+            commands_run=[CommandEvidence(command="dotnet test grpc/csharp/tests/FreeplaneGrpcClient.Tests.csproj", exit_code=0, role=CommandRole.UNIT_TEST)],
+            tests=[TestCheckEvidence(name="grpc/csharp unit tests", status="passed", level=TestLevel.UNIT)],
             extracted_facts=[],
         ),
     )

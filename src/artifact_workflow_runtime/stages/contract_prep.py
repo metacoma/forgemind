@@ -45,6 +45,8 @@ class ContractPrepStageMixin:
         readiness_gate.require(state, "workspace_prepare", "task", "done_contract")
         task = Task.model_validate(state["task"])
         contract = DoneContract.model_validate(state["done_contract"])
+        obligations = ObligationAnalysis.model_validate(state["obligations"]) if state.get("obligations") else None
+        observation = ObservationResult.model_validate(state["observation_result"]) if state.get("observation_result") else None
         context_packet = ContextPacket.model_validate(state["context_packet"]) if state.get("context_packet") else None
         await _emit(services, "stage_started", "workspace_prepare", "Preparing workspace branch and environment plan", task_id=task.id)
         workspace_branch = f"awrt/{task.id}"
@@ -55,6 +57,8 @@ class ContractPrepStageMixin:
             context_packet=context_packet,
             workspace_branch=workspace_branch,
             workspace_root=workspace_root,
+            observation=observation,
+            obligations=obligations,
         )
         branch_artifact = services.artifact_store.add_json(
             "workspace_allocation",

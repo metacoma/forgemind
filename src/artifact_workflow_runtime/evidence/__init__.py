@@ -48,13 +48,19 @@ def render_structured_evidence_summary(evidence: StructuredEvidence) -> str:
     lines: list[str] = []
     if evidence.commands_run:
         lines.append("commands_run:")
-        lines.extend(f"- {item.command} exit={item.exit_code if item.exit_code is not None else 'unknown'}" for item in evidence.commands_run[:20])
+        lines.extend(
+            f"- {item.command} role={getattr(getattr(item, 'role', None), 'value', getattr(item, 'role', None) or 'unknown')} exit={item.exit_code if item.exit_code is not None else 'unknown'}"
+            for item in evidence.commands_run[:20]
+        )
     if evidence.files_changed:
         lines.append("files_changed:")
         lines.extend(f"- {item.path}: {item.summary or item.action}" for item in evidence.files_changed[:20])
     if evidence.files_observed:
         lines.append("files_observed:")
-        lines.extend(f"- {item.path}: {item.summary or item.action}" for item in evidence.files_observed[:20])
+        lines.extend(
+            f"- {item.path} role={getattr(getattr(item, 'role', None), 'value', getattr(item, 'role', None) or 'unknown')}: {item.summary or item.action}"
+            for item in evidence.files_observed[:20]
+        )
     if evidence.extracted_facts:
         lines.append("facts:")
         lines.extend(f"- {item.subject}: {item.fact} [{item.confidence}]" for item in evidence.extracted_facts[:20])
@@ -63,7 +69,10 @@ def render_structured_evidence_summary(evidence: StructuredEvidence) -> str:
         lines.extend(f"- {item.path or 'unknown'}: {item.summary}" for item in evidence.diffs[:20])
     if evidence.tests:
         lines.append("checks:")
-        lines.extend(f"- {item.name}: {item.status}; {item.output_excerpt or ''}".rstrip() for item in evidence.tests[:20])
+        lines.extend(
+            f"- {item.name} level={getattr(getattr(item, 'level', None), 'value', getattr(item, 'level', None) or 'unknown')}: {item.status}; {item.output_excerpt or ''}".rstrip()
+            for item in evidence.tests[:20]
+        )
     if evidence.blockers:
         lines.append("blockers:")
         lines.extend(f"- [{item.severity}] {item.summary}" for item in evidence.blockers[:20])
@@ -156,7 +165,7 @@ class EvidenceExtractor:
                         seen_observed.add(path)
             if _BLOCKER_RE.search(stripped):
                 severity = "high" if re.search(r"\b(permission denied|failed|error|timeout|blocked)\b", stripped, re.IGNORECASE) else "medium"
-                blockers.append(BlockerEvidence(summary=self._clip(stripped), severity=severity, blocker_kind=_classify_blocker_kind(stripped), artifact_ids=artifact_ids))
+                blockers.append(BlockerEvidence(summary=self._clip(stripped), severity=severity, blocker_kind=BlockerKind.GENERIC, artifact_ids=artifact_ids))
 
         commands = commands[: self.max_items]
         files_changed = files_changed[: self.max_items]
@@ -272,7 +281,7 @@ class EvidenceExtractor:
             data = dict(item)
             if "output_excerpt" not in data and "summary" in data:
                 data["output_excerpt"] = str(data.pop("summary"))
-            allowed = {"command", "cwd", "exit_code", "output_excerpt", "output_artifact_ids"}
+            allowed = {"command", "cwd", "exit_code", "output_excerpt", "output_artifact_ids", "role"}
             data = {key: value for key, value in data.items() if key in allowed}
             data.setdefault("output_artifact_ids", artifact_ids)
             if "command" not in data:
@@ -287,7 +296,7 @@ class EvidenceExtractor:
                 data["path"] = str(data.get("file") or data.get("name") or data.get("value") or data)
             data.setdefault("action", action)
             data.setdefault("artifact_ids", artifact_ids)
-            allowed = {"path", "action", "summary", "artifact_ids"}
+            allowed = {"path", "action", "summary", "artifact_ids", "role"}
             data = {key: value for key, value in data.items() if key in allowed}
             return FileEvidence.model_validate(data)
         return FileEvidence(path=str(item), action=action, artifact_ids=artifact_ids)
@@ -316,6 +325,8 @@ class EvidenceExtractor:
         if isinstance(item, Mapping):
             data = dict(item)
             data.setdefault("artifact_ids", artifact_ids)
+            allowed = {"name", "command", "passed", "status", "output_excerpt", "artifact_ids", "level"}
+            data = {key: value for key, value in data.items() if key in allowed}
             return TestCheckEvidence.model_validate(data)
         text = str(item)
         passed = True if _PASS_RE.search(text) else (False if _FAIL_RE.search(text) else None)
@@ -326,33 +337,14 @@ class EvidenceExtractor:
         if isinstance(item, Mapping):
             data = dict(item)
             data.setdefault("artifact_ids", artifact_ids)
-            if "blocker_kind" not in data and "kind" not in data:
-                data["blocker_kind"] = _classify_blocker_kind(str(data.get("summary") or data))
-            elif "kind" in data and "blocker_kind" not in data:
+            if "kind" in data and "blocker_kind" not in data:
                 data["blocker_kind"] = data.pop("kind")
             return BlockerEvidence.model_validate(data)
         text = str(item)
-        return BlockerEvidence(summary=text, blocker_kind=_classify_blocker_kind(text), artifact_ids=artifact_ids)
+        return BlockerEvidence(summary=text, blocker_kind=BlockerKind.GENERIC, artifact_ids=artifact_ids)
 
     def _clip(self, text: str) -> str:
         return text if len(text) <= self.max_excerpt_chars else text[: self.max_excerpt_chars] + "..."
-
-
-def _classify_blocker_kind(text: str) -> BlockerKind:
-    lowered = text.lower()
-    env_markers = ("missing", "not found", "not installed", "unavailable", "cannot find", "no such file", "dependency")
-    integration_markers = ("freeplane", "x11", "display", "integration", "gui", "runtime", "service", "daemon")
-    if any(marker in lowered for marker in integration_markers) and any(marker in lowered for marker in env_markers):
-        return BlockerKind.INTEGRATION_ENVIRONMENT_UNAVAILABLE
-    if any(marker in lowered for marker in ("missing dependency", "dependency missing", "not installed", "cannot find", "not found")):
-        return BlockerKind.MISSING_ENVIRONMENT_DEPENDENCY
-    if any(marker in lowered for marker in ("runtime prerequisite", "prerequisite", "environment unavailable")):
-        return BlockerKind.MISSING_RUNTIME_PREREQUISITE
-    if any(marker in lowered for marker in ("test failed", "tests failed", "failure", "assertion")):
-        return BlockerKind.TEST_FAILURE
-    if any(marker in lowered for marker in ("missing evidence", "not run", "not executed")):
-        return BlockerKind.MISSING_EVIDENCE
-    return BlockerKind.GENERIC
 
 
 def _jsonish(value: object) -> str:

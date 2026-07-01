@@ -12,6 +12,7 @@ from artifact_workflow_runtime.models import (
     AcceptanceStatus,
     ApprovalRequest,
     BlockerKind,
+    CommandRole,
     EnvironmentBlocker,
     ExecutionFamily,
     ExecutionPlan,
@@ -26,6 +27,7 @@ from artifact_workflow_runtime.models import (
     Task,
     TaskAcceptanceContract,
     TaskClassification,
+    TestLevel,
     VerificationObligationResult,
     VerificationResult,
 )
@@ -456,24 +458,29 @@ class RuntimeKernel:
         if requires_mutation:
             add(AcceptanceObligationKind.CODE_CHANGED, "Repository/world mutation evidence exists", checks=list(plan.expected_repo_changes))
 
-        all_test_text = _lower_join([*plan.required_test_levels, *plan.verification_checks, *plan.success_criteria])
-        if any(marker in all_test_text for marker in ("build", "compile", "cmake", "gradle", "mvn", "make")):
+        required_levels = {str(level).lower() for level in plan.required_test_levels}
+        if required_levels & {"build", "compile"}:
             add(AcceptanceObligationKind.BUILD_OR_COMPILE_SUCCEEDED, "Build/compile obligation passed", checks=list(plan.required_test_levels))
 
         if plan.required_test_levels or plan.verification_checks:
             add(AcceptanceObligationKind.RELEVANT_TESTS_RUN, "Relevant verification checks were run", checks=[*plan.required_test_levels, *plan.verification_checks])
             add(AcceptanceObligationKind.RELEVANT_TESTS_PASSED, "Relevant verification checks passed", checks=[*plan.required_test_levels, *plan.verification_checks])
 
-        if any(marker in all_test_text for marker in ("integration", "e2e", "end-to-end", "freeplane", "grpc smoke")):
+        if required_levels & {"integration", "smoke", "e2e", "end-to-end"}:
             add(AcceptanceObligationKind.INTEGRATION_TESTS_RUN, "Integration verification was run", checks=[*plan.required_test_levels, *plan.verification_checks])
             add(AcceptanceObligationKind.INTEGRATION_TESTS_PASSED, "Integration verification passed", checks=[*plan.required_test_levels, *plan.verification_checks])
 
-        env_prereqs = list(plan.environment_notes)
+        runtime_sensitive_levels = {"integration", "smoke", "e2e", "end-to-end", "runtime_proof", "runtime"}
+        runtime_sensitive = bool(required_levels & runtime_sensitive_levels)
+        env_prereqs: list[str] = []
+        if runtime_sensitive:
+            env_prereqs.extend(plan.environment_notes)
+            if obligations is not None:
+                env_prereqs.extend(obligations.required_environment_conditions)
         if obligations is not None:
-            env_prereqs.extend(obligations.required_environment_conditions)
             env_prereqs.extend(obligations.required_setup_steps)
         env_prereqs = _unique_str(env_prereqs)
-        if env_prereqs or any(marker in all_test_text for marker in ("integration", "freeplane", "x11", "display")):
+        if env_prereqs or runtime_sensitive:
             add(
                 AcceptanceObligationKind.ENVIRONMENT_PREREQUISITES_SATISFIED,
                 "Required verification environment/prerequisites were available",
@@ -628,12 +635,42 @@ class RuntimeKernel:
 
         if obligation.kind == AcceptanceObligationKind.ENVIRONMENT_PREREQUISITES_SATISFIED:
             satisfied = _environment_prerequisite_evidence_satisfied(obligation, execution, verification, publish)
+            if satisfied:
+                return _obligation_result(
+                    obligation,
+                    True,
+                    "Environment prerequisite has real bootstrap/readiness evidence.",
+                    artifact_ids,
+                )
+            environment_blocker = _environment_blocker(
+                execution,
+                verification,
+                publish,
+                required_for="environment_prerequisites",
+            )
+            if environment_blocker is None and _all_structured_blockers(execution, verification, publish):
+                environment_blocker = EnvironmentBlocker(
+                    kind=BlockerKind.INTEGRATION_ENVIRONMENT_UNAVAILABLE,
+                    summary="required runtime/setup prerequisites were not materialized or proved ready before verification.",
+                    missing_dependency=None,
+                    required_for="environment_prerequisites",
+                    evidence_artifact_ids=artifact_ids,
+                )
+            if environment_blocker is not None:
+                return VerificationObligationResult(
+                    obligation_id=obligation.id,
+                    obligation_name=obligation.name,
+                    kind=obligation.kind,
+                    status=AcceptanceObligationStatus.BLOCKED,
+                    reason=environment_blocker.summary,
+                    evidence_artifact_ids=artifact_ids,
+                    blocker_kind=environment_blocker.kind,
+                    environment_blocker=environment_blocker,
+                )
             return _obligation_result(
                 obligation,
-                satisfied,
-                "Environment prerequisite has real bootstrap/readiness evidence."
-                if satisfied
-                else "Environment prerequisite lacks real bootstrap/readiness evidence; script existence, syntax checks, and silence are not setup success.",
+                False,
+                "Environment prerequisite lacks real bootstrap/readiness evidence; script existence, syntax checks, and silence are not setup success.",
                 artifact_ids,
             )
 
@@ -762,6 +799,8 @@ def _detect_reentry_trigger(
                 text_items.append(f"{result.kind.value} {result.obligation_name} {result.reason}")
     if publish is not None:
         text_items.extend([publish.summary, publish.evidence_text, *[b.summary for b in publish.structured_evidence.blockers]])
+    if verification is not None and verification.missing_setup_steps:
+        return PipelineLoopTriggerKind.SETUP_GAP_DISCOVERED, PipelineReentryTarget.OBLIGATIONS, "Required setup/bootstrap steps are still missing; re-enter obligation discovery.", missing_evidence, missing_obligations
     text = _lower_join(text_items)
 
     if not text.strip():
@@ -891,61 +930,38 @@ def _environment_blocker(execution: ExecutionResult | None, verification: Verifi
             return EnvironmentBlocker(
                 kind=kind,
                 summary=f"{source_name}: {summary}",
-                missing_dependency=_guess_missing_dependency(summary),
+                missing_dependency=None,
                 required_for=required_for,
                 evidence_artifact_ids=list(getattr(blocker, "artifact_ids", []) or []),
-            )
-        lowered = str(summary).lower()
-        if any(marker in lowered for marker in ("freeplane", "x11", "display", "not installed", "not found", "missing dependency", "environment unavailable")):
-            inferred = BlockerKind.INTEGRATION_ENVIRONMENT_UNAVAILABLE if any(marker in lowered for marker in ("freeplane", "x11", "display", "integration")) else BlockerKind.MISSING_ENVIRONMENT_DEPENDENCY
-            return EnvironmentBlocker(
-                kind=inferred,
-                summary=f"{source_name}: {summary}",
-                missing_dependency=_guess_missing_dependency(summary),
-                required_for=required_for,
-                evidence_artifact_ids=list(getattr(blocker, "artifact_ids", []) or []),
-            )
-    for source_name, result in (("execution", execution), ("publish", publish)):
-        if result is None:
-            continue
-        inferred_text = " | ".join(str(item) for item in (getattr(result, "summary", ""), getattr(result, "evidence_text", "")) if item).lower()
-        if any(marker in inferred_text for marker in ("not installed", "not found", "environment unavailable", "missing dependency", "missing runtime prerequisite", "runtime prerequisite missing")):
-            blocker_kind = BlockerKind.INTEGRATION_ENVIRONMENT_UNAVAILABLE if any(marker in inferred_text for marker in ("freeplane", "x11", "display", "integration", "runtime")) else BlockerKind.MISSING_ENVIRONMENT_DEPENDENCY
-            return EnvironmentBlocker(
-                kind=blocker_kind,
-                summary=f"{source_name}: {getattr(result, 'summary', '') or 'missing environment/runtime prerequisite evidence'}",
-                missing_dependency=_guess_missing_dependency(inferred_text),
-                required_for=required_for,
-                evidence_artifact_ids=_evidence_artifact_ids(execution, verification, publish),
             )
 
     if verification is not None:
-        inferred_items = [
-            *verification.missing_setup_steps,
-            *verification.missing_test_levels,
-            *verification.missing_obligations,
-            verification.summary,
-            *verification.missing_evidence,
-            *verification.checks_failed,
-        ]
-        inferred_text = " | ".join(str(item) for item in inferred_items if item).lower()
-        if any(marker in inferred_text for marker in ("install", "dependency", "bootstrap", "runtime prerequisite", "not installed", "docker", "freeplane", "x11", "display", "integration")):
-            blocker_kind = BlockerKind.INTEGRATION_ENVIRONMENT_UNAVAILABLE if any(marker in inferred_text for marker in ("freeplane", "x11", "display", "integration")) else BlockerKind.MISSING_ENVIRONMENT_DEPENDENCY
-            return EnvironmentBlocker(
-                kind=blocker_kind,
-                summary=f"verification: {verification.summary or 'missing environment/runtime prerequisite evidence'}",
-                missing_dependency=_guess_missing_dependency(inferred_text),
-                required_for=required_for,
-                evidence_artifact_ids=_evidence_artifact_ids(execution, verification, publish),
-            )
-    return None
-
-
-def _guess_missing_dependency(summary: str) -> str | None:
-    lowered = summary.lower()
-    for name in ("freeplane", "xvfb", "x11", "docker", "kubectl", "helm", "argocd"):
-        if name in lowered:
-            return name
+        for item in verification.obligation_results:
+            if item.environment_blocker is not None:
+                blocker = item.environment_blocker
+                return EnvironmentBlocker(
+                    kind=blocker.kind,
+                    summary=blocker.summary,
+                    missing_dependency=blocker.missing_dependency,
+                    required_for=required_for,
+                    evidence_artifact_ids=blocker.evidence_artifact_ids,
+                )
+    if verification is not None and verification.missing_setup_steps:
+        return EnvironmentBlocker(
+            kind=BlockerKind.MISSING_ENVIRONMENT_DEPENDENCY,
+            summary="verification: required setup/bootstrap steps were not performed.",
+            missing_dependency=None,
+            required_for=required_for,
+            evidence_artifact_ids=_evidence_artifact_ids(execution, verification, publish),
+        )
+    if verification is not None and any(level in {"integration", "smoke", "e2e"} for level in verification.missing_test_levels):
+        return EnvironmentBlocker(
+            kind=BlockerKind.MISSING_RUNTIME_PREREQUISITE,
+            summary="verification: runtime-dependent test levels remain unproved.",
+            missing_dependency=None,
+            required_for=required_for,
+            evidence_artifact_ids=_evidence_artifact_ids(execution, verification, publish),
+        )
     return None
 
 
@@ -966,24 +982,35 @@ def _evidence_artifact_ids(execution: ExecutionResult | None, verification: Veri
 
 def _check_status(execution: ExecutionResult | None, verification: VerificationResult | None, publish: PublishResult | None, terms: tuple[str, ...]) -> tuple[bool, bool, bool]:
     observed: list[tuple[str, str]] = []
+    target_levels = _target_test_levels(terms)
+    target_roles = _target_command_roles(terms)
     for result in (execution, verification, publish):
         if result is None:
             continue
         evidence = getattr(result, "structured_evidence", None)
         if evidence is not None:
             for test in evidence.tests:
-                observed.append((f"{test.name} {test.command or ''} {test.output_excerpt or ''}".lower(), str(test.status).lower()))
+                if target_levels and test.level not in target_levels:
+                    continue
+                observed.append((str(getattr(test.level, 'value', test.level) or test.name).lower(), str(test.status).lower()))
+            for command in evidence.commands_run:
+                if target_roles and command.role not in target_roles:
+                    continue
+                if command.exit_code is None:
+                    continue
+                status = "passed" if command.exit_code == 0 else "failed"
+                observed.append((str(getattr(command.role, 'value', command.role) or command.command).lower(), status))
         if verification is not None and result is verification:
+            for level in verification.performed_test_levels:
+                observed.append((str(level).lower(), "passed"))
+            for level in verification.missing_test_levels:
+                observed.append((str(level).lower(), "missing"))
             for name in verification.checks_passed:
                 observed.append((str(name).lower(), "passed"))
             for name in verification.checks_failed:
                 observed.append((str(name).lower(), "failed"))
             for name in verification.missing_evidence:
                 observed.append((str(name).lower(), "missing"))
-    if terms:
-        observed = [(name, status) for name, status in observed if any(term in name for term in terms)]
-    if terms and _requires_runtime_proof_terms(terms):
-        observed = [(name, status) for name, status in observed if not _is_runtime_proof_surrogate(name)]
     run_statuses = {"passed", "failed", "blocked", "success", "succeeded", "ok", "error"}
     missing_statuses = {"missing", "not_run", "not run", "unknown"}
     ran = any(status in run_statuses for _name, status in observed)
@@ -992,100 +1019,69 @@ def _check_status(execution: ExecutionResult | None, verification: VerificationR
     return ran, passed, failed
 
 
-def _requires_runtime_proof_terms(terms: tuple[str, ...]) -> bool:
-    joined = " ".join(terms).lower()
-    return any(marker in joined for marker in ("integration", "smoke", "e2e", "end-to-end", "freeplane", "grpc"))
-
-
-def _is_runtime_proof_surrogate(text: str) -> bool:
-    lowered = text.lower()
-    if any(marker in lowered for marker in ("bash -n", "sh -n", "syntax check", "syntax-only", "script exists", "found script", "exists only")):
-        return True
-    if any(marker in lowered for marker in ("integration project build", "test project build", "build integration tests", "compiled integration tests")):
-        return True
-    build_only = any(marker in lowered for marker in ("cmake --build", "mvn compile", "gradle assemble", "./gradlew assemble", "go build", "npm run build"))
-    actual_test = any(marker in lowered for marker in ("pytest", "go test", "cargo test", "mvn test", "gradle test", "./gradlew test", "npm test", "integrationtest", "smoke test", "run_smoke", "run smoke", "run_integration", "run integration", "pytest", "go test", "cargo test", "mvn test", "gradle test", "./gradlew test", "npm test", "e2e"))
-    return build_only and not actual_test
-
-
 def _environment_prerequisite_evidence_satisfied(obligation: AcceptanceObligation, execution: ExecutionResult | None, verification: VerificationResult | None, publish: PublishResult | None) -> bool:
     required = bool(obligation.required_environment or obligation.checks)
     if not required or not _requires_explicit_environment_evidence(obligation):
         return True
-
-    snippets: list[str] = []
     for result in (execution, verification, publish):
         if result is None:
             continue
-        snippets.append(str(getattr(result, "summary", "")))
-        snippets.append(str(getattr(result, "evidence_text", "")))
         evidence = getattr(result, "structured_evidence", None)
         if evidence is not None:
             for command in evidence.commands_run:
-                text = f"{command.command} {command.output_excerpt or ''}".lower()
-                if _is_setup_or_bootstrap_command(text) and command.exit_code == 0 and not _is_runtime_proof_surrogate(text):
+                if command.exit_code == 0 and command.role in {CommandRole.EXECUTED_SETUP, CommandRole.EXECUTED_RUNTIME_PROBE}:
                     return True
             for test in evidence.tests:
-                text = f"{test.name} {test.command or ''} {test.output_excerpt or ''}".lower()
-                if str(test.status).lower() in {"passed", "success", "succeeded", "ok"} and _is_environment_readiness_evidence(text):
+                if str(test.status).lower() in {"passed", "success", "succeeded", "ok"} and test.level == TestLevel.RUNTIME_PROBE:
                     return True
         if verification is not None and result is verification:
-            for item in verification.setup_steps_performed:
-                if item and not _is_runtime_proof_surrogate(str(item)):
+            if verification.setup_steps_performed:
+                return True
+            for item in verification.obligation_results:
+                if item.environment_blocker is None and item.kind == AcceptanceObligationKind.ENVIRONMENT_PREREQUISITES_SATISFIED and item.status == AcceptanceObligationStatus.PASSED:
                     return True
-            for item in verification.checks_passed:
-                text = str(item).lower()
-                if _is_environment_readiness_evidence(text):
-                    return True
-
-    text = " ".join(snippets).lower()
-    if any(marker in text for marker in ("script exists", "found script", "bash -n", "sh -n", "syntax check")) and not any(marker in text for marker in ("bootstrap attempted", "setup completed", "environment ready", "runtime usable")):
-        return False
-    return any(marker in text for marker in ("bootstrap attempted", "bootstrap succeeded", "setup completed", "environment ready", "runtime usable", "service started", "smoke environment ready"))
+    if not _all_structured_blockers(execution, verification, publish):
+        ran, passed, _failed = _check_status(execution, verification, publish, ("integration", "smoke", "e2e", "end-to-end", "runtime", "runtime_proof"))
+        if ran and passed:
+            return True
+    return False
 
 
 
 def _requires_explicit_environment_evidence(obligation: AcceptanceObligation) -> bool:
-    details = " ".join([*obligation.required_environment, *obligation.checks]).lower()
-    if not details.strip():
-        return False
-    explicit_markers = (
-        "runtime",
-        "integration",
-        "smoke",
-        "post-deploy",
-        "postdeploy",
-        "bootstrap",
-        "service",
-        "freeplane",
-        "x11",
-        "xvfb",
-        "display",
-        "docker compose",
-        "kubernetes",
-        "k8s",
-        "kubectl",
-        "helm",
-        "argocd",
-    )
-    if any(marker in details for marker in explicit_markers):
-        return True
-    # Generic setup notes such as "install dependencies inside docker" are
-    # advisory unless the controller also has a concrete runtime/bootstrap kind
-    # or a structured environment blocker. Otherwise ordinary unit/build tasks
-    # would be rejected despite successful evidence.
-    return False
+    return obligation.kind == AcceptanceObligationKind.ENVIRONMENT_PREREQUISITES_SATISFIED or bool(obligation.required_environment)
 
 
-def _is_setup_or_bootstrap_command(text: str) -> bool:
-    return any(marker in text for marker in ("bootstrap", "setup", "install", "docker compose up", "docker-compose up", "make up", "make run", "service start"))
+def _target_test_levels(terms: tuple[str, ...]) -> set[TestLevel]:
+    lowered = {term.lower() for term in terms}
+    levels: set[TestLevel] = set()
+    if "build" in lowered or "compile" in lowered:
+        levels.add(TestLevel.BUILD)
+    if "unit" in lowered:
+        levels.add(TestLevel.UNIT)
+    if "integration" in lowered:
+        levels.add(TestLevel.INTEGRATION)
+    if "smoke" in lowered or "e2e" in lowered or "end-to-end" in lowered:
+        levels.add(TestLevel.SMOKE)
+    if "runtime" in lowered or "runtime_proof" in lowered:
+        levels.add(TestLevel.RUNTIME_PROBE)
+    return levels
 
 
-def _is_environment_readiness_evidence(text: str) -> bool:
-    lowered = text.lower()
-    if _is_runtime_proof_surrogate(lowered):
-        return False
-    return any(marker in lowered for marker in ("bootstrap", "setup", "install", "environment ready", "runtime usable", "service started", "readiness", "healthcheck", "integration tests passed", "smoke tests passed", "runtime proof passed"))
+def _target_command_roles(terms: tuple[str, ...]) -> set[CommandRole]:
+    lowered = {term.lower() for term in terms}
+    roles: set[CommandRole] = set()
+    if "build" in lowered or "compile" in lowered:
+        roles.add(CommandRole.BUILD)
+    if "unit" in lowered:
+        roles.add(CommandRole.UNIT_TEST)
+    if "integration" in lowered:
+        roles.add(CommandRole.INTEGRATION_TEST)
+    if "smoke" in lowered or "e2e" in lowered or "end-to-end" in lowered:
+        roles.add(CommandRole.SMOKE_TEST)
+    if "runtime" in lowered or "runtime_proof" in lowered:
+        roles.add(CommandRole.EXECUTED_RUNTIME_PROBE)
+    return roles
 
 
 def _obligation_result(obligation: AcceptanceObligation, ok: bool, reason: str, artifact_ids: list[str]) -> VerificationObligationResult:
@@ -1320,13 +1316,13 @@ def _result_text(result: object | None) -> str:
 def _requires_integration_verification(plan: ExecutionPlan | None) -> bool:
     if plan is None:
         return False
-    text = _lower_join([*plan.required_test_levels, *plan.verification_checks, *plan.success_criteria, *plan.required_setup_steps, *plan.environment_notes])
-    return any(marker in text for marker in ("integration", "e2e", "end-to-end", "freeplane", "grpc smoke", "x11", "display"))
+    levels = {str(level).lower() for level in plan.required_test_levels}
+    return bool(levels & {"integration", "smoke", "e2e", "end-to-end", "runtime_proof", "runtime"})
 
 
 def _verification_terms(plan: ExecutionPlan | None) -> tuple[str, ...]:
     if _requires_integration_verification(plan):
-        return ("integration", "e2e", "end-to-end", "freeplane", "grpc smoke", "x11", "display")
+        return tuple(str(level).lower() for level in plan.required_test_levels)
     return ()
 
 

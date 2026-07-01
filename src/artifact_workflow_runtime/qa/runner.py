@@ -87,10 +87,12 @@ class DeterministicQARunner:
 
     def _run_runtime_proof(self, *, check_id: str, name: str, environment_plan: EnvironmentPlan | None, cwd: str) -> QAExecutionItem:
         command = None
+        source_kind = None
         if environment_plan is not None:
             for item in environment_plan.items:
                 if item.runtime_probe_command:
                     command = item.runtime_probe_command
+                    source_kind = item.runtime_probe_source_kind
                     break
         if not command:
             return QAExecutionItem(check_id=check_id, name=name, kind="runtime_proof", status="blocked", reason="No runtime/smoke proof command available after setup; bootstrap path existence is not runtime proof.")
@@ -104,25 +106,17 @@ class DeterministicQARunner:
                 command=command,
                 reason=f"Runtime proof command {missing!r} is not present in workspace {cwd}.",
             )
-        if self._is_static_or_build_only_surrogate(command):
+        if source_kind not in {"runtime_probe_script", "smoke_harness", "integration_harness", "observed_runtime_probe"}:
             return QAExecutionItem(
                 check_id=check_id,
                 name=name,
                 kind="runtime_proof",
                 status="blocked",
                 command=command,
-                reason="Runtime/smoke proof cannot be satisfied by syntax-check or build-only command.",
+                reason="Runtime/smoke proof requires a typed runtime probe or integration/smoke harness command.",
             )
         item = self._run_command(check_id=check_id, name=name, command=command, cwd=cwd)
         return item.model_copy(update={"kind": "runtime_proof"})
-
-    def _is_static_or_build_only_surrogate(self, command: str) -> bool:
-        text = command.lower()
-        if "bash -n" in text or "sh -n" in text or "syntax" in text:
-            return True
-        build_only = any(marker in text for marker in ("cmake --build", "gradle assemble", "./gradlew assemble", "mvn compile", "go build", "npm run build"))
-        actual_test = any(marker in text for marker in ("pytest", "go test", "cargo test", "mvn test", "gradle test", "./gradlew test", "npm test", "run_smoke", "run smoke", "run_integration", "run integration", "pytest", "go test", "cargo test", "mvn test", "gradle test", "./gradlew test", "npm test", "e2e"))
-        return build_only and not actual_test
 
     def _missing_relative_executable(self, command: str, cwd: str) -> str | None:
         try:

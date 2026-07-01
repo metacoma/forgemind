@@ -17,8 +17,11 @@ from .enums import (
     AcceptanceObligationStatus,
     AcceptanceObligationKind,
     BlockerKind,
+    CommandRole,
+    FileRole,
     StageFailureKind,
     DiscoveredImpactKind,
+    TestLevel,
 )
 from .openhands_packets import (
     OpenHandsRunFailure,
@@ -130,8 +133,11 @@ __all__ = [
     "AcceptanceObligationStatus",
     "AcceptanceObligationKind",
     "BlockerKind",
+    "CommandRole",
+    "FileRole",
     "StageFailureKind",
     "DiscoveredImpactKind",
+    "TestLevel",
     "OpenHandsRunFailure",
     "EnvironmentBlocker",
     "DiscoveredImpact",
