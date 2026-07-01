@@ -5,7 +5,7 @@ from pathlib import Path
 from artifact_workflow_runtime.artifacts import ArtifactStore
 from artifact_workflow_runtime.controller import WorkflowController
 from artifact_workflow_runtime.llm_backend import OpenAICompatibleLLMBackend
-from artifact_workflow_runtime.model_routing import ModelRoutingConfig, load_model_routing_config
+from artifact_workflow_runtime.model_routing import ModelRoutingConfig, DEFAULT_CANONICAL_MODEL, load_model_routing_config, normalize_canonical_model_name
 from artifact_workflow_runtime.openhands_adapter import OpenHandsAdapter, OpenHandsInstance
 from artifact_workflow_runtime.policy import StaticApprovalProvider
 from artifact_workflow_runtime.runtime_events import EventSink
@@ -16,10 +16,10 @@ def build_controller(
     *,
     artifact_dir: str,
     direct_llm_endpoint: str,
-    direct_llm_model: str,
+    direct_llm_model: str = DEFAULT_CANONICAL_MODEL,
     direct_llm_api_key: str | None,
     openhands_endpoint: str,
-    openhands_model: str,
+    openhands_model: str = DEFAULT_CANONICAL_MODEL,
     openhands_api_key: str | None,
     reuse: bool,
     sandbox_id: str | None,
@@ -30,12 +30,12 @@ def build_controller(
     strategy_selection_mode: StrategySelectionMode | str = StrategySelectionMode.RULE_BASED,
 ) -> WorkflowController:
     artifact_store = ArtifactStore(artifact_dir)
-    model_routing: ModelRoutingConfig | None = load_model_routing_config(config_path)
-    llm = OpenAICompatibleLLMBackend(direct_llm_endpoint, direct_llm_model, api_key=direct_llm_api_key)
+    model_routing: ModelRoutingConfig = load_model_routing_config(config_path) or ModelRoutingConfig.defaults()
+    llm = OpenAICompatibleLLMBackend(direct_llm_endpoint, normalize_canonical_model_name(direct_llm_model) or DEFAULT_CANONICAL_MODEL, api_key=direct_llm_api_key)
     openhands_instance = OpenHandsInstance(
         openhands_endpoint,
         api_key=openhands_api_key,
-        default_model=openhands_model,
+        default_model=normalize_canonical_model_name(openhands_model) or DEFAULT_CANONICAL_MODEL,
         reuse_sandbox=reuse,
         sandbox_id=sandbox_id,
         conversation_id=conversation_id,

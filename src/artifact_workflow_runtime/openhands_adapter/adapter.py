@@ -3,6 +3,7 @@ from __future__ import annotations
 from artifact_workflow_runtime.artifacts import ArtifactStore
 from artifact_workflow_runtime.evidence import EvidenceContractError, EvidenceExtractor, render_structured_evidence_summary
 from artifact_workflow_runtime.model_routing import ModelRoutingConfig
+from artifact_workflow_runtime.model_routing import DEFAULT_CANONICAL_MODEL, normalize_canonical_model_name, resolve_openhands_transport_model
 from artifact_workflow_runtime.models import (
     BackendKind,
     BlockerEvidence,
@@ -195,11 +196,13 @@ class OpenHandsAdapter:
         metadata = metadata or {}
         explicit = metadata.get("model_override")
         if isinstance(explicit, str) and explicit.strip():
-            return explicit.strip()
+            return resolve_openhands_transport_model(explicit.strip())
         slot_obj = metadata.get("model_slot")
         slot = str(slot_obj).strip() if isinstance(slot_obj, str) and slot_obj.strip() else fallback_slot
-        default_model = getattr(self.instance, "default_model", None)
-        return self.model_routing.resolve_openhands(slot, default_model) if self.model_routing else default_model
+        default_model = normalize_canonical_model_name(getattr(self.instance, "default_model", None)) or DEFAULT_CANONICAL_MODEL
+        if self.model_routing:
+            return self.model_routing.resolve_openhands_transport(slot, default_model)
+        return resolve_openhands_transport_model(default_model)
 
     @staticmethod
     def _forbidden_set(request: object) -> set[str]:

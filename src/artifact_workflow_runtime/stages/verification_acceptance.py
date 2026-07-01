@@ -121,7 +121,7 @@ class VerificationAcceptanceStageMixin:
                         allowed_inputs=["filesystem", "shell", "git", "test_runtime", "context_packet_text"],
                         forbidden_inputs=["change_workflow_decision", "declare_task_completed_or_accepted", "expand_task_scope", "edit_files", "write_files", "fix_code", "repair", "commit", "push", "git push", "git push --force", "git tag", "git merge", "git rebase", "create_pr", "open_pull_request", "publish", "release", "mutate_without_explicit_check_need"],
                         expected_outputs=["commands_run", "check_statuses", "outputs", "blockers", "missing_evidence"],
-                        metadata={"mode": "world_check", "controller_reason": strategy.reason, "model_slot": "verify", "model_override": _openhands_model_for(services, "verify")},
+                        metadata={"mode": "world_check", "controller_reason": strategy.reason, "model_slot": "world_verify", "model_override": _openhands_model_for(services, "world_verify")},
                     )
                     result = await services.openhands_adapter.verify(request)
                     artifact_ids.extend(artifact.id for artifact in result.artifacts)

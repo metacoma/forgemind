@@ -53,7 +53,7 @@ from artifact_workflow_runtime.strategy import (
     record_strategy_checkpoint_async as _record_strategy_checkpoint,
     strategy_metadata as _strategy_metadata,
 )
-from artifact_workflow_runtime.model_routing import normalize_verification_check_slot
+from artifact_workflow_runtime.model_routing import DEFAULT_CANONICAL_MODEL, normalize_canonical_model_name, normalize_verification_check_slot
 from artifact_workflow_runtime.decomposition import packet_from_state as _packet_from_state, packet_metadata as _packet_metadata, packet_prompt_block as _packet_prompt_block, planner_for as _planner_for, selector_for as _selector_for, status_from_execution_result as _packet_status_from_execution_result, update_packet_status as _update_packet_status
 from artifact_workflow_runtime.runtime_events import emit_event
 from artifact_workflow_runtime.graph.contracts import (
@@ -73,22 +73,22 @@ async def _emit(services: WorkflowServices, kind: str, stage: str, message: str,
 
 def _llm_model_for(services: WorkflowServices, slot: str) -> str | None:
     routing = services.model_routing
-    default_model = getattr(services.llm_backend, "default_model", None)
+    default_model = normalize_canonical_model_name(getattr(services.llm_backend, "default_model", None)) or DEFAULT_CANONICAL_MODEL
     return routing.resolve_direct_llm(slot, default_model) if routing else default_model
 
 
 def _openhands_model_for(services: WorkflowServices, slot: str) -> str | None:
     routing = services.model_routing
     instance = getattr(services.openhands_adapter, "instance", None)
-    default_model = getattr(instance, "default_model", None)
-    return routing.resolve_openhands(slot, default_model) if routing else default_model
+    default_model = normalize_canonical_model_name(getattr(instance, "default_model", None)) or DEFAULT_CANONICAL_MODEL
+    return routing.resolve_openhands_transport(slot, default_model) if routing else default_model
 
 
 
 def _llm_model_for_verification_check(services: WorkflowServices, check_name: object) -> str | None:
     routing = services.model_routing
-    default_model = getattr(services.llm_backend, "default_model", None)
-    return routing.resolve_verification_check(check_name, default_model) if routing else _llm_model_for(services, "verify")
+    default_model = normalize_canonical_model_name(getattr(services.llm_backend, "default_model", None)) or DEFAULT_CANONICAL_MODEL
+    return routing.resolve_verification_check(check_name, default_model) if routing else default_model
 
 
 

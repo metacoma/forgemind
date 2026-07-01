@@ -10,8 +10,30 @@ try:
 except Exception:  # pragma: no cover
     yaml = None
 
-DIRECT_LLM_SLOTS = ("classify", "route", "obligations", "plan", "verify")
-OPENHANDS_SLOTS = ("observe", "research", "execute", "publish")
+DEFAULT_CANONICAL_MODEL = "qwen36-35b"
+SECONDARY_CANONICAL_MODEL = "qwen36-27b"
+CANONICAL_MODEL_NAMES = (DEFAULT_CANONICAL_MODEL, SECONDARY_CANONICAL_MODEL)
+OPENHANDS_TRANSPORT_PREFIX = "openai/"
+
+DIRECT_LLM_SLOTS = (
+    "classify",
+    "route",
+    "obligations",
+    "plan",
+    "verify",
+    "execution_review",
+    "acceptance",
+    "finalize",
+    "strategy",
+)
+OPENHANDS_SLOTS = (
+    "observe",
+    "research",
+    "execute",
+    "repair",
+    "publish",
+    "world_verify",
+)
 VERIFICATION_CHECK_SLOTS = (
     "default",
     "build",
@@ -27,13 +49,7 @@ VERIFICATION_CHECK_SLOTS = (
 
 
 def normalize_verification_check_slot(check_name: object) -> str:
-    """Map a human verification check name to a stable routing slot.
-
-    Plans intentionally keep `verification_checks` human-readable. This helper
-    creates a deterministic control-plane key so model routing does not depend
-    on fragile exact prompt wording. Exact normalized custom keys are still
-    supported by `ModelRoutingConfig.resolve_verification_check`.
-    """
+    """Map a human verification check name to a stable routing slot."""
     text = str(check_name or "").strip().lower()
     normalized = "_".join(part for part in _split_key(text) if part)
     padded = f" {text.replace('-', ' ').replace('_', ' ')} "
@@ -69,33 +85,89 @@ class ModelRoutingConfigError(ValueError):
     """Raised when the model routing YAML is invalid or unsupported."""
 
 
+def normalize_canonical_model_name(value: object) -> str | None:
+    """Normalize config/user input into a canonical model id when possible.
+
+    Canonical config values should be plain ids like ``qwen36-35b``. For
+    compatibility, ``openai/qwen36-35b`` is accepted and normalized.
+    Unknown values are preserved so callers can opt into custom models without
+    changing the runtime code in multiple places.
+    """
+
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.startswith(OPENHANDS_TRANSPORT_PREFIX):
+        candidate = text[len(OPENHANDS_TRANSPORT_PREFIX) :].strip()
+        if candidate in CANONICAL_MODEL_NAMES:
+            return candidate
+    return text
+
+
+def resolve_openhands_transport_model(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    canonical = normalize_canonical_model_name(text)
+    if canonical is None:
+        return None
+    if canonical.startswith(OPENHANDS_TRANSPORT_PREFIX):
+        return canonical
+    return f"{OPENHANDS_TRANSPORT_PREFIX}{canonical}"
+
+
 @dataclass(slots=True)
 class ModelRoutingConfig:
     direct_llm: dict[str, str] = field(default_factory=dict)
     openhands: dict[str, str] = field(default_factory=dict)
     verification_checks: dict[str, str] = field(default_factory=dict)
     source_path: str | None = None
+    default_direct_llm: str = DEFAULT_CANONICAL_MODEL
+    default_openhands: str = DEFAULT_CANONICAL_MODEL
+    default_verification_checks: str = DEFAULT_CANONICAL_MODEL
 
-    def resolve_direct_llm(self, slot: str, default_model: str | None) -> str | None:
-        value = _clean_model(self.direct_llm.get(slot))
-        return value or default_model
+    def __post_init__(self) -> None:
+        self.direct_llm = _normalize_model_mapping(self.direct_llm)
+        self.openhands = _normalize_model_mapping(self.openhands)
+        self.verification_checks = _normalize_verification_model_mapping(self.verification_checks)
+        self.default_direct_llm = normalize_canonical_model_name(self.default_direct_llm) or DEFAULT_CANONICAL_MODEL
+        self.default_openhands = normalize_canonical_model_name(self.default_openhands) or DEFAULT_CANONICAL_MODEL
+        self.default_verification_checks = normalize_canonical_model_name(self.default_verification_checks) or DEFAULT_CANONICAL_MODEL
 
-    def resolve_openhands(self, slot: str, default_model: str | None) -> str | None:
-        value = _clean_model(self.openhands.get(slot))
-        return value or default_model
+    @classmethod
+    def defaults(cls) -> "ModelRoutingConfig":
+        return cls()
 
-    def resolve_verification_check(self, check_name: object, default_model: str | None) -> str | None:
+    def resolve_direct_llm(self, slot: str, default_model: str | None = None) -> str:
+        value = self.direct_llm.get(str(slot).strip())
+        return normalize_canonical_model_name(value) or self.default_direct_llm or normalize_canonical_model_name(default_model) or DEFAULT_CANONICAL_MODEL
+
+    def resolve_openhands(self, slot: str, default_model: str | None = None) -> str:
+        value = self.openhands.get(str(slot).strip())
+        return normalize_canonical_model_name(value) or self.default_openhands or normalize_canonical_model_name(default_model) or DEFAULT_CANONICAL_MODEL
+
+    def resolve_openhands_transport(self, slot: str, default_model: str | None = None) -> str:
+        return resolve_openhands_transport_model(self.resolve_openhands(slot, default_model)) or f"{OPENHANDS_TRANSPORT_PREFIX}{DEFAULT_CANONICAL_MODEL}"
+
+    def resolve_verification_check(self, check_name: object, default_model: str | None = None) -> str:
         custom_key = "_".join(part for part in _split_key(str(check_name or "")))
         canonical_key = normalize_verification_check_slot(check_name)
         for key in (custom_key, canonical_key, "default"):
-            value = _clean_model(self.verification_checks.get(key))
+            value = normalize_canonical_model_name(self.verification_checks.get(key))
             if value:
                 return value
-        return self.resolve_direct_llm("verify", default_model)
+        return self.default_verification_checks or normalize_canonical_model_name(default_model) or DEFAULT_CANONICAL_MODEL
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "source_path": self.source_path,
+            "default_direct_llm": self.default_direct_llm,
+            "default_openhands": self.default_openhands,
+            "default_verification_checks": self.default_verification_checks,
             "direct_llm": dict(self.direct_llm),
             "openhands": dict(self.openhands),
             "verification_checks": dict(self.verification_checks),
@@ -105,32 +177,30 @@ class ModelRoutingConfig:
         lines = []
         if self.source_path:
             lines.append(f"config: {self.source_path}")
+        lines.append(f"defaults: direct_llm={self.default_direct_llm} openhands={self.default_openhands} verification_checks={self.default_verification_checks}")
         if self.direct_llm:
             lines.append("direct_llm:")
             for key in DIRECT_LLM_SLOTS:
                 model = self.direct_llm.get(key)
                 if model:
                     lines.append(f"  {key}: {model}")
+            for key in sorted(k for k in self.direct_llm if k not in DIRECT_LLM_SLOTS):
+                lines.append(f"  {key}: {self.direct_llm[key]}")
         if self.openhands:
             lines.append("openhands:")
             for key in OPENHANDS_SLOTS:
                 model = self.openhands.get(key)
                 if model:
                     lines.append(f"  {key}: {model}")
+            for key in sorted(k for k in self.openhands if k not in OPENHANDS_SLOTS):
+                lines.append(f"  {key}: {self.openhands[key]}")
         if self.verification_checks:
             lines.append("verification_checks:")
             ordered_keys = [key for key in VERIFICATION_CHECK_SLOTS if key in self.verification_checks]
             ordered_keys.extend(sorted(key for key in self.verification_checks if key not in VERIFICATION_CHECK_SLOTS))
             for key in ordered_keys:
                 lines.append(f"  {key}: {self.verification_checks[key]}")
-        return lines or ["no per-stage model routing configured"]
-
-
-def _clean_model(value: object) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
+        return lines
 
 
 def _normalize_model_mapping(value: object) -> dict[str, str]:
@@ -139,7 +209,7 @@ def _normalize_model_mapping(value: object) -> dict[str, str]:
     out: dict[str, str] = {}
     for key, raw in value.items():
         slot = str(key).strip()
-        model = _clean_model(raw)
+        model = normalize_canonical_model_name(raw)
         if slot and model:
             out[slot] = model
     return out
@@ -150,7 +220,7 @@ def _normalize_verification_model_mapping(value: object) -> dict[str, str]:
         return {}
     out: dict[str, str] = {}
     for key, raw in value.items():
-        model = _clean_model(raw)
+        model = normalize_canonical_model_name(raw)
         if not model:
             continue
         slot = normalize_verification_check_slot(key)
@@ -219,7 +289,7 @@ def load_model_routing_config(config_path: str | None = None) -> ModelRoutingCon
                 if not isinstance(raw, dict):
                     continue
                 backend = str(raw.get("backend") or "").strip().lower()
-                model = _clean_model(raw.get("model"))
+                model = normalize_canonical_model_name(raw.get("model"))
                 if not model:
                     continue
                 if backend == "direct_llm":
@@ -233,6 +303,5 @@ def load_model_routing_config(config_path: str | None = None) -> ModelRoutingCon
             verification_checks=verification_checks,
             source_path=str(candidate),
         )
-        if resolved.direct_llm or resolved.openhands or resolved.verification_checks:
-            return resolved
+        return resolved
     return None

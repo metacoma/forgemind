@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from artifact_workflow_runtime.model_routing import DEFAULT_CANONICAL_MODEL, normalize_canonical_model_name
 from artifact_workflow_runtime.models.state import ControllerDecision, WorkflowStateSnapshot
 
 from .advisor import LLMStrategyAdvisor, StrategyContextBuilder
@@ -222,7 +223,7 @@ def strategy_metadata(services: Any, state: Mapping[str, Any]) -> dict[str, Any]
 def _strategy_model_override(services: Any) -> str | None:
     routing = getattr(services, "model_routing", None)
     llm_backend = getattr(services, "llm_backend", None)
-    default_model = getattr(llm_backend, "default_model", None)
+    default_model = normalize_canonical_model_name(getattr(llm_backend, "default_model", None)) or DEFAULT_CANONICAL_MODEL
     if routing is None:
         return default_model
     try:

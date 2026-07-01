@@ -881,10 +881,10 @@ async def test_verification_checks_use_per_check_model_routing(tmp_path) -> None
         },
     )
     routing = ModelRoutingConfig(
-        direct_llm={"verify": "openai/default-verifier"},
+        direct_llm={"verify": "qwen36-35b"},
         verification_checks={
-            "unit_tests": "openai/qwen36-27b",
-            "pr_checks": "openai/qwen36-35b",
+            "unit_tests": "qwen36-27b",
+            "pr_checks": "qwen36-35b",
         },
     )
     controller = WorkflowController(
@@ -902,8 +902,8 @@ async def test_verification_checks_use_per_check_model_routing(tmp_path) -> None
     assert len(llm.calls["verification_check"]) == 3
     assert len(llm.calls["verification"]) == 0
     assert len(openhands.calls["publish"]) == 1
-    assert llm.calls["verification_check"][0].metadata["model_override"] == "openai/qwen36-27b"
-    assert llm.calls["verification_check"][1].metadata["model_override"] == "openai/qwen36-35b"
+    assert llm.calls["verification_check"][0].metadata["model_override"] == "qwen36-27b"
+    assert llm.calls["verification_check"][1].metadata["model_override"] == "qwen36-35b"
     assert llm.calls["verification_check"][0].metadata["verification_check"] == "unit_tests"
     assert llm.calls["verification_check"][1].metadata["verification_check"] == "pr_checks"
 

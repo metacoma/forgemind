@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from artifact_workflow_runtime.model_routing import ModelRoutingConfig
+from artifact_workflow_runtime.model_routing import ModelRoutingConfig, resolve_openhands_transport_model
 from artifact_workflow_runtime.runtime_events import EventSink, emit_event
 
 from .client import (
@@ -49,14 +49,14 @@ class OpenHandsInstance:
         client = OpenHandsClient(self.endpoint, api_key=self.api_key)
         sandbox_id = await find_reusable_sandbox_for_model(
             client,
-            model=model or self.default_model,
+            model=resolve_openhands_transport_model(model or self.default_model),
             sandbox_cache=self._sandbox_cache,
         )
         if sandbox_id:
             self._resolved_sandbox_id = sandbox_id
-            await emit_event(self.event_sink, "sandbox_reuse_found", "transport", "Found reusable sandbox", {"sandbox_id": sandbox_id, "model": model or self.default_model, "mode": "reuse"})
+            await emit_event(self.event_sink, "sandbox_reuse_found", "transport", "Found reusable sandbox", {"sandbox_id": sandbox_id, "model": resolve_openhands_transport_model(model or self.default_model), "mode": "reuse"})
         else:
-            await emit_event(self.event_sink, "sandbox_reuse_miss", "transport", "No reusable sandbox found; starting fresh", {"model": model or self.default_model, "mode": "fresh"})
+            await emit_event(self.event_sink, "sandbox_reuse_miss", "transport", "No reusable sandbox found; starting fresh", {"model": resolve_openhands_transport_model(model or self.default_model), "mode": "fresh"})
         return sandbox_id
 
     async def _run_new(
@@ -75,7 +75,7 @@ class OpenHandsInstance:
             {
                 "sandbox_id": resolved_sandbox_id,
                 "conversation_id": self.explicit_conversation_id,
-                "model": model or self.default_model,
+                "model": resolve_openhands_transport_model(model or self.default_model),
                 "mode": "new",
                 "reuse_sandbox": bool(resolved_sandbox_id),
             },
@@ -84,7 +84,7 @@ class OpenHandsInstance:
             endpoint=self.endpoint,
             api_key=self.api_key,
             prompt=prompt,
-            llm_model=model or self.default_model,
+            llm_model=resolve_openhands_transport_model(model or self.default_model),
             sandbox_id=resolved_sandbox_id,
             conversation_id=self.explicit_conversation_id,
             title=title,
@@ -106,7 +106,7 @@ class OpenHandsInstance:
         )
         if self.reuse_sandbox and result.start.sandbox_id:
             self._resolved_sandbox_id = result.start.sandbox_id
-            resolved_model = model or self.default_model
+            resolved_model = resolve_openhands_transport_model(model or self.default_model)
             if resolved_model:
                 self._sandbox_cache[resolved_model] = result.start.sandbox_id
         return result

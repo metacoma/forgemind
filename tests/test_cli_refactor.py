@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 
 from artifact_workflow_runtime.cli import build_parser
+from artifact_workflow_runtime.model_routing import DEFAULT_CANONICAL_MODEL
 
 
 def _base_args() -> list[str]:
@@ -66,3 +67,13 @@ async def test_cli_passes_strategy_selection_mode_to_runtime(monkeypatch: pytest
 
     assert rc == 0
     assert seen["strategy_selection_mode"] == "hybrid"
+
+
+def test_cli_defaults_models_to_qwen35() -> None:
+    args = build_parser().parse_args([
+        "--task", "inspect repo",
+        "--direct-llm-endpoint", "http://llm",
+        "--openhands-endpoint", "http://openhands",
+    ])
+    assert args.direct_llm_model == DEFAULT_CANONICAL_MODEL
+    assert args.openhands_model == DEFAULT_CANONICAL_MODEL

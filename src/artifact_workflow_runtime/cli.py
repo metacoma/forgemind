@@ -5,6 +5,7 @@ import asyncio
 import json
 
 from artifact_workflow_runtime.models import Task
+from artifact_workflow_runtime.model_routing import DEFAULT_CANONICAL_MODEL
 from artifact_workflow_runtime.runtime_factory import build_controller
 from artifact_workflow_runtime.strategy import StrategySelectionMode
 
@@ -24,11 +25,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument("--direct-llm-endpoint", required=True)
-    parser.add_argument("--direct-llm-model", required=True)
+    parser.add_argument("--direct-llm-model", default=DEFAULT_CANONICAL_MODEL)
     parser.add_argument("--direct-llm-api-key", default=None)
 
     parser.add_argument("--openhands-endpoint", required=True)
-    parser.add_argument("--openhands-model", required=True)
+    parser.add_argument("--openhands-model", default=DEFAULT_CANONICAL_MODEL)
     parser.add_argument("--openhands-api-key", default=None)
     parser.add_argument("--reuse", action="store_true", help="Reuse an existing OpenHands sandbox for the same model instead of always starting fresh")
     parser.add_argument("--sandbox-id", default=None, help="Explicit OpenHands sandbox_id to run against")
