@@ -1,0 +1,18 @@
+scenario_id: compose_deploy_needs_postcheck
+title: Compose deployment with postcheck requirement
+description: Runtime should preserve postcheck evidence as part of acceptance.
+task_text: Deploy the compose change and produce a post-deploy verification summary.
+tags: [compose_deploy, host, postcheck]
+execution_family: host_operation
+difficulty: medium
+target_runtime_profile: compose_deploy_postcheck
+environment_profile: host
+expected_obligations: [tests_passed, documentation_updated]
+required_evidence: [commands_run, postcheck_summary]
+required_stage_patterns: [observe, obligations, plan, execute, verify, acceptance]
+allowed_terminal_statuses: [completed]
+forbidden_terminal_statuses: [failed]
+expected_reentry_behavior: []
+expected_packet_patterns: [implementation]
+success_criteria: [postcheck_recorded]
+notes: Compose deployment with stronger evidence expectations.

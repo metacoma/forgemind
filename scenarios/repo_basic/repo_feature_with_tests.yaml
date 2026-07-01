@@ -1,0 +1,18 @@
+scenario_id: repo_feature_with_tests
+title: Repository feature with explicit tests
+description: Same as the basic feature flow but scored as a test-obligation scenario.
+task_text: Implement the small feature and prove it with tests.
+tags: [repo, feature, tests]
+execution_family: repository_change
+difficulty: small
+target_runtime_profile: repo_feature_simple
+environment_profile: docker_container
+expected_obligations: [tests_passed]
+required_evidence: [commands_run, files_changed, tests]
+required_stage_patterns: [observe, obligations, plan, execute, verify, acceptance]
+allowed_terminal_statuses: [completed]
+forbidden_terminal_statuses: [failed, needs_environment]
+expected_reentry_behavior: []
+expected_packet_patterns: [implementation]
+success_criteria: [tests_present]
+notes: Reuses the simple profile but enforces test evidence in scoring.

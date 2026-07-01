@@ -1,0 +1,18 @@
+scenario_id: repo_publish_repair_success
+title: Publish checks fail once and repair succeeds
+description: Runtime should repair after failed publish checks and republish successfully.
+task_text: Implement the change, open a PR, and ensure PR checks are green.
+tags: [repo, publish, repair]
+execution_family: repository_change
+difficulty: medium
+target_runtime_profile: repo_publish_repair_success
+environment_profile: docker_container
+expected_obligations: [tests_passed]
+required_evidence: [commands_run, files_changed, tests, pr_checks]
+required_stage_patterns: [observe, plan, execute, review, publish, verify, acceptance]
+allowed_terminal_statuses: [completed]
+forbidden_terminal_statuses: [failed, blocked]
+expected_reentry_behavior: []
+expected_packet_patterns: [implementation, repair]
+success_criteria: [repair_loop_success]
+notes: Publish/repair flow.

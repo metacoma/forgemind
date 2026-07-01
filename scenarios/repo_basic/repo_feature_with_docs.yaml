@@ -1,0 +1,18 @@
+scenario_id: repo_feature_with_docs
+title: Repository feature with docs update
+description: Public feature change that must update README.
+task_text: Add a public feature and update the documentation.
+tags: [repo, feature, docs]
+execution_family: repository_change
+difficulty: medium
+target_runtime_profile: repo_feature_with_docs
+environment_profile: docker_container
+expected_obligations: [documentation_updated, tests_passed]
+required_evidence: [commands_run, files_changed, tests]
+required_stage_patterns: [observe, obligations, plan, execute, verify, acceptance]
+allowed_terminal_statuses: [completed]
+forbidden_terminal_statuses: [failed, needs_environment]
+expected_reentry_behavior: []
+expected_packet_patterns: [implementation, docs]
+success_criteria: [docs_updated]
+notes: Up-front docs obligation.

@@ -1,0 +1,18 @@
+scenario_id: repo_integration_required
+title: Integration-required repo change with blocked environment
+description: Runtime must avoid false success when integration environment is missing.
+task_text: Add a C++ gRPC client and validate it with Freeplane integration tests.
+tags: [repo, integration, blocked_env]
+execution_family: repository_change
+difficulty: medium
+target_runtime_profile: repo_integration_required
+environment_profile: docker_container
+expected_obligations: [tests_passed]
+required_evidence: [commands_run, files_changed, blockers]
+required_stage_patterns: [observe, obligations, plan, execute, verify, acceptance]
+allowed_terminal_statuses: [needs_environment, blocked]
+forbidden_terminal_statuses: [completed]
+expected_reentry_behavior: [must_not_finalize_if_env_missing]
+expected_packet_patterns: [implementation, integration]
+success_criteria: [environment_block_detected]
+notes: Blocked-env regression catcher.

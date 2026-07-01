@@ -1,0 +1,18 @@
+scenario_id: repo_reentry_required_docs_gap
+title: Verification discovers docs gap and forces re-entry
+description: Runtime should re-enter obligations/plan when docs impact is discovered late.
+task_text: Add a public feature and keep the repository complete.
+tags: [repo, docs, reentry_required]
+execution_family: repository_change
+difficulty: medium
+target_runtime_profile: repo_reentry_docs_gap
+environment_profile: docker_container
+expected_obligations: [documentation_updated, tests_passed]
+required_evidence: [commands_run, files_changed, tests]
+required_stage_patterns: [observe, obligations, plan, execute, verify, acceptance]
+allowed_terminal_statuses: [completed]
+forbidden_terminal_statuses: [failed]
+expected_reentry_behavior: [must_reenter_obligations_if_docs_gap_found]
+expected_packet_patterns: [implementation, docs]
+success_criteria: [reentry_occurs, docs_fixed]
+notes: Pipeline-wide re-entry scenario.

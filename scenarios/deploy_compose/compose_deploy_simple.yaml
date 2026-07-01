@@ -1,0 +1,18 @@
+scenario_id: compose_deploy_simple
+title: Simple compose deployment
+description: Host/compose mutation with smoke verification.
+task_text: Update docker compose and verify the service health.
+tags: [compose_deploy, host]
+execution_family: host_operation
+difficulty: medium
+target_runtime_profile: compose_deploy_simple
+environment_profile: host
+expected_obligations: [tests_passed, documentation_updated]
+required_evidence: [commands_run, postcheck_summary]
+required_stage_patterns: [observe, obligations, plan, execute, verify, acceptance]
+allowed_terminal_statuses: [completed]
+forbidden_terminal_statuses: [failed]
+expected_reentry_behavior: []
+expected_packet_patterns: [implementation]
+success_criteria: [deploy_validated]
+notes: Basic host/compose scenario.

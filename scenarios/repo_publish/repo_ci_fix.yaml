@@ -1,0 +1,18 @@
+scenario_id: repo_ci_fix
+title: Repository CI workflow fix
+description: Runtime must surface CI/build obligations and complete cleanly.
+task_text: Fix the CI workflow in the repository.
+tags: [repo, ci, build]
+execution_family: repository_change
+difficulty: small
+target_runtime_profile: repo_ci_fix
+environment_profile: docker_container
+expected_obligations: [ci_or_build_updated, tests_passed]
+required_evidence: [commands_run, files_changed, tests]
+required_stage_patterns: [observe, obligations, plan, execute, verify, acceptance]
+allowed_terminal_statuses: [completed]
+forbidden_terminal_statuses: [failed]
+expected_reentry_behavior: []
+expected_packet_patterns: [implementation]
+success_criteria: [ci_fixed]
+notes: CI/build-specific repo scenario.

@@ -1,0 +1,18 @@
+scenario_id: host_blocked_missing_prerequisite
+title: Host change blocked by missing prerequisite
+description: Runtime must surface missing prerequisite as non-success.
+task_text: Apply a host config change that depends on a missing prerequisite.
+tags: [host, blocked_env]
+execution_family: host_operation
+difficulty: medium
+target_runtime_profile: host_blocked_missing_prerequisite
+environment_profile: host
+expected_obligations: []
+required_evidence: [commands_run, blockers]
+required_stage_patterns: [observe, obligations, plan, execute, verify, acceptance]
+allowed_terminal_statuses: [needs_environment, blocked]
+forbidden_terminal_statuses: [completed]
+expected_reentry_behavior: [must_not_finalize_if_env_missing]
+expected_packet_patterns: [implementation]
+success_criteria: [prerequisite_block_detected]
+notes: Host blocked-path scenario.

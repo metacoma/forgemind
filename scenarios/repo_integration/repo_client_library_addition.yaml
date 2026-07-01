@@ -1,0 +1,18 @@
+scenario_id: repo_client_library_addition
+title: Add client library with integration expectations
+description: Library addition should drive integration, docs, and codegen/build obligations.
+task_text: Add a Python client library and update the surrounding project surfaces.
+tags: [repo, integration, docs, codegen]
+execution_family: repository_change
+difficulty: medium
+target_runtime_profile: repo_client_library_addition
+environment_profile: docker_container
+expected_obligations: [tests_passed, documentation_updated, examples_updated, ci_or_build_updated, codegen_or_tooling_updated]
+required_evidence: [commands_run, files_changed, tests]
+required_stage_patterns: [observe, obligations, plan, execute, verify, acceptance]
+allowed_terminal_statuses: [completed]
+forbidden_terminal_statuses: [failed, needs_environment]
+expected_reentry_behavior: []
+expected_packet_patterns: [implementation, integration, docs]
+success_criteria: [client_added, integration_validated]
+notes: Integration-rich repo change.

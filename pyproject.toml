@@ -31,6 +31,7 @@ tui = [
 [project.scripts]
 artifact-workflow-run = "artifact_workflow_runtime.cli:main"
 artifact-workflow-tui = "artifact_workflow_runtime.tui.launcher:main"
+artifact-workflow-eval = "artifact_workflow_runtime.evaluation.cli:main"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
