@@ -1,8 +1,28 @@
 from __future__ import annotations
 
 from .common import *
-from artifact_workflow_runtime.control_plane.stage_filters import execute_prompt_steps, execute_success_criteria as build_execute_success_criteria, execute_verification_commands
+from artifact_workflow_runtime.control_plane.stage_filters import execute_prompt_steps, execute_success_criteria as build_execute_success_criteria, execute_verification_commands, packet_scoped_execute_items, packet_scoped_expected_changes
 from artifact_workflow_runtime.state.workspace import infer_workspace_root_from_execution, workspace_root_from_state
+from artifact_workflow_runtime.environment import EnvironmentPlan, EnvironmentPlanReconciliation
+
+
+def _attribute_execution_mutation(result: ExecutionResult, *, run_id: str, stage: str, packet_id: str | None) -> ExecutionResult:
+    evidence = result.structured_evidence
+    mutation = evidence.mutation_summary
+    update = {
+        "created_by_run_id": mutation.created_by_run_id or run_id,
+        "created_by_stage": mutation.created_by_stage or stage,
+        "created_by_packet_id": mutation.created_by_packet_id or packet_id,
+        "first_seen_in_artifact_id": mutation.first_seen_in_artifact_id or (result.artifacts[0].id if result.artifacts else None),
+        "current_packet_delta": mutation.current_packet_delta or mutation.files_changed,
+        "workflow_cumulative_delta": mutation.workflow_cumulative_delta or mutation.files_changed,
+    }
+    updated_mutation = mutation.model_copy(update=update)
+    updated_evidence = evidence.model_copy(update={"mutation_summary": updated_mutation})
+    bundle = result.evidence_bundle
+    if bundle is not None:
+        bundle = bundle.model_copy(update={"structured": updated_evidence})
+    return result.model_copy(update={"structured_evidence": updated_evidence, "evidence_bundle": bundle})
 
 
 class ExecutionStageMixin:
@@ -52,8 +72,9 @@ class ExecutionStageMixin:
             active_packet_id = packet_selection.selected_packet_id
             packet = _packet_from_state({"active_packet_id": active_packet_id}, decomposition_plan)
             packet_block = _packet_prompt_block(packet)
-            execute_steps = execute_prompt_steps(plan)
-            execute_success = build_execute_success_criteria(plan)
+            execute_steps = packet_scoped_execute_items(execute_prompt_steps(plan), packet)
+            execute_success = packet_scoped_execute_items(build_execute_success_criteria(plan), packet)
+            expected_changes = packet_scoped_expected_changes(list(plan.expected_repo_changes), packet)
             if packet is not None and packet.success_criteria:
                 execute_success = list(dict.fromkeys([*execute_success, *packet.success_criteria]))
 
@@ -89,8 +110,8 @@ class ExecutionStageMixin:
                 prompt=prompt,
                 objective="execute approved controller plan",
                 plan_steps=execute_steps,
-                expected_changes=list(plan.expected_repo_changes),
-                verification_commands=execute_verification_commands(plan),
+                expected_changes=expected_changes,
+                verification_commands=packet_scoped_execute_items(execute_verification_commands(plan), packet),
                 scope_constraints=["do not choose next workflow step", "do not expand task scope", "collect structured evidence"],
                 plan_summary=plan.summary,
                 context_packet_id=context_packet.id if context_packet else None,
@@ -103,7 +124,27 @@ class ExecutionStageMixin:
             result = await services.openhands_adapter.execute(request)
             artifact_ids = list(state_artifact_ids)
             artifact_ids.extend(artifact.id for artifact in result.artifacts)
+            result = _attribute_execution_mutation(result, run_id=result.id, stage="execute", packet_id=active_packet_id)
             workspace_root = infer_workspace_root_from_execution(result) or workspace_root_from_state(state)
+
+            env_reconciliation_artifact_id = None
+            updated_environment_plan = state.get("environment_plan")
+            if state.get("environment_plan") is not None:
+                env_plan = EnvironmentPlan.model_validate(state["environment_plan"])
+                reconciled_env_plan, env_changes = EnvironmentPlanReconciliation().reconcile_execution(
+                    env_plan,
+                    result,
+                    evidence_artifact_ids=[artifact.id for artifact in result.artifacts],
+                )
+                if env_changes:
+                    env_reconciliation_artifact = services.artifact_store.add_json(
+                        "environment_plan_reconciliation",
+                        {"changes": env_changes, "execution_result_id": result.id},
+                        metadata={"task_id": task.id, "stage": "execute"},
+                    )
+                    env_reconciliation_artifact_id = env_reconciliation_artifact.id
+                    artifact_ids.append(env_reconciliation_artifact.id)
+                    updated_environment_plan = reconciled_env_plan.model_dump(mode="json") if reconciled_env_plan is not None else None
 
             packet_history = list(state.get("packet_history") or [])
             updated_decomposition = decomposition_plan
@@ -141,12 +182,15 @@ class ExecutionStageMixin:
             if decomposition_artifact is not None:
                 added_artifacts.append(decomposition_artifact.id)
             added_artifacts.append(packet_selection_artifact.id)
+            if env_reconciliation_artifact_id is not None and env_reconciliation_artifact_id not in added_artifacts:
+                added_artifacts.append(env_reconciliation_artifact_id)
             if packet is not None:
                 added_artifacts.extend([aid for aid in artifact_ids if aid not in (state.get("artifact_ids") or []) and aid not in added_artifacts])
             return {
                 "execution_request": request.model_dump(mode="json"),
                 "execution_result": result.model_dump(mode="json"),
                 "workspace_root": workspace_root,
+                "environment_plan": updated_environment_plan,
                 "decomposition_plan": updated_decomposition.model_dump(mode="json"),
                 "active_packet_id": active_packet_id,
                 "packet_history": packet_history,

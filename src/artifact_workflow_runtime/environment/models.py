@@ -16,7 +16,10 @@ class EnvironmentPlanItem(RuntimeModel):
     bootstrap_status: str = "not_attempted"
     runtime_usable: bool = False
     runtime_probe_command: str | None = None
+    resolved_version: str | None = None
+    evidence_artifact_ids: list[str] = Field(default_factory=list)
     failure_mode: str = "needs_environment"
+    metadata: dict[str, object] = Field(default_factory=dict)
 
 
 class EnvironmentPlan(RuntimeModel):

@@ -37,16 +37,16 @@ def update_packet_status(
     stage: str,
     execution_result_id: str | None = None,
 ) -> tuple[DecompositionPlan, PacketHistoryEntry]:
-    packets: list[ExecutionPacket] = []
     previous = None
+    target_packet = None
     for packet in plan.packets:
         if packet.packet_id == packet_id:
             previous = packet.status
-            packets.append(packet.model_copy(update={"status": new_status}))
-        else:
-            packets.append(packet)
-    if previous is None:
+            target_packet = packet
+            break
+    if previous is None or target_packet is None:
         raise KeyError(f"Unknown packet id: {packet_id}")
+
     history = PacketHistoryEntry(
         packet_id=packet_id,
         previous_status=previous,
@@ -55,6 +55,21 @@ def update_packet_status(
         stage=stage,
         execution_result_id=execution_result_id,
     )
+
+    packets: list[ExecutionPacket] = []
+    for packet in plan.packets:
+        if packet.packet_id != packet_id:
+            packets.append(packet)
+            continue
+        metadata = dict(packet.metadata)
+        if previous == ExecutionPacketStatus.FAILED and new_status != ExecutionPacketStatus.FAILED:
+            metadata.update({
+                "previous_failed_status": previous.value,
+                "superseded_by_execution_result_id": execution_result_id,
+                "superseded_at": history.created_at,
+                "superseded_reason": reason,
+            })
+        packets.append(packet.model_copy(update={"status": new_status, "updated_at": history.created_at, "metadata": metadata}))
     return plan.model_copy(update={"packets": packets, "updated_at": history.created_at}), history
 
 
@@ -106,16 +121,27 @@ def packet_from_state(state: Mapping[str, Any], plan: DecompositionPlan) -> Exec
 
 def status_from_execution_result(result: ExecutionResult) -> ExecutionPacketStatus:
     status_text = str(result.execution_status.value if hasattr(result.execution_status, "value") else result.execution_status).lower()
-    blocker_text = " ".join(getattr(item, "summary", "") for item in result.structured_evidence.blockers).lower()
+    non_deferred_blockers = [
+        blocker for blocker in result.structured_evidence.blockers
+        if not _deferred_publish_blocker(getattr(blocker, "summary", ""))
+    ]
+    blocker_text = " ".join(getattr(item, "summary", "") for item in non_deferred_blockers).lower()
     env_blocked = any(
         marker in blocker_text
-        for marker in ("environment", "runtime prerequisite", "bootstrap", "setup", "dependency", "not installed", "not found", "integration unavailable")
+        for marker in ("environment", "runtime prerequisite", "bootstrap", "setup", "dependency", "not installed", "not found", "integration unavailable", "runtime unavailable", "freeplane", "xvfb", "display")
     )
-    if result.ok and status_text in {"succeeded", "partial"} and not result.structured_evidence.blockers:
-        return ExecutionPacketStatus.COMPLETED
+    if result.ok and result.stage_failure is None and status_text in {"succeeded", "partial"}:
+        return ExecutionPacketStatus.BLOCKED if env_blocked else ExecutionPacketStatus.COMPLETED
     if status_text == "blocked" or env_blocked:
         return ExecutionPacketStatus.BLOCKED
     return ExecutionPacketStatus.FAILED
+
+
+def _deferred_publish_blocker(summary: str) -> bool:
+    text = str(summary or "").lower()
+    publish_terms = ("commit", "committed", "push", "pushed", "pull request", " pr", "pr ", "create_pr", "open_pull_request", "wait_pr_checks")
+    deferral_terms = ("forbidden", "deferred", "publish", "publisher", "not been", "not run yet", "has not", "missing evidence", "per packet constraints", "do not")
+    return any(term in text for term in publish_terms) and any(term in text for term in deferral_terms)
 
 
 def plan_completed(plan: DecompositionPlan) -> bool:
@@ -147,7 +173,7 @@ def progression_decision(
             plan_completed=True,
             terminal=False,
             blocked=False,
-            reason="All execution packets are completed or skipped; runtime may continue to QA/verification.",
+            reason="continue_after_successful_packet: all execution packets are completed or skipped; runtime may continue to QA/verification.",
         )
 
     selection = PacketSelector().select(plan=plan, active_strategy=strategy)
@@ -170,7 +196,7 @@ def progression_decision(
             reason=selection.reason,
         )
 
-    failed_packets = [packet.packet_id for packet in plan.packets if packet.status == ExecutionPacketStatus.FAILED]
+    failed_packets = [packet.packet_id for packet in plan.packets if packet.status == ExecutionPacketStatus.FAILED and not packet.metadata.get("superseded_by_execution_result_id")]
     blocked_packets = [packet.packet_id for packet in plan.packets if packet.status == ExecutionPacketStatus.BLOCKED]
     pending_packets = [packet.packet_id for packet in plan.packets if packet.status == ExecutionPacketStatus.PENDING]
 

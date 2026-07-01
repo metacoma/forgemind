@@ -80,6 +80,10 @@ class WorkflowStatus(str, Enum):
     PARTIALLY_COMPLETED = "partially_completed"
     NEEDS_HUMAN_REVIEW = "needs_human_review"
     NEEDS_ENVIRONMENT = "needs_environment"
+    RUNTIME_PROOF_BLOCKED = "runtime_proof_blocked"
+    IMPLEMENTATION_PASSED_RUNTIME_BLOCKED = "implementation_passed_runtime_blocked"
+    PUBLISH_NOT_REACHED = "publish_not_reached"
+    CONTROL_PLANE_PROGRESSION_ERROR = "control_plane_progression_error"
     FAILED = "failed"
 
     @classmethod

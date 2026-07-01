@@ -11,6 +11,37 @@ from artifact_workflow_runtime.decomposition import DecompositionPlan, Decomposi
 from artifact_workflow_runtime.control_plane.agent_retry import AgentRetryPolicy
 
 
+def _execution_environment_blocker_summaries(execution: ExecutionResult | None) -> list[str]:
+    if execution is None:
+        return []
+    out: list[str] = []
+    for blocker in execution.structured_evidence.blockers:
+        summary = str(blocker.summary or "").strip()
+        if not summary or _deferred_publish_summary(summary):
+            continue
+        kind = _blocker_kind_value(getattr(blocker, "blocker_kind", BlockerKind.GENERIC))
+        if kind in {_blocker_kind_value(item) for item in _ENVIRONMENT_BLOCKER_KINDS}:
+            out.append(summary)
+            continue
+        lowered = summary.lower()
+        if any(marker in lowered for marker in ("environment unavailable", "integration environment", "runtime unavailable", "runtime prerequisite", "freeplane", "xvfb", "display", "not installed", "not found")):
+            out.append(summary)
+    return _unique(out)
+
+
+def _execution_has_usable_implementation_evidence(execution: ExecutionResult) -> bool:
+    evidence = execution.structured_evidence
+    if execution.ok and execution.stage_failure is None:
+        for command in evidence.commands_run:
+            if command.exit_code == 0 and any(marker in command.command.lower() for marker in ("build", "compile", "dotnet test", "pytest", "go test", "cargo test", "mvn test", "gradle test", "npm test")):
+                return True
+        for test in evidence.tests:
+            if str(test.status).lower() in {"passed", "success", "succeeded", "ok"} or test.passed is True:
+                return True
+        return bool(evidence.mutation_summary.changed or evidence.files_changed)
+    return False
+
+
 class ReviewQAStageMixin:
     async def review_node(self, state: WorkflowState) -> dict[str, Any]:
         services = self.services
@@ -37,7 +68,7 @@ class ReviewQAStageMixin:
         status = "pass"
         summary_parts = []
         failing_checks: list[str] = []
-        env_blockers: list[str] = []
+        env_blockers: list[str] = _execution_environment_blocker_summaries(execution)
         if retry_decision.retry_allowed:
             status = "agent_retry"
             summary_parts.append(retry_decision.reason)
@@ -54,6 +85,12 @@ class ReviewQAStageMixin:
         elif execution.stage_failure is not None and status == "pass":
             status = "fail_code"
             summary_parts.append(execution.stage_failure.summary)
+        if status == "pass" and env_blockers:
+            status = "runtime_proof_blocked" if _execution_has_usable_implementation_evidence(execution) else "needs_environment"
+            summary_parts.append(
+                "Implementation/build/unit evidence is usable, but runtime/integration proof remains blocked by environment: "
+                + "; ".join(env_blockers)
+            )
         # Missing derived deliverables are important, but they should flow into
         # QA/acceptance and possible obligation re-entry rather than forcing an
         # eager repair loop immediately after execute. This keeps review focused
@@ -64,7 +101,8 @@ class ReviewQAStageMixin:
             summary_parts.append("Execution evidence satisfies review gate and can enter QA planning.")
         review = QAReview(task_id=task.id, status=status, summary=" ".join(summary_parts), failing_checks=_unique(failing_checks), environment_blockers=_unique(env_blockers))
         artifact = services.artifact_store.add_json("review_result", review.model_dump(mode="json"), metadata={"task_id": task.id, "status": status})
-        selected_next = "execute" if status == "agent_retry" else ("qa_plan" if status == "pass" else ("finalize" if status == "policy_violation" else "repair"))
+        successish_review_statuses = {"pass", "runtime_proof_blocked", "needs_environment"}
+        selected_next = "execute" if status == "agent_retry" else ("qa_plan" if status in successish_review_statuses else ("finalize" if status == "policy_violation" else "repair"))
         packet_progression = None
         progression_artifact_id = None
         next_active_packet_id = state.get("active_packet_id")
@@ -105,8 +143,28 @@ class ReviewQAStageMixin:
                     metadata={"task_id": task.id, "packet_id": state.get("active_packet_id"), "stage": "agent_retry"},
                 )
                 packet_retry_artifact_id = packet_retry_artifact.id
-        if status == "pass" and state.get("decomposition_plan") is not None:
-            decomposition_plan = DecompositionPlan.model_validate(state["decomposition_plan"])
+        if status in successish_review_statuses and state.get("decomposition_plan") is not None:
+            decomposition_plan = DecompositionPlan.model_validate(updated_decomposition_for_retry)
+            if state.get("active_packet_id"):
+                active_packet = next((packet for packet in decomposition_plan.packets if packet.packet_id == state.get("active_packet_id")), None)
+                if active_packet is not None and active_packet.status == ExecutionPacketStatus.FAILED and execution.ok and execution.stage_failure is None:
+                    reconciled_status = ExecutionPacketStatus.BLOCKED if env_blockers else ExecutionPacketStatus.COMPLETED
+                    decomposition_plan, reconcile_entry = _update_packet_status(
+                        decomposition_plan,
+                        packet_id=active_packet.packet_id,
+                        new_status=reconciled_status,
+                        reason="superseded_failed_packet_then_continue: latest successful execution and review evidence supersede stale failed packet",
+                        stage="review_reconciliation",
+                        execution_result_id=execution.id,
+                    )
+                    updated_decomposition_for_retry = decomposition_plan.model_dump(mode="json")
+                    packet_history = [*packet_history, reconcile_entry.model_dump(mode="json")]
+                    packet_retry_artifact = services.artifact_store.add_json(
+                        "packet_status_reconciliation",
+                        reconcile_entry.model_dump(mode="json"),
+                        metadata={"task_id": task.id, "packet_id": active_packet.packet_id, "stage": "review_reconciliation"},
+                    )
+                    packet_retry_artifact_id = packet_retry_artifact.id
             packet_progression = kernel.evaluate_decomposition_progression(
                 decomposition_plan=decomposition_plan,
                 active_strategy=state.get("active_strategy"),
@@ -114,6 +172,8 @@ class ReviewQAStageMixin:
             )
             if packet_progression is not None:
                 selected_next = kernel.next_stage_after_decomposition_progression(packet_progression)
+                if selected_next == "verify":
+                    selected_next = "qa_plan"
                 next_active_packet_id = packet_progression.selected_next_packet_id if selected_next == "execute" else None
                 progression_artifact = services.artifact_store.add_json(
                     "packet_progression",
@@ -158,7 +218,7 @@ class ReviewQAStageMixin:
             acceptance_artifact = services.artifact_store.add_json("acceptance_decision", acceptance.model_dump(mode="json"), metadata={"task_id": task.id, "source": "review_lifecycle_violation"})
             update["acceptance_decision"] = acceptance.model_dump(mode="json")
             update["artifact_ids"] = _append_artifact_id(update["artifact_ids"], acceptance_artifact.id)
-        if status != "pass" or missing or (packet_progression is not None and packet_progression.blocked):
+        if status not in successish_review_statuses or missing or (packet_progression is not None and packet_progression.blocked):
             strategy_state = dict(state)
             strategy_state.update(update)
             strategy_update = await _record_strategy_checkpoint(services, strategy_state, checkpoint_stage="review")
@@ -167,7 +227,7 @@ class ReviewQAStageMixin:
 
     def review_next(self, state: WorkflowState) -> str:
         review = QAReview.model_validate(state["review_result"])
-        if review.status == "pass":
+        if review.status in {"pass", "runtime_proof_blocked", "needs_environment"}:
             progression = DecompositionProgressDecision.model_validate(state["packet_progression"]) if state.get("packet_progression") else None
             kernel = self.services.runtime_kernel or RuntimeKernel()
             next_stage = kernel.next_stage_after_decomposition_progression(progression)

@@ -295,6 +295,12 @@ class MutationSummary(RuntimeModel):
     changed: bool = False
     summary: str = ""
     files_changed: list[str] = Field(default_factory=list)
+    created_by_run_id: str | None = None
+    created_by_stage: str | None = None
+    created_by_packet_id: str | None = None
+    first_seen_in_artifact_id: str | None = None
+    current_packet_delta: list[str] = Field(default_factory=list)
+    workflow_cumulative_delta: list[str] = Field(default_factory=list)
 
 
 class PostcheckSummary(RuntimeModel):

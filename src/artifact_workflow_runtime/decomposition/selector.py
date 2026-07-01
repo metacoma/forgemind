@@ -29,11 +29,11 @@ class PacketSelector:
             return PacketSelection(
                 selected_packet_id=first.packet_id,
                 ready=False,
-                reason="first pending packet is blocked on dependencies",
+                reason="pending_packet_blocked_by_dependencies",
                 blocked_reason="dependencies_not_ready",
                 pending_dependencies=_pending_deps(first, packets),
             )
-        return PacketSelection(selected_packet_id=first.packet_id, ready=True, reason="first pending packet selected")
+        return PacketSelection(selected_packet_id=first.packet_id, ready=True, reason="next_dependency_satisfied_packet_selected")
 
 
 def _deps_ready(packet, packets) -> bool:
