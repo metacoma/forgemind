@@ -16,6 +16,9 @@ def compare_reports(before: EvaluationRunReport, after: EvaluationRunReport) -> 
         prev_score = prev.scorecard.overall_score if prev.scorecard else 0
         curr_score = curr.scorecard.overall_score if curr.scorecard else 0
         delta = curr_score - prev_score
+        notes: list[str] = []
+        if prev.execution_mode != curr.execution_mode:
+            notes.append(f"mode changed: {prev.execution_mode} -> {curr.execution_mode}")
         comparison = ScenarioComparison(
             scenario_id=scenario_id,
             before_status=prev.terminal_status,
@@ -25,7 +28,9 @@ def compare_reports(before: EvaluationRunReport, after: EvaluationRunReport) -> 
             delta=delta,
             regression=delta < 0 or (prev.terminal_status == "completed" and curr.terminal_status != "completed"),
             improvement=delta > 0 or (prev.terminal_status != "completed" and curr.terminal_status == "completed"),
-            notes=[],
+            before_mode=prev.execution_mode,
+            after_mode=curr.execution_mode,
+            notes=notes,
         )
         if comparison.regression:
             regressions.append(comparison)
@@ -38,4 +43,6 @@ def compare_reports(before: EvaluationRunReport, after: EvaluationRunReport) -> 
         regressions=regressions,
         improvements=improvements,
         overall_delta=after.summary.completion_rate - before.summary.completion_rate,
+        before_mode=before.execution_mode,
+        after_mode=after.execution_mode,
     )

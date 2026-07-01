@@ -7,6 +7,8 @@ def render_markdown_report(report: EvaluationRunReport) -> str:
     lines = [
         f"# Evaluation Report — {report.pack_id}",
         "",
+        f"Mode: **{report.execution_mode}**",
+        f"Mode counts: **{report.summary.mode_counts or {}}**",
         f"Scenarios: **{report.summary.scenario_count}**",
         f"Passed: **{report.summary.passed_count}**",
         f"Completion rate: **{report.summary.completion_rate:.2%}**",
@@ -18,11 +20,13 @@ def render_markdown_report(report: EvaluationRunReport) -> str:
         "",
         "## Scenario results",
         "",
-        "| Scenario | Status | Score | Notes |",
-        "| --- | --- | ---: | --- |",
+        "| Scenario | Mode | Status | Score | Notes |",
+        "| --- | --- | --- | ---: | --- |",
     ]
     for result in report.scenario_results:
         score = result.scorecard.overall_score if result.scorecard is not None else 0
         notes = "; ".join(result.fail_reasons[:2]) if result.fail_reasons else "ok"
-        lines.append(f"| {result.scenario_id} | {result.terminal_status} | {score} | {notes} |")
+        if result.blockers and notes == "ok":
+            notes = "blockers: " + "; ".join(result.blockers[:2])
+        lines.append(f"| {result.scenario_id} | {result.execution_mode} | {result.terminal_status} | {score} | {notes} |")
     return "\n".join(lines) + "\n"

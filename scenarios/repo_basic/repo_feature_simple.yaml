@@ -16,3 +16,13 @@ expected_reentry_behavior: []
 expected_packet_patterns: [implementation]
 success_criteria: [feature_fixed, tests_pass]
 notes: Basic green-path repo scenario.
+live_task_text_override: |
+  Run this as a live isolated repository benchmark: inspect the repository, fix the bounded failing path, and collect real unit-test evidence. Do not publish or mutate external services.
+live_timeout_seconds: 900
+live_environment_profile: isolated_repo
+live_allowed_terminal_statuses: [completed, needs_environment, blocked]
+requires_live_repo: true
+requires_live_openhands: true
+safe_for_live: true
+needs_isolated_repo: true
+live_notes: Safe only when OpenHands is pointed at an isolated benchmark workspace.

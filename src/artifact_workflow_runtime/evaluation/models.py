@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from artifact_workflow_runtime.models import RuntimeModel, new_id, utc_now
 
 _ALLOWED_DIFFICULTIES = {"tiny", "small", "medium", "large", "unknown"}
+EvaluationMode = Literal["scripted", "live"]
+LiveSafety = Literal["safe_for_live", "requires_approval_for_live", "unsafe_for_live", "dry_run_only"]
 
 
 class ScenarioSpec(RuntimeModel):
@@ -29,6 +31,25 @@ class ScenarioSpec(RuntimeModel):
     success_criteria: list[str] = Field(default_factory=list)
     notes: str = ""
 
+    # Stage 5.1 live-mode extensions. These fields intentionally live on the
+    # same scenario contract so scripted and live benchmark runs stay comparable.
+    live_task_text_override: str | None = None
+    live_timeout_seconds: int | None = None
+    live_environment_profile: str | None = None
+    live_allowed_terminal_statuses: list[str] | None = None
+    live_required_evidence: list[str] | None = None
+    requires_live_repo: bool = False
+    requires_live_host: bool = False
+    requires_live_openhands: bool = False
+    requires_live_network: bool = False
+    safe_for_live: bool = False
+    requires_approval_for_live: bool = False
+    unsafe_for_live: bool = False
+    dry_run_only: bool = False
+    needs_isolated_repo: bool = False
+    needs_isolated_host: bool = False
+    live_notes: str = ""
+
     @field_validator("difficulty")
     @classmethod
     def _validate_difficulty(cls, value: str) -> str:
@@ -37,9 +58,46 @@ class ScenarioSpec(RuntimeModel):
             raise ValueError(f"Unknown scenario difficulty: {value!r}")
         return normalized
 
+    @model_validator(mode="after")
+    def _validate_live_safety(self) -> "ScenarioSpec":
+        live_flags = [self.safe_for_live, self.requires_approval_for_live, self.unsafe_for_live, self.dry_run_only]
+        if sum(1 for item in live_flags if item) > 1:
+            raise ValueError("Only one live-safety flag may be true")
+        return self
+
+    def task_text_for_mode(self, mode: EvaluationMode) -> str:
+        if mode == "live" and self.live_task_text_override:
+            return self.live_task_text_override
+        return self.task_text
+
+    def timeout_for_mode(self, request_timeout_seconds: int, mode: EvaluationMode) -> int:
+        if mode == "live" and self.live_timeout_seconds is not None:
+            return self.live_timeout_seconds
+        return request_timeout_seconds
+
+    def allowed_terminal_statuses_for_mode(self, mode: EvaluationMode) -> list[str]:
+        if mode == "live" and self.live_allowed_terminal_statuses:
+            return list(self.live_allowed_terminal_statuses)
+        return list(self.allowed_terminal_statuses)
+
+    def required_evidence_for_mode(self, mode: EvaluationMode) -> list[str]:
+        if mode == "live" and self.live_required_evidence is not None:
+            return list(self.live_required_evidence)
+        return list(self.required_evidence)
+
+    def live_safety(self) -> LiveSafety:
+        if self.unsafe_for_live:
+            return "unsafe_for_live"
+        if self.dry_run_only:
+            return "dry_run_only"
+        if self.requires_approval_for_live:
+            return "requires_approval_for_live"
+        return "safe_for_live" if self.safe_for_live else "requires_approval_for_live"
+
 
 class ScenarioRunRequest(RuntimeModel):
     scenario_id: str
+    mode: EvaluationMode = "scripted"
     runtime_config_path: str | None = None
     model_routing_config_path: str | None = None
     artifact_dir: str = "eval_runs"
@@ -47,6 +105,22 @@ class ScenarioRunRequest(RuntimeModel):
     auto_approve: bool = True
     timeout_seconds: int = 120
     environment_overrides: dict[str, Any] = Field(default_factory=dict)
+
+    # Live runtime stack settings. The evaluation package only builds a normal
+    # runtime controller from these values; it does not reimplement the runtime.
+    direct_llm_endpoint: str | None = None
+    direct_llm_model: str | None = None
+    direct_llm_api_key: str | None = None
+    openhands_endpoint: str | None = None
+    openhands_model: str | None = None
+    openhands_api_key: str | None = None
+    sandbox_id: str | None = None
+    conversation_id: str | None = None
+    approve_live: bool = False
+    allow_live_network: bool = False
+    allow_live_host: bool = False
+    allow_live_publish: bool = False
+    strategy_selection_mode: str = "rule_based"
 
 
 class ScoreComponent(RuntimeModel):
@@ -80,16 +154,22 @@ class ScenarioRunResult(RuntimeModel):
     finished_at: str | None = None
     terminal_status: str
     runtime_status: str
+    execution_mode: EvaluationMode = "scripted"
     acceptance_status: str | None = None
     packet_count: int = 0
     transition_count: int = 0
     reentry_count: int = 0
     repair_count: int = 0
     artifacts: list[str] = Field(default_factory=list)
+    artifact_dir: str | None = None
     final_report: dict[str, Any] = Field(default_factory=dict)
     stage_sequence: list[str] = Field(default_factory=list)
     packet_types: list[str] = Field(default_factory=list)
     required_evidence_found: list[str] = Field(default_factory=list)
+    blockers: list[str] = Field(default_factory=list)
+    live_run_id: str | None = None
+    live_artifact_dir: str | None = None
+    live_metadata: dict[str, Any] = Field(default_factory=dict)
     scorecard: ScenarioScorecard | None = None
     fail_reasons: list[str] = Field(default_factory=list)
 
@@ -105,6 +185,7 @@ class PackSummary(RuntimeModel):
     average_packets: float
     average_repairs: float
     average_duration_seconds: float
+    mode_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class EvaluationRunReport(RuntimeModel):
@@ -113,6 +194,7 @@ class EvaluationRunReport(RuntimeModel):
     pack_id: str
     scenario_results: list[ScenarioRunResult] = Field(default_factory=list)
     summary: PackSummary
+    execution_mode: EvaluationMode | str = "scripted"
     model_routing_config_path: str | None = None
     runtime_config_path: str | None = None
     notes: list[str] = Field(default_factory=list)
@@ -127,6 +209,8 @@ class ScenarioComparison(RuntimeModel):
     delta: int
     regression: bool
     improvement: bool
+    before_mode: str = "scripted"
+    after_mode: str = "scripted"
     notes: list[str] = Field(default_factory=list)
 
 
@@ -137,3 +221,5 @@ class PackComparison(RuntimeModel):
     regressions: list[ScenarioComparison] = Field(default_factory=list)
     improvements: list[ScenarioComparison] = Field(default_factory=list)
     overall_delta: float
+    before_mode: str = "scripted"
+    after_mode: str = "scripted"

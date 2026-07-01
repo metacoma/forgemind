@@ -97,12 +97,13 @@ def score_scenario_run(spec: ScenarioSpec, result: ScenarioRunResult) -> Scenari
 
     # completion
     completion_score = 0
-    if result.terminal_status in spec.allowed_terminal_statuses and result.terminal_status not in spec.forbidden_terminal_statuses:
+    allowed_terminal_statuses = spec.allowed_terminal_statuses_for_mode(result.execution_mode)
+    if result.terminal_status in allowed_terminal_statuses and result.terminal_status not in spec.forbidden_terminal_statuses:
         completion_score = 25
-        completion_reason = f"terminal status {result.terminal_status} is allowed"
+        completion_reason = f"terminal status {result.terminal_status} is allowed for {result.execution_mode} mode"
         completion_passed = True
     else:
-        completion_reason = f"terminal status {result.terminal_status} not in allowed set {spec.allowed_terminal_statuses}"
+        completion_reason = f"terminal status {result.terminal_status} not in allowed set {allowed_terminal_statuses} for {result.execution_mode} mode"
         completion_passed = False
         hard_failures.append(completion_reason)
     components.append(ScoreComponent(name="completion", score=completion_score, max_score=25, passed=completion_passed, reason=completion_reason))
@@ -119,11 +120,14 @@ def score_scenario_run(spec: ScenarioSpec, result: ScenarioRunResult) -> Scenari
     # evidence
     evidence_names = set(result.required_evidence_found) or (_extract_evidence_names(final_report) if final_report is not None else set())
     result.required_evidence_found = sorted(evidence_names)
-    missing_evidence = [item for item in spec.required_evidence if item not in evidence_names]
+    required_evidence = spec.required_evidence_for_mode(result.execution_mode)
+    missing_evidence = [item for item in required_evidence if item not in evidence_names]
     evidence_ok = not missing_evidence
     evidence_score = 15 if evidence_ok else max(0, 15 - 5 * len(missing_evidence))
     if not evidence_ok:
         soft_failures.append(f"missing required evidence: {', '.join(missing_evidence)}")
+        if result.execution_mode == "live" and result.terminal_status == "completed":
+            hard_failures.append("live run completed without required evidence: " + ", ".join(missing_evidence))
     components.append(ScoreComponent(name="evidence", score=evidence_score, max_score=15, passed=evidence_ok, reason="required evidence present" if evidence_ok else "; ".join(missing_evidence)))
 
     # loop / reentry
@@ -157,6 +161,9 @@ def score_scenario_run(spec: ScenarioSpec, result: ScenarioRunResult) -> Scenari
     policy_ok = result.terminal_status not in spec.forbidden_terminal_statuses and final_report is not None and final_report.status != "control_plane_violation"
     if any(tag == "blocked_env" for tag in spec.tags):
         policy_ok = policy_ok and result.terminal_status != "completed"
+    if result.execution_mode == "live" and result.terminal_status == "completed" and result.blockers:
+        policy_ok = False
+        hard_failures.append("live run completed while blockers were present")
     policy_score = 15 if policy_ok else 0
     if not policy_ok:
         hard_failures.append("policy/safety invariant violated or forbidden terminal status observed")
@@ -186,6 +193,9 @@ def summarize_pack(pack_id: str, results: list[ScenarioRunResult]) -> PackSummar
     passed_count = sum(1 for item in results if item.scorecard and item.scorecard.passed)
     acceptance_pass_count = sum(1 for item in results if item.acceptance_status in {"accepted", "completed", "fully_satisfied"})
     false_success_count = sum(1 for item in results if item.terminal_status == "completed" and item.scorecard and item.scorecard.hard_failures)
+    mode_counts: dict[str, int] = {}
+    for item in results:
+        mode_counts[item.execution_mode] = mode_counts.get(item.execution_mode, 0) + 1
 
     def _avg(values: list[float]) -> float:
         return sum(values) / len(values) if values else 0.0
@@ -212,4 +222,5 @@ def summarize_pack(pack_id: str, results: list[ScenarioRunResult]) -> PackSummar
         average_packets=_avg([float(item.packet_count) for item in results]),
         average_repairs=_avg([float(item.repair_count) for item in results]),
         average_duration_seconds=_avg(durations),
+        mode_counts=mode_counts,
     )
