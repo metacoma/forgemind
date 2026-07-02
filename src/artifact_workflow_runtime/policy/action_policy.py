@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from artifact_workflow_runtime.policy.acl import RuntimeAction
-from artifact_workflow_runtime.policy.request_permissions import RequestPermissionCatalog
 
 
 MUTATING_RUNTIME_ACTIONS = {RuntimeAction.FILE_WRITE, RuntimeAction.GIT_COMMIT, RuntimeAction.GIT_PUSH, RuntimeAction.K8S_APPLY, RuntimeAction.ARGOCD_SYNC, RuntimeAction.SSH_RUN}
@@ -36,7 +35,7 @@ class ActionPolicyEnforcer:
 
     def validate_request(self, request: object, *, stage: str, label: str) -> None:
         profile = self.profiles.get(stage, StageActionPolicyProfile(stage, allow_mutation=False, allow_publish_actions=False, required_forbidden_tokens=frozenset()))
-        allowed = {spec.runtime_action for spec in [RequestPermissionCatalog.require_stage_permission(item, stage=stage) for item in [*getattr(request, "allowed_actions", []), *getattr(request, "allowed_inputs", [])]]}
+        allowed = {_normalize_runtime_action(item) for item in [*getattr(request, "allowed_actions", []), *getattr(request, "allowed_inputs", [])]}
         forbidden_tokens = {_normalize_token(item) for item in [*getattr(request, "forbidden_actions", []), *getattr(request, "forbidden_inputs", [])]}
         unknown = {action for action in allowed if action == RuntimeAction.UNKNOWN}
         if unknown:

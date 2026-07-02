@@ -32,6 +32,7 @@ from artifact_workflow_runtime.models import (
     VerificationResult,
 )
 from artifact_workflow_runtime.models.state import ControllerDecision, WorkflowStateSnapshot
+from artifact_workflow_runtime.done_contract import DoneContract
 from artifact_workflow_runtime.lifecycle import (
     LifecycleEvent,
     LifecycleFacts,
@@ -429,6 +430,7 @@ class RuntimeKernel:
         classification: TaskClassification,
         plan: ExecutionPlan,
         obligations: ObligationAnalysis | None = None,
+        done_contract: DoneContract | None = None,
     ) -> TaskAcceptanceContract:
         """Derive mandatory completion gates from typed plan/obligations.
 
@@ -472,21 +474,31 @@ class RuntimeKernel:
 
         runtime_sensitive_levels = {"integration", "smoke", "e2e", "end-to-end", "runtime_proof", "runtime"}
         runtime_sensitive = bool(required_levels & runtime_sensitive_levels)
-        env_prereqs: list[str] = []
-        if runtime_sensitive:
-            env_prereqs.extend(plan.environment_notes)
-            if obligations is not None:
-                env_prereqs.extend(obligations.required_environment_conditions)
-        if obligations is not None:
-            env_prereqs.extend(obligations.required_setup_steps)
-        env_prereqs = _unique_str(env_prereqs)
-        if env_prereqs or runtime_sensitive:
+        env_nodes: list[str] = []
+        materializable_env_nodes: list[str] = []
+        if done_contract is not None:
+            env_nodes.extend(item.name for item in done_contract.environment_requirements)
+            materializable_env_nodes.extend(item.name for item in done_contract.environment_requirements if item.mode == "bootstrap_if_needed")
+        elif runtime_sensitive:
+            env_nodes.extend(obligations.required_environment_conditions if obligations is not None else [])
+        env_nodes = _unique_str(env_nodes)
+        materializable_env_nodes = _unique_str(materializable_env_nodes)
+        env_checks = materializable_env_nodes if materializable_env_nodes else env_nodes
+        if materializable_env_nodes or runtime_sensitive:
             add(
                 AcceptanceObligationKind.ENVIRONMENT_PREREQUISITES_SATISFIED,
                 "Required verification environment/prerequisites were available",
-                checks=env_prereqs,
-                env=env_prereqs,
+                checks=env_checks,
+                env=env_checks,
             )
+
+        work_surfaces: list[str] = []
+        if obligations is not None:
+            work_surfaces.extend(obligations.affected_surfaces)
+            work_surfaces.extend(obligations.required_documentation_updates)
+            work_surfaces.extend(obligations.required_examples_updates)
+            work_surfaces.extend(obligations.required_ci_updates)
+            work_surfaces.extend(obligations.required_codegen_or_build_updates)
 
         if obligations is not None:
             if obligations.required_documentation_updates:
@@ -512,7 +524,11 @@ class RuntimeKernel:
             requires_mutation=requires_mutation,
             mutation_requires_verification=requires_mutation,
             obligations=obligation_items,
-            required_environment_prerequisites=env_prereqs,
+            required_environment_prerequisites=env_nodes,
+            required_environment_nodes=env_nodes,
+            materializable_environment_nodes=materializable_env_nodes,
+            required_work_surfaces=_unique_str(work_surfaces),
+            required_verification_levels=_unique_str(list(plan.required_test_levels)),
         )
 
     def evaluate_acceptance(

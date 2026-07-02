@@ -6,7 +6,6 @@ from urllib.parse import urlparse
 
 from artifact_workflow_runtime.artifacts import ArtifactStore
 from artifact_workflow_runtime.models import ObservationRequest, ObservationResult, Task, TaskClassification, WorkPacketKind
-from artifact_workflow_runtime.policy.request_permissions import RESEARCH_PACKET_PERMISSIONS
 
 from .models import FreshnessDecision, RetrievalMode, RetrievalSnapshot, RetrievalSource, RetrievalSourceKind, VersionResolution
 
@@ -65,7 +64,7 @@ class RetrievalService:
             required_facts=list(decision.retrieval_artifact_kinds),
             scope_constraints=["freshness retrieval only", "official sources preferred", "observe only", "do not produce a plan"],
             work_packet_kind=WorkPacketKind.RESEARCH,
-            allowed_actions=list(RESEARCH_PACKET_PERMISSIONS),
+            allowed_actions=["internet_research", "read_official_docs", "inspect_release_notes", "inspect_package_registry", "inspect_public_metadata", "collect_source_attribution"],
             forbidden_actions=["edit_files", "write_files", "run_mutating_commands", "commit", "push", "git push", "git push --force", "git tag", "git merge", "git rebase", "create_pr", "open_pull_request", "publish", "release", "change_hosts", "change_cluster_state", "change_workflow_decision", "declare_task_completed_or_accepted"],
             expected_outputs=["retrieval_summary", "source_urls", "version_resolution", "docs_snapshot", "release_notes", "blockers", "unknowns"],
             metadata={

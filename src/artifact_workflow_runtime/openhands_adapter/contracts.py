@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from artifact_workflow_runtime.policy import PolicyEnforcementPoint, RuntimeResource, RuntimeSubject
-from artifact_workflow_runtime.policy.request_permissions import RequestPermissionCatalog
 from artifact_workflow_runtime.policy.action_policy import ActionPolicyEnforcer
 
 from artifact_workflow_runtime.models import (
@@ -54,12 +53,11 @@ class OpenHandsStageContractGate:
         subject = RuntimeSubject(kind="agent", name="openhands", stage=stage)
         resource = RuntimeResource(kind="workflow_stage", name=stage, attributes={"request_id": getattr(request, "id", None)})
         denied: list[str] = []
-        for token in sorted(cls.allowed_set(request)):
+        for action in sorted(cls.allowed_set(request)):
             try:
-                spec = RequestPermissionCatalog.require_stage_permission(token, stage=stage)
-                pep.require(subject=subject, action=spec.runtime_action, resource=resource, context={"stage": stage, "label": label})
-            except (PermissionError, ValueError) as exc:
-                denied.append(f"{token}: {exc}")
+                pep.require(subject=subject, action=action, resource=resource, context={"stage": stage, "label": label})
+            except PermissionError as exc:
+                denied.append(f"{action}: {exc}")
         if denied:
             raise ValueError(f"{label} packets allow actions outside the stage ACL: {denied}")
 

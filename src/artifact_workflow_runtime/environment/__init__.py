@@ -1,4 +1,4 @@
-from .models import EnvironmentPlan, EnvironmentPlanItem
+from .models import EnvironmentAction, EnvironmentPlan, EnvironmentPlanItem
 from .discovery import EnvironmentDiscovery
 
-__all__ = ["EnvironmentPlan", "EnvironmentPlanItem", "EnvironmentDiscovery"]
+__all__ = ["EnvironmentAction", "EnvironmentPlan", "EnvironmentPlanItem", "EnvironmentDiscovery"]
