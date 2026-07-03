@@ -64,10 +64,11 @@ def test_environment_discovery_prefers_observed_repo_scripts_over_guessed_freepl
     )
 
     item = env.items[0]
-    assert item.bootstrap_command is None
-    assert item.bootstrap_actions == []
+    assert item.bootstrap_command == "./misc/scripts/run-freeplane-csharp-smoke-test.sh"
+    assert item.bootstrap_resolution == "observed_repo_path"
+    assert item.bootstrap_source == "repo_supported"
     assert item.runtime_probe_command in {"./misc/scripts/run-freeplane-csharp-smoke-test.sh", "./misc/scripts/_check_grpc_map.py"}
-    assert {action.source_kind for action in item.runtime_probe_actions} == {"smoke_harness", "runtime_probe_script"}
+    assert item.bootstrap_source_kind in {"smoke_harness", "runtime_probe_script"}
 
 
 def test_passed_obligations_do_not_infer_integration_or_smoke_from_script_names_alone() -> None:
@@ -135,5 +136,5 @@ def test_execute_materialization_block_prefers_observed_bootstrap_and_runtime_pr
     block = _environment_materialization_block(env, packet=None)
 
     assert "run-freeplane-csharp-smoke-test.sh" in block["prompt_block"]
-    assert any("run-freeplane-csharp-smoke-test.sh" in step for step in block["suggested_steps"])
-    assert any("_check_grpc_map.py" in step for step in block["suggested_steps"])
+    assert any("Attempt repository-supported bootstrap" in step for step in block["suggested_steps"])
+    assert any("prove runtime usability" in step for step in block["suggested_steps"])

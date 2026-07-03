@@ -15,9 +15,6 @@ class EnvironmentRequirement(RuntimeModel):
     name: str
     mode: str = "required"
     source: str = "task"
-    dependency_kind: str = "generic"
-    applicable_packet_types: list[str] = Field(default_factory=list)
-    required_verification_levels: list[str] = Field(default_factory=list)
 
 
 class DoneContract(RuntimeModel):

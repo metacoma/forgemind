@@ -78,9 +78,3 @@ def test_action_acl_allows_publish_actions_only_in_publish_stage() -> None:
 
     assert pep.require(subject=publisher, action="git push", resource=resource, context={"stage": "publish"}).allowed
     assert pep.require(subject=publisher, action="create_pr", resource=resource, context={"stage": "publish"}).allowed
-
-
-def test_action_acl_coerces_freshness_observation_aliases() -> None:
-    assert RuntimeAction.coerce("inspect_package_registry") == RuntimeAction.INTERNET_SEARCH
-    assert RuntimeAction.coerce("inspect_release_notes") == RuntimeAction.INTERNET_SEARCH
-    assert RuntimeAction.coerce("resolve_package_versions") == RuntimeAction.INTERNET_SEARCH

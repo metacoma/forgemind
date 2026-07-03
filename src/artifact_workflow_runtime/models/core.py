@@ -777,10 +777,6 @@ class TaskAcceptanceContract(RuntimeModel):
     completion_rule: str = "all_required_blocking_obligations_pass"
     obligations: list[AcceptanceObligation] = Field(default_factory=list)
     required_environment_prerequisites: list[str] = Field(default_factory=list)
-    required_environment_nodes: list[str] = Field(default_factory=list)
-    materializable_environment_nodes: list[str] = Field(default_factory=list)
-    required_work_surfaces: list[str] = Field(default_factory=list)
-    required_verification_levels: list[str] = Field(default_factory=list)
     created_at: str = Field(default_factory=utc_now)
 
 

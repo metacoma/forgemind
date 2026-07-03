@@ -91,17 +91,11 @@ class ExecutionStageMixin:
             env_plan = EnvironmentPlan.model_validate(state["environment_plan"]) if state.get("environment_plan") else None
             execute_steps = execute_prompt_steps(plan)
             execute_success = build_execute_success_criteria(plan)
-            execute_verification = execute_verification_commands(plan)
             setup_block = _environment_materialization_block(env_plan, packet=packet)
-            if setup_block["scoped_only"]:
-                execute_steps = list(setup_block["suggested_steps"])
-                execute_success = list(dict.fromkeys([*setup_block["success_criteria"], *(packet.success_criteria if packet is not None else [])]))
-                execute_verification = list(setup_block["verification_commands"])
-            else:
-                if setup_block["suggested_steps"]:
-                    execute_steps = list(dict.fromkeys([*setup_block["suggested_steps"], *execute_steps]))
-                if packet is not None and packet.success_criteria:
-                    execute_success = list(dict.fromkeys([*execute_success, *packet.success_criteria]))
+            if setup_block["suggested_steps"]:
+                execute_steps = list(dict.fromkeys([*setup_block["suggested_steps"], *execute_steps]))
+            if packet is not None and packet.success_criteria:
+                execute_success = list(dict.fromkeys([*execute_success, *packet.success_criteria]))
 
             prompt = (
                 "You are executing an approved controller plan.\n"
@@ -139,7 +133,7 @@ class ExecutionStageMixin:
                 objective="execute approved controller plan",
                 plan_steps=execute_steps,
                 expected_changes=list(plan.expected_repo_changes),
-                verification_commands=execute_verification,
+                verification_commands=execute_verification_commands(plan),
                 scope_constraints=["do not choose next workflow step", "do not expand task scope", "collect structured evidence"],
                 plan_summary=plan.summary,
                 context_packet_id=context_packet.id if context_packet else None,
@@ -374,53 +368,22 @@ class ExecutionStageMixin:
 
 def _environment_materialization_block(env_plan: EnvironmentPlan | None, *, packet) -> dict[str, object]:
     if env_plan is None or not env_plan.items:
-        return {"prompt_block": "", "suggested_steps": [], "success_criteria": [], "verification_commands": [], "scoped_only": False}
+        return {"prompt_block": "", "suggested_steps": []}
     packet_type = getattr(packet, "packet_type", None)
     packet_type_value = getattr(packet_type, "value", str(packet_type or ""))
-    packet_nodes = set(str(item) for item in ((getattr(packet, "metadata", {}) or {}).get("environment_nodes") or []))
-    relevant_items = []
-    for item in env_plan.items:
-        applicable = set(item.applicable_packet_types or [])
-        if packet_nodes and item.name not in packet_nodes:
-            continue
-        if applicable and packet_type_value and packet_type_value not in applicable:
-            continue
-        relevant_items.append(item)
-    if not relevant_items:
-        relevant_items = list(env_plan.items)
-
-    prompt_lines: list[str] = ["Concrete environment/runtime dependency nodes:"]
+    runtime_relevant = packet_type is None or packet_type_value in {"setup", "integration", "test", "implementation"}
+    prompt_lines: list[str] = ["Concrete environment/runtime materialization requirements:"]
     steps: list[str] = []
-    success_criteria: list[str] = []
-    verification_commands: list[str] = []
-    scoped_only = packet_type_value == "setup"
-    for item in relevant_items:
-        bootstrap_commands = [action.command for action in item.bootstrap_actions if action.command]
-        probe_commands = [action.command for action in item.runtime_probe_actions if action.command]
-        if not bootstrap_commands and item.bootstrap_command:
-            bootstrap_commands = [item.bootstrap_command]
-        if not probe_commands and item.runtime_probe_command:
-            probe_commands = [item.runtime_probe_command]
-        prompt_lines.append(
-            f"- {item.name} [{item.dependency_kind}]: bootstrap_actions={bootstrap_commands or ['none']}; runtime_probes={probe_commands or ['none']}"
-        )
-        if scoped_only:
-            for command in bootstrap_commands:
-                steps.append(f"Materialize environment dependency {item.name}: {command}")
-            for command in probe_commands:
-                steps.append(f"Probe readiness for environment dependency {item.name}: {command}")
-                verification_commands.append(command)
-            success_criteria.append(f"Environment dependency node ready: {item.name}")
-        else:
-            for command in bootstrap_commands[:1]:
-                steps.append(f"If prerequisite {item.name} is still missing, attempt materialization: {command}")
-            for command in probe_commands[:1]:
-                steps.append(f"When runtime-sensitive proof is needed, verify {item.name} via: {command}")
-    prompt_lines.append("Environment materialization is a separate proof layer. Do not claim setup success from file discovery, syntax checks, or compile-only evidence.")
-    return {
-        "prompt_block": "\n".join(prompt_lines),
-        "suggested_steps": list(dict.fromkeys(steps)),
-        "success_criteria": list(dict.fromkeys(success_criteria)),
-        "verification_commands": list(dict.fromkeys(verification_commands)),
-        "scoped_only": scoped_only,
-    }
+    for item in env_plan.items:
+        command = (item.bootstrap_command or "").strip()
+        probe = (item.runtime_probe_command or "").strip()
+        source = item.bootstrap_source or item.bootstrap_resolution or "unknown"
+        prompt_lines.append(f"- {item.name}: bootstrap_source={source}; bootstrap_command={command or 'none'}; runtime_probe={probe or 'none'}")
+        if not runtime_relevant:
+            continue
+        if command and item.bootstrap_resolution in {"observed_repo_path", "observed_context_command"}:
+            steps.append(f"Attempt repository-supported bootstrap for {item.name}: {command}")
+        if probe:
+            steps.append(f"After setup, prove runtime usability for {item.name}: {probe}")
+    prompt_lines.append("Never declare environment/setup blocked before attempting observed repository-supported bootstrap paths and then running at least one concrete runtime probe when available.")
+    return {"prompt_block": "\n".join(prompt_lines), "suggested_steps": steps}

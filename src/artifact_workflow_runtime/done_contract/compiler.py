@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 from artifact_workflow_runtime.done_contract.models import DoneContract, EnvironmentRequirement, RuntimeProofPolicy
-from artifact_workflow_runtime.models import ContextPacket, DiscoveredImpactKind, ObligationAnalysis, Task, TaskClassification
-
-_RUNTIME_TEST_LEVELS = {"integration", "smoke", "e2e", "end-to-end", "runtime_proof", "runtime"}
-_BUILDISH_LEVELS = {"build", "compile", "unit", "lint"}
+from artifact_workflow_runtime.models import ContextPacket, ObligationAnalysis, Task, TaskClassification
 
 
 class DoneContractCompiler:
@@ -17,7 +14,15 @@ class DoneContractCompiler:
         context_packet: ContextPacket | None,
     ) -> DoneContract:
         obligations = obligations or ObligationAnalysis(reasoning_summary="No obligation analysis available.")
-        change_class = self._change_class(classification, obligations)
+        text = "\n".join(
+            [
+                task.description,
+                context_packet.text if context_packet is not None else "",
+                " ".join(obligations.affected_surfaces),
+                " ".join(item.summary for item in obligations.discovered_impacts),
+            ]
+        ).lower()
+        change_class = self._change_class(classification, obligations, text)
         deliverables: list[str] = ["implementation"]
         required_evidence: list[str] = ["implementation_evidence"]
         docs_examples_requirements = [*obligations.required_documentation_updates, *obligations.required_examples_updates]
@@ -25,11 +30,7 @@ class DoneContractCompiler:
         env_reqs: list[EnvironmentRequirement] = []
         runtime_policy = RuntimeProofPolicy(required=False, allow_debt=True, preferred_level="existing_harness")
 
-        required_levels = {str(level).strip().lower() for level in obligations.required_test_levels if str(level).strip()}
-        runtime_levels = sorted(level for level in required_levels if level in _RUNTIME_TEST_LEVELS)
-        buildish_levels = sorted(level for level in required_levels if level in _BUILDISH_LEVELS)
-
-        if change_class in {"new_client_integration", "integration_sensitive_change"} or runtime_levels:
+        if change_class in {"new_client_integration", "integration_sensitive_change"}:
             deliverables.append("runtime_proof")
             required_evidence.append("runtime_proof_success")
             runtime_policy = RuntimeProofPolicy(required=True, allow_debt=False, preferred_level="existing_harness")
@@ -49,39 +50,27 @@ class DoneContractCompiler:
             deliverables.append("example_update")
             required_evidence.append("example_update_evidence")
 
-        if runtime_policy.required:
-            env_reqs.append(
-                EnvironmentRequirement(
-                    name="runtime_under_test",
-                    mode="bootstrap_if_needed",
-                    source="controller",
-                    dependency_kind="runtime",
-                    applicable_packet_types=["setup", "integration", "test", "verification"],
-                    required_verification_levels=runtime_levels,
-                )
-            )
-
-        for condition in obligations.required_environment_conditions:
-            value = str(condition).strip()
-            if not value:
-                continue
-            env_reqs.append(
-                EnvironmentRequirement(
-                    name=value,
-                    mode="required",
-                    source="obligation_discovery",
-                    dependency_kind="environment",
-                    applicable_packet_types=["setup", "integration", "test", "verification"],
-                    required_verification_levels=runtime_levels,
-                )
-            )
+        env_names = set(obligations.required_environment_conditions)
+        setup_text = " ".join(obligations.required_setup_steps).lower()
+        runtime_text = " ".join([text, setup_text, " ".join(obligations.required_test_levels)]).lower()
+        if "freeplane" in text or "freeplane" in setup_text:
+            env_names.add("freeplane_runtime")
+        if runtime_policy.required and (
+            obligations.required_setup_steps
+            or any(marker in runtime_text for marker in ("bootstrap", "setup", "install", "smoke", "integration", "runtime", "run script"))
+        ):
+            env_names.add("verification_runtime")
+        for name in sorted(env_names):
+            mode = "bootstrap_if_needed" if name == "freeplane_runtime" or "script" in text or any(marker in runtime_text for marker in ("bootstrap", "setup", "install")) else "required"
+            source = "repo_supported" if mode == "bootstrap_if_needed" else "task"
+            env_reqs.append(EnvironmentRequirement(name=name, mode=mode, source=source))
 
         publish_required = bool(obligations.required_publish_actions)
         notes: list[str] = []
-        if runtime_policy.required:
+        if change_class in {"new_client_integration", "integration_sensitive_change"}:
             notes.append("Integration-sensitive changes require runtime proof and integration coverage before acceptance.")
         if env_reqs:
-            notes.append("Environment requirements are typed dependency nodes and must be materialized separately from implementation work.")
+            notes.append("Environment requirements must be attempted through bootstrap when repository-supported paths exist.")
 
         return DoneContract(
             task_id=task.id,
@@ -90,21 +79,17 @@ class DoneContractCompiler:
             deliverables=_unique(deliverables),
             required_evidence=_unique(required_evidence),
             verification_policy=runtime_policy,
-            environment_requirements=_dedupe_env(env_reqs),
+            environment_requirements=env_reqs,
             ci_requirements=_unique(ci_requirements),
             docs_examples_requirements=_unique(docs_examples_requirements),
             publish_required=publish_required,
             notes=notes,
         )
 
-    def _change_class(self, classification: TaskClassification, obligations: ObligationAnalysis) -> str:
-        required_levels = {str(level).strip().lower() for level in obligations.required_test_levels if str(level).strip()}
-        impact_kinds = {impact.kind for impact in obligations.discovered_impacts}
-        runtime_sensitive = bool(required_levels & _RUNTIME_TEST_LEVELS) or bool(impact_kinds & {DiscoveredImpactKind.INTEGRATION, DiscoveredImpactKind.SETUP})
-        grpc_surface = any("grpc/" in str(path).replace('\\', '/') for path in obligations.affected_surfaces)
-        if classification.execution_family.value == "repository_change" and grpc_surface and classification.task_intent in {"implement", "modify"}:
-            return "new_client_integration" if runtime_sensitive else "repository_change"
-        if runtime_sensitive:
+    def _change_class(self, classification: TaskClassification, obligations: ObligationAnalysis, text: str) -> str:
+        if any(marker in text for marker in ("grpc client", "new client", "binding", "sdk", "protocol consumer", "kotlin", "cpp client", "client binding")):
+            return "new_client_integration"
+        if any(level in {"integration", "smoke", "e2e"} for level in obligations.required_test_levels):
             return "integration_sensitive_change"
         if classification.task_intent in {"implement", "modify"}:
             return "repository_change"
@@ -120,16 +105,4 @@ def _unique(items: list[str]) -> list[str]:
             continue
         seen.add(value)
         out.append(value)
-    return out
-
-
-def _dedupe_env(items: list[EnvironmentRequirement]) -> list[EnvironmentRequirement]:
-    seen: set[tuple[str, str, tuple[str, ...]]] = set()
-    out: list[EnvironmentRequirement] = []
-    for item in items:
-        key = (item.name, item.dependency_kind, tuple(item.applicable_packet_types))
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(item)
     return out

@@ -10,6 +10,8 @@ from .models import StrategyCheckpointSignals, StrategyDecision, StrategyId
 
 _FAILURE_STATUSES = {"failed", "error", "blocked", "needs_repair", "policy_violation", "fail_code"}
 _TEST_EVIDENCE_TERMS = ("test", "unit", "integration", "smoke", "behavior", "behaviour", "regression", "bdd")
+_EXPLICIT_REPAIR_FAILURE_CLASSES = {"stage_failure", "test_failure", "build_or_test_failure"}
+_EXPLICIT_SPIKE_FAILURE_CLASSES = {"runtime_dependency_gap"}
 _UNKNOWN_BLOCKER_TERMS = ("unknown", "environment", "runtime", "dependency", "api", "toolchain", "sdk", "install", "blocked")
 _REFACTOR_TERMS = ("refactor", "cleanup", "clean up", "simplify", "restructure", "rename", "stabilize")
 
@@ -62,12 +64,29 @@ class StrategyGovernor:
                 _signals("execution_status", "verification_status"),
             )
 
+        explicit_failure_class = _lower(signals.explicit_failure_class)
+        if explicit_failure_class in _EXPLICIT_REPAIR_FAILURE_CLASSES:
+            return (
+                StrategyId.REPAIR_ONLY,
+                "A typed build/test/stage failure is already known; prioritize targeted repair over generic evidence collection.",
+                "high",
+                _signals("explicit_failure_class", "failed_check_levels", "blocker_kinds"),
+            )
+
         if acceptance_status in _FAILURE_STATUSES and signals.repair_count > 0:
             return (
                 StrategyId.REPAIR_ONLY,
                 "Acceptance failed after repair/re-entry; continue in repair-only mode.",
                 "high",
                 _signals("acceptance_status", "repair_count"),
+            )
+
+        if explicit_failure_class in _EXPLICIT_SPIKE_FAILURE_CLASSES:
+            return (
+                StrategyId.SPIKE_THEN_HARDEN,
+                "A runtime/environment dependency gap is blocking progress; resolve prerequisites before broader hardening.",
+                "high",
+                _signals("explicit_failure_class", "blocker_kinds"),
             )
 
         if _contains_any(blockers, _UNKNOWN_BLOCKER_TERMS):

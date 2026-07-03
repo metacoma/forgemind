@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from .common import *
-from artifact_workflow_runtime.done_contract import DoneContract
 
 
 class PlanningPolicyStageMixin:
@@ -91,7 +90,6 @@ class PlanningPolicyStageMixin:
                 classification=classification,
                 plan=parsed,
                 obligations=obligations,
-                done_contract=DoneContract.model_validate(done_contract) if done_contract is not None else None,
             )
             artifact = services.artifact_store.add_json("execution_plan", parsed.model_dump(mode="json"))
             acceptance_artifact = services.artifact_store.add_json("task_acceptance_contract", acceptance_contract.model_dump(mode="json"), metadata={"task_id": task.id, "plan_id": parsed.id})

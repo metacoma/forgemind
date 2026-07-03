@@ -106,8 +106,12 @@ class StrategyCheckpointSignals(RuntimeModel):
     execution_status: str | None = None
     verification_status: str | None = None
     acceptance_status: str | None = None
+    explicit_failure_class: str | None = None
+    active_packet_type: str | None = None
     missing_evidence: list[str] = Field(default_factory=list)
     blockers: list[str] = Field(default_factory=list)
+    blocker_kinds: list[str] = Field(default_factory=list)
+    failed_check_levels: list[str] = Field(default_factory=list)
     repair_count: int = 0
     task_complexity_hint: str = "unknown"
     mutation_heavy: bool = False
@@ -123,6 +127,10 @@ class StrategyCheckpointSignals(RuntimeModel):
     @property
     def has_blockers(self) -> bool:
         return bool(self.blockers)
+
+    @property
+    def has_explicit_failure(self) -> bool:
+        return bool(str(self.explicit_failure_class or "").strip())
 
 
 class StrategyAdvisorContext(RuntimeModel):

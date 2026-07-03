@@ -95,7 +95,6 @@ class DecompositionPlanner:
             required_evidence: list[str],
             dependencies: list[str] | None = None,
             prepend: bool = False,
-            metadata: dict[str, object] | None = None,
         ) -> ExecutionPacket:
             nonlocal next_index, packets
             packet = _packet(
@@ -112,7 +111,6 @@ class DecompositionPlanner:
                 allowed_files=allowed_files,
                 target_areas=target_areas,
                 forbidden_actions=base_forbidden,
-                metadata=metadata,
             )
             next_index += 1
             if prepend:
@@ -122,19 +120,12 @@ class DecompositionPlanner:
             return packet
 
         if flags["has_setup"] and ExecutionPacketType.SETUP not in completed_types:
-            setup_success = [f"Environment dependency node ready: {name}" for name in flags["environment_nodes"]] or ["Required setup or environment prerequisites are satisfied for the bounded task."]
-            setup_evidence = ["bootstrap attempt evidence", "runtime/toolchain readiness probe evidence"]
             append_packet(
                 "prepare environment and setup prerequisites",
-                scope="Materialize only the required environment dependency nodes. Do not implement product changes in this packet.",
+                scope="Resolve bounded setup or environment prerequisites required before implementation/integration work.",
                 packet_type=ExecutionPacketType.SETUP,
-                success_criteria=setup_success,
-                required_evidence=setup_evidence,
-                metadata={
-                    "packet_scope_class": "environment_materialization",
-                    "environment_nodes": list(flags["environment_nodes"]),
-                    "verification_levels": list(flags["verification_levels"]),
-                },
+                success_criteria=["Required setup or environment prerequisites are satisfied for the bounded task."],
+                required_evidence=["setup steps", "environment verification evidence"],
             )
 
         lead_id = packets[-1].packet_id if packets else None
@@ -214,7 +205,7 @@ class DecompositionPlanner:
                     dependencies=[lead_id] if lead_id else None,
                 ).packet_id
 
-        if strategy in {StrategyId.DEFAULT, StrategyId.MVP_FIRST} and packets and not implementation_completed and complexity in {DecompositionComplexity.TINY, DecompositionComplexity.SMALL, DecompositionComplexity.MEDIUM} and not flags["has_gap_reentry"]:
+        if strategy in {StrategyId.DEFAULT, StrategyId.MVP_FIRST} and packets and not implementation_completed and complexity in {DecompositionComplexity.TINY, DecompositionComplexity.SMALL, DecompositionComplexity.MEDIUM} and not flags["has_setup"] and not flags["has_integration"] and not flags["has_docs"] and not flags["has_ci"]:
             return packets
 
         if flags["has_integration"] and ExecutionPacketType.INTEGRATION not in completed_types:
@@ -298,7 +289,6 @@ def _packet(
     allowed_files: list[str] | None = None,
     target_areas: list[str] | None = None,
     forbidden_actions: list[str] | None = None,
-    metadata: dict[str, object] | None = None,
 ) -> ExecutionPacket:
     return ExecutionPacket(
         packet_id=_stable_packet_id(plan_id, index, title),
@@ -314,7 +304,7 @@ def _packet(
         forbidden_actions=_dedupe(forbidden_actions or []),
         success_criteria=_dedupe(success_criteria),
         required_evidence=_dedupe(required_evidence),
-        metadata={"packet_index": index, **(metadata or {})},
+        metadata={"packet_index": index},
     )
 
 
@@ -413,32 +403,49 @@ def _obligation_flags(
     runtime_facts: dict[str, object],
 ) -> dict[str, object]:
     kinds = {item.kind for item in acceptance.obligations} if acceptance is not None else set()
+    evidence_gaps = [str(item).lower() for item in runtime_facts.get("evidence_gaps", [])]
+    discovered_types = set(str(item) for item in runtime_facts.get("discovered_obligation_types", []))
     completed_packet_types = set(str(item) for item in runtime_facts.get("completed_packet_types", []))
-    verification_levels = [str(item).lower() for item in ((acceptance.required_verification_levels if acceptance is not None else []) or (obligations.required_test_levels if obligations is not None else []))]
-    runtime_levels = {"integration", "smoke", "e2e", "end-to-end", "runtime", "runtime_proof"}
-    impact_kinds = {impact.kind for impact in obligations.discovered_impacts} if obligations is not None else set()
-    has_tests = bool(verification_levels) or any(kind in kinds for kind in {AcceptanceObligationKind.RELEVANT_TESTS_RUN, AcceptanceObligationKind.RELEVANT_TESTS_PASSED})
+    has_tests = (
+        any(kind in kinds for kind in {AcceptanceObligationKind.RELEVANT_TESTS_RUN, AcceptanceObligationKind.RELEVANT_TESTS_PASSED, AcceptanceObligationKind.INTEGRATION_TESTS_RUN, AcceptanceObligationKind.INTEGRATION_TESTS_PASSED})
+        or bool(obligations and obligations.required_test_levels)
+        or any("test" in item or "behavior" in item for item in evidence_gaps)
+        or "tests" in discovered_types
+    )
     has_docs = (
         any(kind in kinds for kind in {AcceptanceObligationKind.DOCUMENTATION_UPDATED, AcceptanceObligationKind.EXAMPLES_UPDATED})
         or bool(obligations and (obligations.required_documentation_updates or obligations.required_examples_updates))
+        or any("doc" in item or "example" in item or "readme" in item for item in evidence_gaps)
+        or "documentation" in discovered_types
+        or "examples" in discovered_types
+        or "docs" in discovered_types
     )
     has_ci = (
         any(kind == AcceptanceObligationKind.CI_OR_BUILD_UPDATED for kind in kinds)
         or bool(obligations and (obligations.required_ci_updates or obligations.required_codegen_or_build_updates))
+        or any("ci" in item or "build" in item for item in evidence_gaps)
+        or "ci_build" in discovered_types
+        or "ci" in discovered_types
     )
     has_integration = (
-        bool(set(verification_levels) & runtime_levels)
-        or any(kind in kinds for kind in {AcceptanceObligationKind.INTEGRATION_TESTS_RUN, AcceptanceObligationKind.INTEGRATION_TESTS_PASSED})
-        or DiscoveredImpactKind.INTEGRATION in impact_kinds
+        "integration" in discovered_types
+        or any("integration" in item for item in evidence_gaps)
+        or (
+            (any(kind in kinds for kind in {AcceptanceObligationKind.INTEGRATION_TESTS_RUN, AcceptanceObligationKind.INTEGRATION_TESTS_PASSED}) or bool(obligations and obligations.required_test_levels))
+            and bool(runtime_facts.get("has_existing_mutation"))
+        )
     )
-    environment_nodes = list(acceptance.materializable_environment_nodes if acceptance is not None else [])
-    has_setup = bool(runtime_facts.get("environment_gaps")) or DiscoveredImpactKind.SETUP in impact_kinds
-    target_areas = list((acceptance.required_work_surfaces if acceptance is not None else [])) + list(obligations.affected_surfaces if obligations else []) + list(runtime_facts.get("target_areas", []))
+    has_setup = (
+        bool(runtime_facts.get("environment_gaps"))
+        or "setup" in discovered_types
+        or (bool(obligations and obligations.required_setup_steps) and (bool(runtime_facts.get("has_existing_mutation")) or bool(runtime_facts.get("environment_gaps"))))
+    )
+    target_areas = list(obligations.affected_surfaces if obligations else []) + list(runtime_facts.get("target_areas", []))
     allowed_files = list(obligations.affected_surfaces if obligations else []) + list(runtime_facts.get("allowed_files", []))
     risks = list(obligations.blocker_conditions if obligations else []) + list(runtime_facts.get("known_blockers", []))
-    assumptions = list(environment_nodes)
+    assumptions = list(obligations.required_environment_conditions if obligations else []) + list(runtime_facts.get("environment_gaps", []))
     if obligations is not None:
-        assumptions.extend(obligations.required_environment_conditions)
+        assumptions.extend(obligations.required_setup_steps)
     if has_ci:
         risks.append("ci/build surface may require dedicated follow-up")
     if runtime_facts.get("has_existing_mutation"):
@@ -449,15 +456,12 @@ def _obligation_flags(
         "has_ci": has_ci,
         "has_integration": has_integration,
         "has_setup": has_setup,
-        "environment_nodes": _dedupe(environment_nodes),
-        "verification_levels": _dedupe(verification_levels),
         "target_areas": _dedupe(target_areas),
         "allowed_files": _dedupe(allowed_files),
         "risks": _dedupe(risks),
         "assumptions": _dedupe(assumptions),
         "completed_packet_types": completed_packet_types,
         "implementation_completed": ExecutionPacketType.IMPLEMENTATION.value in completed_packet_types,
-        "has_gap_reentry": bool(runtime_facts.get("evidence_gaps")) or bool(runtime_facts.get("known_blockers")),
     }
 
 

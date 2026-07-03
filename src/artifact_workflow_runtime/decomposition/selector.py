@@ -2,20 +2,7 @@ from __future__ import annotations
 
 from artifact_workflow_runtime.strategy import StrategyId
 
-from .models import DecompositionPlan, ExecutionPacket, ExecutionPacketStatus, ExecutionPacketType, PacketSelection
-
-_PACKET_PRIORITY = {
-    ExecutionPacketType.SETUP: 0,
-    ExecutionPacketType.REPAIR: 1,
-    ExecutionPacketType.IMPLEMENTATION: 2,
-    ExecutionPacketType.INTEGRATION: 3,
-    ExecutionPacketType.TEST: 4,
-    ExecutionPacketType.DOCS: 5,
-    ExecutionPacketType.PUBLISH_PREPARATION: 6,
-    ExecutionPacketType.VERIFICATION: 7,
-    ExecutionPacketType.SPIKE: 8,
-    ExecutionPacketType.REFACTOR: 9,
-}
+from .models import DecompositionPlan, ExecutionPacketStatus, ExecutionPacketType, PacketSelection
 
 
 class PacketSelector:
@@ -37,24 +24,16 @@ class PacketSelector:
         if not pending:
             return PacketSelection(selected_packet_id=None, ready=False, reason="all packets completed or skipped")
 
-        ready_packets = [packet for packet in pending if _deps_ready(packet, packets)]
-        if ready_packets:
-            selected = sorted(ready_packets, key=_packet_priority_key)[0]
-            return PacketSelection(selected_packet_id=selected.packet_id, ready=True, reason=f"selected highest-priority ready packet ({selected.packet_type.value}) from typed dependency ordering")
-
-        blocked_pending = sorted(pending, key=_packet_priority_key)
-        first = blocked_pending[0]
-        return PacketSelection(
-            selected_packet_id=first.packet_id,
-            ready=False,
-            reason=f"highest-priority pending packet ({first.packet_type.value}) is blocked on dependencies",
-            blocked_reason="dependencies_not_ready",
-            pending_dependencies=_pending_deps(first, packets),
-        )
-
-
-def _packet_priority_key(packet: ExecutionPacket) -> tuple[int, int, str]:
-    return (_PACKET_PRIORITY.get(packet.packet_type, 99), len(packet.dependencies), packet.packet_id)
+        first = pending[0]
+        if not _deps_ready(first, packets):
+            return PacketSelection(
+                selected_packet_id=first.packet_id,
+                ready=False,
+                reason="first pending packet is blocked on dependencies",
+                blocked_reason="dependencies_not_ready",
+                pending_dependencies=_pending_deps(first, packets),
+            )
+        return PacketSelection(selected_packet_id=first.packet_id, ready=True, reason="first pending packet selected")
 
 
 def _deps_ready(packet, packets) -> bool:

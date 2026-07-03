@@ -88,9 +88,6 @@ class FinalReportBuilder:
                 if environment_blocked
                 else "Decomposition plan did not complete because blocked/failed packets remain: "
             ) + ", ".join(blocked_packets)
-        elif verification:
-            status = "needs_human_review" if plan and (plan.requires_mutation or plan.must_change_world) else (verification.completion_status if verification.completion_status else ("completed" if verification.passed else "executed_unverified"))
-            summary = verification.summary or "Verification completed, but no acceptance decision was recorded."
         elif decomposition_plan is not None and decomposition_plan.packets and any(packet.status not in {ExecutionPacketStatus.COMPLETED, ExecutionPacketStatus.SKIPPED} for packet in decomposition_plan.packets):
             status = "partially_completed"
             summary = "Decomposition plan has unfinished packets; workflow stopped before full verification/acceptance."
@@ -106,6 +103,9 @@ class FinalReportBuilder:
         elif publish and not publish.ok:
             status = "publish_failed"
             summary = publish.summary or "Publish step did not produce usable evidence."
+        elif verification:
+            status = "needs_human_review" if plan and (plan.requires_mutation or plan.must_change_world) else (verification.completion_status if verification.completion_status else ("completed" if verification.passed else "executed_unverified"))
+            summary = verification.summary or "Verification completed, but no acceptance decision was recorded."
         elif execution and execution.ok:
             status = "implemented_only"
             summary = execution.summary or "Execution completed but verification did not run."
