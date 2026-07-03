@@ -294,6 +294,7 @@ class WorkflowStateSnapshot(RuntimeModel):
     done_contract: DoneContract | None = None
     workspace_branch: str | None = None
     workspace_root: str | None = None
+    workspace_snapshot: JsonDict | None = None
     environment_plan: EnvironmentPlan | None = None
     plan_request: LLMRequest | None = None
     plan_result: LLMResult | None = None

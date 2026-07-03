@@ -91,7 +91,7 @@ class LifecycleMachine:
                 from_stage=from_stage,
                 to_stage=LifecycleStage.VERIFYING,
                 graph_next="verify",
-                allowed=False,
+                allowed=True,
                 reason="Publish policy denied direct publish; verification/acceptance must resolve blockers first.",
                 policy_decision=publish_policy,
                 violations=publish_policy.violations,

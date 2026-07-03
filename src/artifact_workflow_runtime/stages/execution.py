@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from .common import *
-from artifact_workflow_runtime.control_plane.stage_filters import execute_prompt_steps, execute_success_criteria as build_execute_success_criteria, execute_verification_commands, packet_scoped_execute_items
+from artifact_workflow_runtime.control_plane.stage_filters import execute_prompt_steps, execute_success_criteria as build_execute_success_criteria, execute_verification_commands
 from artifact_workflow_runtime.environment import EnvironmentPlan
-from artifact_workflow_runtime.state.workspace import infer_workspace_root_from_execution, workspace_root_from_state
+from artifact_workflow_runtime.models import BlockerKind, FileEvidence, FileRole, MutationSummary
+from artifact_workflow_runtime.decomposition.models import ExecutionPacketType
+from artifact_workflow_runtime.state.workspace import collect_workspace_mutation_snapshot, infer_workspace_root_from_execution, workspace_root_from_state
 
 def _runtime_sensitive_levels(levels: list[str] | None) -> bool:
     lowered = {str(level).strip().lower() for level in (levels or []) if str(level).strip()}
@@ -22,13 +24,27 @@ def _has_explicit_non_environment_failure(result: ExecutionResult) -> bool:
     return False
 
 
+def _has_local_mutation_evidence(result: ExecutionResult) -> bool:
+    evidence = result.structured_evidence
+    return bool(evidence.mutation_summary.changed or evidence.files_changed)
+
+
 def _packet_status_from_typed_execution_result(
     result: ExecutionResult,
     *,
+    packet: object | None = None,
     required_test_levels: list[str] | None = None,
     required_setup_steps: list[str] | None = None,
 ) -> object:
     status = _packet_status_from_execution_result(result)
+    if packet is not None and getattr(packet, "packet_type", None) == ExecutionPacketType.IMPLEMENTATION:
+        if not _has_explicit_non_environment_failure(result):
+            material_blockers = [
+                blocker for blocker in result.structured_evidence.blockers if blocker.blocker_kind != BlockerKind.MISSING_EVIDENCE
+            ]
+            if _has_local_mutation_evidence(result) and not material_blockers:
+                from artifact_workflow_runtime.decomposition import ExecutionPacketStatus
+                return ExecutionPacketStatus.COMPLETED
     if status.value != "failed":
         return status
     runtime_sensitive = _runtime_sensitive_levels(required_test_levels) or bool(required_setup_steps)
@@ -40,6 +56,50 @@ def _packet_status_from_typed_execution_result(
         from artifact_workflow_runtime.decomposition import ExecutionPacketStatus
         return ExecutionPacketStatus.BLOCKED
     return status
+
+
+def _augment_with_existing_workspace_mutation(
+    result: ExecutionResult,
+    *,
+    packet: object | None = None,
+    workspace_snapshot: Mapping[str, Any] | None = None,
+    workspace_reconciliation: Mapping[str, Any] | None = None,
+) -> ExecutionResult:
+    snapshot = dict(workspace_snapshot or {})
+    reconciliation = dict(workspace_reconciliation or {})
+    changed_paths = [str(item) for item in snapshot.get("changed_paths", []) if str(item).strip()]
+    if not changed_paths:
+        return result
+    adopt_existing = bool(reconciliation.get("adopt_existing_work"))
+    candidate_delivery = str(reconciliation.get("delivery_mode") or "") in {"complete_existing_candidate", "continue_existing_candidate"}
+    packet_type = getattr(packet, "packet_type", None)
+    if not (adopt_existing or candidate_delivery or packet_type == ExecutionPacketType.IMPLEMENTATION):
+        return result
+    evidence = result.structured_evidence.model_copy(deep=True)
+    existing_paths = {item.path for item in evidence.files_changed}
+    for path in changed_paths:
+        if path not in existing_paths:
+            evidence.files_changed.append(FileEvidence(path=path, action="existing_workspace_mutation", role=FileRole.OTHER, summary="Adopted existing workspace mutation detected via git status --porcelain."))
+    merged_files = list(dict.fromkeys([*evidence.mutation_summary.files_changed, *changed_paths]))
+    evidence.mutation_summary = evidence.mutation_summary.model_copy(update={
+        "changed": True,
+        "files_changed": merged_files,
+        "summary": evidence.mutation_summary.summary or "Existing workspace mutation adopted as candidate work.",
+    })
+    bundle = result.evidence_bundle
+    if bundle is not None:
+        structured = bundle.structured.model_copy(deep=True)
+        existing_bundle_paths = {item.path for item in structured.files_changed}
+        for path in changed_paths:
+            if path not in existing_bundle_paths:
+                structured.files_changed.append(FileEvidence(path=path, action="existing_workspace_mutation", role=FileRole.OTHER, summary="Adopted existing workspace mutation detected via git status --porcelain."))
+        structured.mutation_summary = structured.mutation_summary.model_copy(update={
+            "changed": True,
+            "files_changed": list(dict.fromkeys([*structured.mutation_summary.files_changed, *changed_paths])),
+            "summary": structured.mutation_summary.summary or "Existing workspace mutation adopted as candidate work.",
+        })
+        bundle = bundle.model_copy(update={"structured": structured})
+    return result.model_copy(update={"structured_evidence": evidence, "evidence_bundle": bundle})
 
 class ExecutionStageMixin:
     async def execute_node(self, state: WorkflowState) -> dict[str, Any]:
@@ -88,9 +148,19 @@ class ExecutionStageMixin:
             active_packet_id = packet_selection.selected_packet_id
             packet = _packet_from_state({"active_packet_id": active_packet_id}, decomposition_plan)
             packet_block = _packet_prompt_block(packet)
+            workspace_snapshot = dict(state.get("workspace_snapshot") or {})
+            workspace_reconciliation = dict(state.get("workspace_reconciliation") or {})
+            existing_candidate_paths = [str(item) for item in workspace_snapshot.get("changed_paths", []) if str(item).strip()]
+            adopted_candidate_block = ""
+            if workspace_reconciliation.get("adopt_existing_work") and existing_candidate_paths:
+                adopted_candidate_block = (
+                    "Adopted existing workspace candidate detected.\n"
+                    f"Existing uncommitted paths: {existing_candidate_paths}\n"
+                    "Treat these paths as controller-adopted candidate work. Do not report 'no changes' or analysis-only completion until you verify and, if necessary, finish or repair this candidate against the active packet.\n\n"
+                )
             env_plan = EnvironmentPlan.model_validate(state["environment_plan"]) if state.get("environment_plan") else None
-            execute_steps = packet_scoped_execute_items(execute_prompt_steps(plan), packet)
-            execute_success = packet_scoped_execute_items(build_execute_success_criteria(plan), packet)
+            execute_steps = execute_prompt_steps(plan)
+            execute_success = build_execute_success_criteria(plan)
             setup_block = _environment_materialization_block(env_plan, packet=packet)
             if setup_block["suggested_steps"]:
                 execute_steps = list(dict.fromkeys([*setup_block["suggested_steps"], *execute_steps]))
@@ -113,6 +183,7 @@ class ExecutionStageMixin:
                 f"Observation evidence:\n{observation_text}\n\n"
                 f"{strategy_block}\n\n"
                 f"{packet_block}\n\n"
+                + adopted_candidate_block
                 + setup_block["prompt_block"]
                 + "\n"
                 + f"Plan summary: {plan.summary}\n"
@@ -133,7 +204,7 @@ class ExecutionStageMixin:
                 objective="execute approved controller plan",
                 plan_steps=execute_steps,
                 expected_changes=list(plan.expected_repo_changes),
-                verification_commands=packet_scoped_execute_items(execute_verification_commands(plan), packet),
+                verification_commands=execute_verification_commands(plan),
                 scope_constraints=["do not choose next workflow step", "do not expand task scope", "collect structured evidence"],
                 plan_summary=plan.summary,
                 context_packet_id=context_packet.id if context_packet else None,
@@ -147,11 +218,18 @@ class ExecutionStageMixin:
             artifact_ids = list(state_artifact_ids)
             artifact_ids.extend(artifact.id for artifact in result.artifacts)
             workspace_root = infer_workspace_root_from_execution(result) or workspace_root_from_state(state)
+            post_workspace_snapshot = collect_workspace_mutation_snapshot(workspace_root)
+            result = _augment_with_existing_workspace_mutation(
+                result,
+                packet=packet,
+                workspace_snapshot=post_workspace_snapshot or workspace_snapshot,
+                workspace_reconciliation=workspace_reconciliation,
+            )
 
             packet_history = list(state.get("packet_history") or [])
             updated_decomposition = decomposition_plan
             if packet is not None:
-                packet_status = _packet_status_from_typed_execution_result(result, required_test_levels=list(plan.required_test_levels), required_setup_steps=list(plan.required_setup_steps))
+                packet_status = _packet_status_from_typed_execution_result(result, packet=packet, required_test_levels=list(plan.required_test_levels), required_setup_steps=list(plan.required_setup_steps))
                 updated_decomposition, history_entry = _update_packet_status(
                     decomposition_plan,
                     packet_id=packet.packet_id,
@@ -190,6 +268,7 @@ class ExecutionStageMixin:
                 "execution_request": request.model_dump(mode="json"),
                 "execution_result": result.model_dump(mode="json"),
                 "workspace_root": workspace_root,
+                "workspace_snapshot": post_workspace_snapshot,
                 "decomposition_plan": updated_decomposition.model_dump(mode="json"),
                 "active_packet_id": active_packet_id,
                 "packet_history": packet_history,

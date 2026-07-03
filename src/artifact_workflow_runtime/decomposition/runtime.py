@@ -42,10 +42,7 @@ def update_packet_status(
     for packet in plan.packets:
         if packet.packet_id == packet_id:
             previous = packet.status
-            metadata = dict(packet.metadata or {})
-            if previous == ExecutionPacketStatus.FAILED and new_status == ExecutionPacketStatus.COMPLETED and execution_result_id:
-                metadata["superseded_by_execution_result_id"] = execution_result_id
-            packets.append(packet.model_copy(update={"status": new_status, "metadata": metadata}))
+            packets.append(packet.model_copy(update={"status": new_status}))
         else:
             packets.append(packet)
     if previous is None:
@@ -72,20 +69,10 @@ def packet_prompt_block(packet: ExecutionPacket | None) -> str:
         f"- goal: {packet.goal}",
         f"- scope: {packet.scope}",
     ]
-    local_contract = getattr(packet, "local_contract", None)
     if packet.allowed_files:
         lines.append(f"- allowed_files: {packet.allowed_files}")
     if packet.target_areas:
         lines.append(f"- target_areas: {packet.target_areas}")
-    if local_contract is not None:
-        if getattr(local_contract, "environment_nodes", None):
-            lines.append(f"- environment_nodes: {local_contract.environment_nodes}")
-        if getattr(local_contract, "work_surfaces", None):
-            lines.append(f"- work_surfaces: {local_contract.work_surfaces}")
-        if getattr(local_contract, "verification_levels", None):
-            lines.append(f"- verification_levels: {local_contract.verification_levels}")
-        if getattr(local_contract, "publish_requirements", None):
-            lines.append(f"- publish_requirements: {local_contract.publish_requirements}")
     if packet.forbidden_actions:
         lines.append(f"- forbidden_actions: {packet.forbidden_actions}")
     if packet.success_criteria:
@@ -119,30 +106,19 @@ def packet_from_state(state: Mapping[str, Any], plan: DecompositionPlan) -> Exec
 
 def status_from_execution_result(result: ExecutionResult) -> ExecutionPacketStatus:
     status_text = str(result.execution_status.value if hasattr(result.execution_status, "value") else result.execution_status).lower()
-    blockers = list(result.structured_evidence.blockers)
     env_blocked = any(
         getattr(item, "blocker_kind", None) in {
             BlockerKind.MISSING_ENVIRONMENT_DEPENDENCY,
             BlockerKind.MISSING_RUNTIME_PREREQUISITE,
             BlockerKind.INTEGRATION_ENVIRONMENT_UNAVAILABLE,
         }
-        for item in blockers
+        for item in result.structured_evidence.blockers
     )
-    non_deferred_blockers = [item for item in blockers if not _is_deferred_publish_blocker(item)]
-    if result.ok and status_text in {"succeeded", "partial"} and not non_deferred_blockers:
+    if result.ok and status_text in {"succeeded", "partial"} and not result.structured_evidence.blockers:
         return ExecutionPacketStatus.COMPLETED
     if status_text == "blocked" or env_blocked:
         return ExecutionPacketStatus.BLOCKED
     return ExecutionPacketStatus.FAILED
-
-
-def _is_deferred_publish_blocker(blocker) -> bool:
-    kind = getattr(getattr(blocker, "blocker_kind", None), "value", getattr(blocker, "blocker_kind", None))
-    summary = str(getattr(blocker, "summary", "")).lower()
-    if str(kind) != BlockerKind.POLICY_BLOCKED.value:
-        return False
-    publish_terms = ("git commit", "push", "pr", "publish")
-    return ("forbidden execute actions" in summary) or any(term in summary for term in publish_terms)
 
 
 def plan_completed(plan: DecompositionPlan) -> bool:

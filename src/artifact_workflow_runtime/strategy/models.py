@@ -108,11 +108,6 @@ class StrategyCheckpointSignals(RuntimeModel):
     acceptance_status: str | None = None
     missing_evidence: list[str] = Field(default_factory=list)
     blockers: list[str] = Field(default_factory=list)
-    blocker_kinds: list[str] = Field(default_factory=list)
-    failed_check_levels: list[str] = Field(default_factory=list)
-    explicit_failure_class: str | None = None
-    active_packet_type: str | None = None
-    active_packet_scope: str | None = None
     repair_count: int = 0
     task_complexity_hint: str = "unknown"
     mutation_heavy: bool = False

@@ -59,25 +59,6 @@ class DecompositionOutcome(str, Enum):
     MANUAL_INTERVENTION_REQUIRED = "manual_intervention_required"
 
 
-
-
-class PacketLocalContract(RuntimeModel):
-    environment_nodes: list[str] = Field(default_factory=list)
-    work_surfaces: list[str] = Field(default_factory=list)
-    verification_levels: list[str] = Field(default_factory=list)
-    publish_requirements: list[str] = Field(default_factory=list)
-
-    @field_validator("environment_nodes", "work_surfaces", "verification_levels", "publish_requirements")
-    @classmethod
-    def _dedupe_contract_lists(cls, value: list[str]) -> list[str]:
-        out: list[str] = []
-        for item in value:
-            text = str(item).strip()
-            if text and text not in out:
-                out.append(text)
-        return out
-
-
 class ExecutionPacket(RuntimeModel):
     packet_id: str
     title: str
@@ -95,7 +76,6 @@ class ExecutionPacket(RuntimeModel):
     created_at: str = Field(default_factory=utc_now)
     updated_at: str = Field(default_factory=utc_now)
     metadata: JsonDict = Field(default_factory=dict)
-    local_contract: PacketLocalContract = Field(default_factory=PacketLocalContract)
 
     @field_validator("packet_id", "title", "goal", "scope")
     @classmethod
@@ -128,7 +108,6 @@ class DecompositionPlan(RuntimeModel):
     created_at: str = Field(default_factory=utc_now)
     updated_at: str = Field(default_factory=utc_now)
     metadata: JsonDict = Field(default_factory=dict)
-    local_contract: PacketLocalContract = Field(default_factory=PacketLocalContract)
 
     @field_validator("plan_id", "task_summary", "decomposition_reason")
     @classmethod

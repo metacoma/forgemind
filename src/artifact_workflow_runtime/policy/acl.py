@@ -4,8 +4,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Mapping, Protocol
 
-from .registry import RUNTIME_ACTION_REGISTRY
-
 
 class RuntimeAction(str, Enum):
     REPO_READ = "repo.read"
@@ -28,10 +26,69 @@ class RuntimeAction(str, Enum):
     def coerce(cls, value: object) -> "RuntimeAction":
         if isinstance(value, cls):
             return value
-        canonical = RUNTIME_ACTION_REGISTRY.canonicalize(value)
-        if canonical and canonical in {item.value for item in cls}:
-            return cls(canonical)
-        return cls.UNKNOWN
+        text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "read_repo": cls.REPO_READ,
+            "repo_read": cls.REPO_READ,
+            "inspect_repository": cls.REPO_READ,
+            "read_repository": cls.REPO_READ,
+            "inspect_repo": cls.REPO_READ,
+            "collect_evidence": cls.REPO_READ,
+            "inspect_runtime_state": cls.SHELL_RUN,
+            "run_read_only_commands": cls.SHELL_RUN,
+            "inspect_git": cls.GIT_READ,
+            "inspect_git_read_only": cls.GIT_READ,
+            "commit_when_required": cls.GIT_COMMIT,
+            "push_when_required": cls.GIT_PUSH,
+            "create_pr_when_required": cls.PR_CREATE,
+            "inspect_pr_checks": cls.GIT_READ,
+            "internet_research": cls.INTERNET_SEARCH,
+            "read_official_docs": cls.INTERNET_SEARCH,
+            "inspect_public_metadata": cls.INTERNET_SEARCH,
+            "collect_source_attribution": cls.INTERNET_SEARCH,
+            "read_files": cls.FILE_READ,
+            "filesystem": cls.FILE_READ,
+            "context_packet_text": cls.FILE_READ,
+            "file_read": cls.FILE_READ,
+            "write_files": cls.FILE_WRITE,
+            "edit_files": cls.FILE_WRITE,
+            "file_write": cls.FILE_WRITE,
+            "run_commands": cls.SHELL_RUN,
+            "run_read_commands": cls.SHELL_RUN,
+            "run_write_commands": cls.SHELL_RUN,
+            "shell": cls.SHELL_RUN,
+            "shell_run": cls.SHELL_RUN,
+            "run_tests": cls.TEST_RUN,
+            "test_runtime": cls.TEST_RUN,
+            "test_run": cls.TEST_RUN,
+            "git_status": cls.GIT_READ,
+            "git": cls.GIT_READ,
+            "git_diff": cls.GIT_READ,
+            "git_read": cls.GIT_READ,
+            "commit": cls.GIT_COMMIT,
+            "git_commit": cls.GIT_COMMIT,
+            "push": cls.GIT_PUSH,
+            "git_push": cls.GIT_PUSH,
+            "git_push_--force": cls.GIT_PUSH,
+            "create_pr": cls.PR_CREATE,
+            "open_pull_request": cls.PR_CREATE,
+            "pull_request": cls.PR_CREATE,
+            "search_web": cls.INTERNET_SEARCH,
+            "internet_search": cls.INTERNET_SEARCH,
+            "web_search": cls.INTERNET_SEARCH,
+            "k8s_read": cls.K8S_READ,
+            "kubectl_get": cls.K8S_READ,
+            "k8s_write": cls.K8S_APPLY,
+            "kubectl_apply": cls.K8S_APPLY,
+            "apply_cluster_changes": cls.K8S_APPLY,
+            "argocd_sync": cls.ARGOCD_SYNC,
+            "ssh": cls.SSH_RUN,
+            "ssh_run": cls.SSH_RUN,
+            "change_host_config": cls.SSH_RUN,
+        }
+        if text in {item.value for item in cls}:
+            return cls(text)
+        return aliases.get(text, cls.UNKNOWN)
 
 
 @dataclass(frozen=True)
@@ -78,8 +135,12 @@ class StaticStagePolicyDecisionPoint:
     """
 
     DEFAULT_STAGE_ALLOW: Mapping[str, frozenset[RuntimeAction]] = {
-        stage: frozenset(RuntimeAction(item) for item in RUNTIME_ACTION_REGISTRY.stage_allowed(stage))
-        for stage in RUNTIME_ACTION_REGISTRY.DEFAULT_STAGE_ALLOW
+        "research": frozenset({RuntimeAction.INTERNET_SEARCH, RuntimeAction.REPO_READ, RuntimeAction.FILE_READ}),
+        "observe": frozenset({RuntimeAction.REPO_READ, RuntimeAction.FILE_READ, RuntimeAction.SHELL_RUN, RuntimeAction.GIT_READ, RuntimeAction.K8S_READ}),
+        "execute": frozenset({RuntimeAction.REPO_READ, RuntimeAction.FILE_READ, RuntimeAction.FILE_WRITE, RuntimeAction.SHELL_RUN, RuntimeAction.TEST_RUN, RuntimeAction.GIT_READ}),
+        "repair": frozenset({RuntimeAction.REPO_READ, RuntimeAction.FILE_READ, RuntimeAction.FILE_WRITE, RuntimeAction.SHELL_RUN, RuntimeAction.TEST_RUN, RuntimeAction.GIT_READ}),
+        "verify": frozenset({RuntimeAction.REPO_READ, RuntimeAction.FILE_READ, RuntimeAction.SHELL_RUN, RuntimeAction.TEST_RUN, RuntimeAction.GIT_READ, RuntimeAction.K8S_READ}),
+        "publish": frozenset({RuntimeAction.REPO_READ, RuntimeAction.FILE_READ, RuntimeAction.SHELL_RUN, RuntimeAction.TEST_RUN, RuntimeAction.GIT_READ, RuntimeAction.GIT_COMMIT, RuntimeAction.GIT_PUSH, RuntimeAction.PR_CREATE}),
     }
 
     def __init__(self, *, stage_allow: Mapping[str, frozenset[RuntimeAction]] | None = None, allow_unknown: bool = False) -> None:

@@ -12,8 +12,6 @@ _FAILURE_STATUSES = {"failed", "error", "blocked", "needs_repair", "policy_viola
 _TEST_EVIDENCE_TERMS = ("test", "unit", "integration", "smoke", "behavior", "behaviour", "regression", "bdd")
 _UNKNOWN_BLOCKER_TERMS = ("unknown", "environment", "runtime", "dependency", "api", "toolchain", "sdk", "install", "blocked")
 _REFACTOR_TERMS = ("refactor", "cleanup", "clean up", "simplify", "restructure", "rename", "stabilize")
-_EXPLICIT_LOCAL_FAILURES = {"build_test_failure", "verification_failure", "test_failure"}
-_ENVIRONMENT_FAILURES = {"environment_gap"}
 
 
 class StrategyGovernor:
@@ -30,7 +28,7 @@ class StrategyGovernor:
     def decide(self, *, snapshot: WorkflowStateSnapshot, signals: StrategyCheckpointSignals) -> StrategyDecision:
         previous = StrategyId.coerce(snapshot.active_strategy) if snapshot.active_strategy else None
         selected, reason, confidence, used = self._select(snapshot=snapshot, signals=signals)
-        if not self.catalog.contains(selected):
+        if not self.catalog.contains(selected):  # defensive guard for custom catalogs
             raise ValueError(f"StrategyGovernor selected unknown strategy: {selected!r}")
         constraints = [
             "deterministic_rule_based",
@@ -54,25 +52,7 @@ class StrategyGovernor:
         acceptance_status = _lower(signals.acceptance_status)
         missing = [_lower(item) for item in signals.missing_evidence]
         blockers = [_lower(item) for item in signals.blockers]
-        failure_class = _lower(signals.explicit_failure_class)
-        active_packet_type = _lower(signals.active_packet_type)
         task_text = _lower(getattr(snapshot.task, "description", ""))
-
-        if failure_class in _EXPLICIT_LOCAL_FAILURES:
-            return (
-                StrategyId.REPAIR_ONLY,
-                "A concrete local build/test/verification failure is present; constrain the next packet to repairing the explicit failing surface before chasing broader missing evidence.",
-                "high",
-                _signals("explicit_failure_class", "failed_check_levels", "active_packet_type"),
-            )
-
-        if failure_class in _ENVIRONMENT_FAILURES and active_packet_type in {"setup", "integration", "test", "verification"}:
-            return (
-                StrategyId.SPIKE_THEN_HARDEN,
-                "The active packet is blocked by an environment/runtime materialization gap; resolve the dependency path before hardening implementation work.",
-                "high",
-                _signals("explicit_failure_class", "active_packet_type", "blocker_kinds"),
-            )
 
         if execution_status in _FAILURE_STATUSES or verification_status in _FAILURE_STATUSES:
             return (

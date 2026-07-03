@@ -687,18 +687,9 @@ class RuntimeKernel:
         if obligation.kind == AcceptanceObligationKind.PUBLISH_OBLIGATIONS_SATISFIED:
             if verification is not None and (verification.commit_required or verification.push_required):
                 ok = (not verification.commit_required or verification.commit_done) and (not verification.push_required or verification.push_done)
-                return _obligation_result(obligation, ok, "Publish obligations satisfied." if ok else "Publish/commit/push obligations are missing or incomplete.", artifact_ids)
-            if publish is None:
-                return VerificationObligationResult(
-                    obligation_id=obligation.id,
-                    obligation_name=obligation.name,
-                    kind=obligation.kind,
-                    status=AcceptanceObligationStatus.NOT_RUN,
-                    reason="Publish/commit/push obligations were not evaluated in this stage.",
-                    evidence_artifact_ids=artifact_ids,
-                    blocker_kind=BlockerKind.MISSING_EVIDENCE,
-                )
-            return _obligation_result(obligation, bool(publish.ok), "Publish obligations satisfied." if publish.ok else "Publish/commit/push obligations are missing or incomplete.", artifact_ids)
+            else:
+                ok = publish is not None and publish.ok
+            return _obligation_result(obligation, ok, "Publish obligations satisfied." if ok else "Publish/commit/push obligations are missing or incomplete.", artifact_ids)
 
         ok = bool(verification and (verification.passed or verification.checks_passed)) or bool(execution.evidence_bundle and execution.evidence_bundle.ok)
         return _obligation_result(obligation, ok, "Required evidence exists." if ok else "Required evidence is missing.", artifact_ids)
@@ -998,21 +989,17 @@ def _check_status(execution: ExecutionResult | None, verification: VerificationR
             continue
         evidence = getattr(result, "structured_evidence", None)
         if evidence is not None:
-            lowered_terms = tuple(term.lower() for term in terms)
-            fallback_terms = tuple(term for term in lowered_terms if term in {"build", "compile", "unit", "integration", "smoke", "e2e", "end-to-end", "runtime", "runtime_proof"})
             for test in evidence.tests:
-                test_name = str(getattr(test.level, 'value', test.level) or test.name or test.command).lower()
-                if target_levels and test.level not in target_levels and not any(term in test_name for term in fallback_terms):
+                if target_levels and test.level not in target_levels:
                     continue
-                observed.append((test_name, str(test.status).lower()))
+                observed.append((str(getattr(test.level, 'value', test.level) or test.name).lower(), str(test.status).lower()))
             for command in evidence.commands_run:
-                command_name = str(getattr(command.role, 'value', command.role) or command.command).lower()
-                if target_roles and command.role not in target_roles and not any(term in command_name for term in fallback_terms):
+                if target_roles and command.role not in target_roles:
                     continue
                 if command.exit_code is None:
                     continue
                 status = "passed" if command.exit_code == 0 else "failed"
-                observed.append((command_name, status))
+                observed.append((str(getattr(command.role, 'value', command.role) or command.command).lower(), status))
         if verification is not None and result is verification:
             for level in verification.performed_test_levels:
                 observed.append((str(level).lower(), "passed"))

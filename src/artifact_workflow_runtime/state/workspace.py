@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -175,3 +176,54 @@ def _clean_path(value: object) -> str | None:
     if not cleaned:
         return None
     return cleaned
+
+
+def collect_workspace_mutation_snapshot(workspace_root: str | None) -> dict[str, Any]:
+    root = _clean_path(workspace_root)
+    snapshot: dict[str, Any] = {
+        "workspace_root": root,
+        "git_tracked": False,
+        "dirty": False,
+        "changed_paths": [],
+        "status_lines": [],
+        "error": None,
+    }
+    if not root:
+        return snapshot
+    try:
+        proc = subprocess.run(
+            ["git", "-C", root, "status", "--porcelain=v1"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        snapshot["error"] = str(exc)
+        return snapshot
+    if proc.returncode != 0:
+        snapshot["error"] = (proc.stderr or proc.stdout or "git status failed").strip() or "git status failed"
+        return snapshot
+    snapshot["git_tracked"] = True
+    lines = [line.rstrip() for line in proc.stdout.splitlines() if line.strip()]
+    changed_paths: list[str] = []
+    for line in lines:
+        path = _porcelain_path(line)
+        if path and path not in changed_paths:
+            changed_paths.append(path)
+    snapshot["status_lines"] = lines
+    snapshot["changed_paths"] = changed_paths
+    snapshot["dirty"] = bool(changed_paths)
+    return snapshot
+
+
+def _porcelain_path(line: str) -> str | None:
+    if not line:
+        return None
+    body = line[3:] if len(line) > 3 else ""
+    if not body:
+        return None
+    if " -> " in body:
+        body = body.split(" -> ", 1)[1]
+    cleaned = body.strip()
+    return cleaned or None

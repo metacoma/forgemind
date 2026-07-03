@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .common import *
+from artifact_workflow_runtime.state.workspace import collect_workspace_mutation_snapshot, infer_workspace_root_from_observation, infer_workspace_root_from_text
 
 
 class ObservationContextStageMixin:
@@ -123,12 +124,22 @@ class ObservationContextStageMixin:
                 artifact_ids=[artifact.id for artifact in result.artifacts],
                 delivery_mode=(reconciliation.delivery_mode if reconciliation is not None else None),
             )
+            workspace_root = infer_workspace_root_from_observation(result) or infer_workspace_root_from_text(task.description)
+            workspace_snapshot = collect_workspace_mutation_snapshot(workspace_root)
+            snapshot_artifact = services.artifact_store.add_json(
+                "workspace_snapshot",
+                workspace_snapshot,
+                metadata={"task_id": task.id, "stage": "observe"},
+            )
+            artifact_ids.append(snapshot_artifact.id)
             update = {
                 "observation_request": request.model_dump(mode="json"),
                 "observation_result": result.model_dump(mode="json"),
+                "workspace_root": workspace_root or state.get("workspace_root"),
+                "workspace_snapshot": workspace_snapshot,
                 "artifact_ids": artifact_ids,
                 "status": "observed",
-                "transitions": _append_transition(state, "observe", "observed", "World/repository observation evidence collected", [artifact.id for artifact in result.artifacts]),
+                "transitions": _append_transition(state, "observe", "observed", "World/repository observation evidence collected", [*[artifact.id for artifact in result.artifacts], snapshot_artifact.id]),
             }
             if reconciliation is not None:
                 update["workspace_reconciliation"] = reconciliation.model_dump(mode="json")
