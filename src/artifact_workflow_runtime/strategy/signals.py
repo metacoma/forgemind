@@ -2,8 +2,14 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from artifact_workflow_runtime.decomposition.runtime import packet_from_state
-from artifact_workflow_runtime.models import AcceptanceDecision, BlockerKind, CommandRole, ExecutionPlan, ExecutionResult, ObligationAnalysis, TestLevel, VerificationResult
+from artifact_workflow_runtime.models import (
+    AcceptanceDecision,
+    BlockerKind,
+    ExecutionPlan,
+    ExecutionResult,
+    ObligationAnalysis,
+    VerificationResult,
+)
 from artifact_workflow_runtime.models.state import WorkflowStateSnapshot
 
 from .models import StrategyCheckpointSignals
@@ -12,18 +18,22 @@ from .models import StrategyCheckpointSignals
 _TEST_TERMS = ("test", "unit", "integration", "smoke", "lint", "build", "compile", "coverage", "regression", "behavior", "behaviour")
 _DOC_TERMS = ("doc", "readme", "example", "snippet", "guide")
 _CI_TERMS = ("ci", "workflow", "github actions", "pipeline", "build script", "job")
+_BUILD_TERMS = ("build", "compile", "compiler", "assembly", "msbuild", "dotnet build")
+_TEST_FAILURE_TERMS = ("test", "xunit", "nunit", "mstest", "dotnet test", "failed")
+_RUNTIME_TERMS = ("environment", "runtime", "dependency", "sdk", "install", "bootstrap", "probe")
 
 ALLOWED_STRATEGY_SIGNAL_NAMES: tuple[str, ...] = (
     "current_stage",
     "execution_status",
     "verification_status",
     "acceptance_status",
-    "explicit_failure_class",
-    "active_packet_type",
     "missing_evidence",
     "blockers",
     "blocker_kinds",
     "failed_check_levels",
+    "explicit_failure_class",
+    "active_packet_type",
+    "active_packet_scope",
     "repair_count",
     "task_complexity_hint",
     "mutation_heavy",
@@ -44,23 +54,26 @@ def signals_from_snapshot(snapshot: WorkflowStateSnapshot, *, current_stage: str
     execution = snapshot.execution_result
     verification = snapshot.verification_result
     acceptance = snapshot.acceptance_decision
-    missing_evidence = _missing_evidence(execution, verification, acceptance)
-    blockers = _blockers(execution, verification, acceptance)
-    obligation_text = _joined_obligation_text(plan, obligations)
+    active_packet = _active_packet(snapshot)
+    active_packet_type = getattr(getattr(active_packet, "packet_type", None), "value", None)
+    active_scope = getattr(active_packet, "scope", None)
+    missing_evidence = _missing_evidence(execution, verification, acceptance, active_packet=active_packet)
+    blockers = _blockers(execution, verification, acceptance, active_packet=active_packet)
     blocker_kinds = _blocker_kinds(execution, verification, acceptance)
-    failed_check_levels = _failed_check_levels(execution)
-    active_packet = packet_from_state(snapshot.to_graph_state(), snapshot.decomposition_plan) if snapshot.decomposition_plan is not None else None
+    failed_check_levels = _failed_check_levels(execution, verification)
+    obligation_text = _joined_obligation_text(plan, obligations, active_packet=active_packet)
     return StrategyCheckpointSignals(
         current_stage=current_stage,
         execution_status=_execution_status(execution),
         verification_status=_verification_status(verification),
         acceptance_status=_acceptance_status(acceptance),
-        explicit_failure_class=_explicit_failure_class(execution=execution, blocker_kinds=blocker_kinds, failed_check_levels=failed_check_levels),
-        active_packet_type=getattr(getattr(active_packet, "packet_type", None), "value", getattr(active_packet, "packet_type", None)),
         missing_evidence=missing_evidence,
         blockers=blockers,
         blocker_kinds=blocker_kinds,
         failed_check_levels=failed_check_levels,
+        explicit_failure_class=_explicit_failure_class(execution, verification, blocker_kinds, failed_check_levels, blockers),
+        active_packet_type=active_packet_type,
+        active_packet_scope=active_scope,
         repair_count=len(snapshot.repair_results),
         task_complexity_hint=_complexity_hint(snapshot=snapshot, plan=plan, obligations=obligations),
         mutation_heavy=_mutation_heavy(snapshot=snapshot, plan=plan),
@@ -72,6 +85,15 @@ def signals_from_snapshot(snapshot: WorkflowStateSnapshot, *, current_stage: str
             "strategy_decision_count": len(snapshot.strategy_decisions),
         },
     )
+
+
+def _active_packet(snapshot: WorkflowStateSnapshot):
+    if snapshot.decomposition_plan is None or not snapshot.active_packet_id:
+        return None
+    for packet in snapshot.decomposition_plan.packets:
+        if packet.packet_id == snapshot.active_packet_id:
+            return packet
+    return None
 
 
 def _execution_status(execution: ExecutionResult | None) -> str | None:
@@ -102,27 +124,53 @@ def _acceptance_status(acceptance: AcceptanceDecision | None) -> str | None:
     return str(status or "").lower()
 
 
-def _missing_evidence(execution: ExecutionResult | None, verification: VerificationResult | None, acceptance: AcceptanceDecision | None) -> list[str]:
+def _missing_evidence(
+    execution: ExecutionResult | None,
+    verification: VerificationResult | None,
+    acceptance: AcceptanceDecision | None,
+    *,
+    active_packet,
+) -> list[str]:
     items: list[str] = []
     if execution is not None:
         items.extend(_safe_list(getattr(execution, "structured_evidence", None) and getattr(execution.structured_evidence, "missing_evidence", [])))
-        text = str(getattr(execution, "evidence_text", ""))
-        for marker in ("missing evidence", "missing_evidence"):
-            if marker in text.lower():
-                items.append(marker)
     if verification is not None:
         items.extend(_safe_list(verification.missing_evidence))
         items.extend(_safe_list(verification.missing_test_levels))
         items.extend(_safe_list(verification.missing_obligations))
     if acceptance is not None:
+        active_contract = getattr(active_packet, "local_contract", None)
+        active_environment = set(_lower(item) for item in getattr(active_contract, "environment_nodes", []))
+        active_work = set(_lower(item) for item in getattr(active_contract, "work_surfaces", []))
+        active_levels = set(_lower(item) for item in getattr(active_contract, "verification_levels", []))
         for result in acceptance.obligation_results:
             reason = str(result.reason or "")
-            if "missing" in reason.lower():
-                items.append(reason)
+            obligation = str(result.obligation_name or "")
+            combined = f"{obligation} {reason}".strip().lower()
+            if "missing" not in combined:
+                continue
+            if active_packet is None:
+                items.append(reason or obligation)
+                continue
+            if active_levels and any(level in combined for level in active_levels):
+                items.append(reason or obligation)
+                continue
+            if active_environment and any(node in combined for node in active_environment):
+                items.append(reason or obligation)
+                continue
+            if active_work and any(surface in combined for surface in active_work):
+                items.append(reason or obligation)
+                continue
     return _unique(items)
 
 
-def _blockers(execution: ExecutionResult | None, verification: VerificationResult | None, acceptance: AcceptanceDecision | None) -> list[str]:
+def _blockers(
+    execution: ExecutionResult | None,
+    verification: VerificationResult | None,
+    acceptance: AcceptanceDecision | None,
+    *,
+    active_packet,
+) -> list[str]:
     items: list[str] = []
     if execution is not None:
         items.extend(item.summary for item in execution.structured_evidence.blockers)
@@ -131,11 +179,90 @@ def _blockers(execution: ExecutionResult | None, verification: VerificationResul
     if verification is not None:
         items.extend(_safe_list(verification.checks_failed))
     if acceptance is not None and not acceptance.accepted:
-        items.extend(str(result.reason or result.obligation_name) for result in acceptance.obligation_results)
+        active_contract = getattr(active_packet, "local_contract", None)
+        active_terms = {
+            *[_lower(item) for item in getattr(active_contract, "environment_nodes", [])],
+            *[_lower(item) for item in getattr(active_contract, "work_surfaces", [])],
+            *[_lower(item) for item in getattr(active_contract, "verification_levels", [])],
+        }
+        for result in acceptance.obligation_results:
+            text = str(result.reason or result.obligation_name)
+            if not active_terms:
+                items.append(text)
+                continue
+            lowered = text.lower()
+            if any(term and term in lowered for term in active_terms):
+                items.append(text)
     return _unique(items)
 
 
-def _joined_obligation_text(plan: ExecutionPlan | None, obligations: ObligationAnalysis | None) -> str:
+def _blocker_kinds(execution: ExecutionResult | None, verification: VerificationResult | None, acceptance: AcceptanceDecision | None) -> list[str]:
+    items: list[str] = []
+    if execution is not None:
+        items.extend(getattr(item.blocker_kind, "value", item.blocker_kind) for item in execution.structured_evidence.blockers)
+        if execution.stage_failure is not None:
+            items.append(getattr(execution.stage_failure.failure_kind, "value", execution.stage_failure.failure_kind))
+    if verification is not None and verification.missing_setup_steps:
+        items.append(BlockerKind.MISSING_RUNTIME_PREREQUISITE.value)
+    if acceptance is not None:
+        items.extend(getattr(result.blocker_kind, "value", result.blocker_kind) for result in acceptance.obligation_results if getattr(result, "blocker_kind", None))
+    return _unique([str(item) for item in items if str(item).strip()])
+
+
+def _failed_check_levels(execution: ExecutionResult | None, verification: VerificationResult | None) -> list[str]:
+    levels: list[str] = []
+    if execution is not None:
+        for test in execution.structured_evidence.tests:
+            status = _lower(getattr(test, "status", None))
+            if status in {"failed", "error"}:
+                level = getattr(getattr(test, "level", None), "value", getattr(test, "level", None))
+                if level:
+                    levels.append(str(level))
+        for command in execution.structured_evidence.commands_run:
+            if command.exit_code in (None, 0):
+                continue
+            role = getattr(getattr(command, "role", None), "value", getattr(command, "role", None))
+            if role in {"build", "unit_test", "integration_test", "smoke_test"}:
+                levels.append(role.replace("_test", ""))
+    if verification is not None:
+        levels.extend(_safe_list(verification.missing_test_levels))
+        for check in verification.checks_failed:
+            lowered = _lower(check)
+            if any(term in lowered for term in ("build", "compile")):
+                levels.append("build")
+            if "unit" in lowered:
+                levels.append("unit")
+            if "integration" in lowered:
+                levels.append("integration")
+            if "smoke" in lowered:
+                levels.append("smoke")
+    return _unique(levels)
+
+
+def _explicit_failure_class(
+    execution: ExecutionResult | None,
+    verification: VerificationResult | None,
+    blocker_kinds: list[str],
+    failed_check_levels: list[str],
+    blockers: list[str],
+) -> str | None:
+    lowered_blockers = [_lower(item) for item in blockers]
+    if any(kind in blocker_kinds for kind in {BlockerKind.MISSING_ENVIRONMENT_DEPENDENCY.value, BlockerKind.MISSING_RUNTIME_PREREQUISITE.value, BlockerKind.INTEGRATION_ENVIRONMENT_UNAVAILABLE.value}):
+        return "environment_gap"
+    if execution is not None and execution.stage_failure is not None:
+        return getattr(execution.stage_failure.failure_kind, "value", execution.stage_failure.failure_kind)
+    if any(level in failed_check_levels for level in {"build", "unit", "unit_test"}) or _contains_any(lowered_blockers, _BUILD_TERMS):
+        return "build_test_failure"
+    if any(level in failed_check_levels for level in {"integration", "smoke", "runtime_probe"}) or _contains_any(lowered_blockers, _TEST_FAILURE_TERMS):
+        return "verification_failure"
+    if verification is not None and verification.missing_setup_steps:
+        return "environment_gap"
+    if _contains_any(lowered_blockers, _RUNTIME_TERMS):
+        return "environment_gap"
+    return None
+
+
+def _joined_obligation_text(plan: ExecutionPlan | None, obligations: ObligationAnalysis | None, *, active_packet) -> str:
     parts: list[str] = []
     if plan is not None:
         parts.extend(plan.required_test_levels)
@@ -149,6 +276,11 @@ def _joined_obligation_text(plan: ExecutionPlan | None, obligations: ObligationA
         parts.extend(obligations.required_documentation_updates)
         parts.extend(obligations.required_examples_updates)
         parts.extend(obligations.required_ci_updates)
+    active_contract = getattr(active_packet, "local_contract", None)
+    if active_contract is not None:
+        parts.extend(getattr(active_contract, "environment_nodes", []))
+        parts.extend(getattr(active_contract, "work_surfaces", []))
+        parts.extend(getattr(active_contract, "verification_levels", []))
     return "\n".join(str(item) for item in parts)
 
 
@@ -198,66 +330,5 @@ def _unique(items: list[str]) -> list[str]:
     return out
 
 
-def _blocker_kinds(execution: ExecutionResult | None, verification: VerificationResult | None, acceptance: AcceptanceDecision | None) -> list[str]:
-    items: list[str] = []
-    if execution is not None:
-        for item in execution.structured_evidence.blockers:
-            kind = getattr(getattr(item, "blocker_kind", None), "value", getattr(item, "blocker_kind", None))
-            if kind:
-                items.append(str(kind))
-        if execution.stage_failure is not None:
-            items.append("stage_failure")
-    if verification is not None:
-        for item in getattr(verification, "obligation_results", []) or []:
-            kind = getattr(getattr(item, "blocker_kind", None), "value", getattr(item, "blocker_kind", None))
-            if kind:
-                items.append(str(kind))
-    if acceptance is not None:
-        for item in getattr(acceptance, "obligation_results", []) or []:
-            kind = getattr(getattr(item, "blocker_kind", None), "value", getattr(item, "blocker_kind", None))
-            if kind:
-                items.append(str(kind))
-    return _unique(items)
-
-
-def _failed_check_levels(execution: ExecutionResult | None) -> list[str]:
-    if execution is None:
-        return []
-    levels: list[str] = []
-    for item in execution.structured_evidence.tests:
-        status = str(getattr(item, "status", "") or "").lower()
-        if item.passed is False or status in {"failed", "error", "blocked"}:
-            level = getattr(getattr(item, "level", None), "value", getattr(item, "level", None))
-            levels.append(str(level or TestLevel.OTHER.value))
-    for item in execution.structured_evidence.commands_run:
-        if item.exit_code is None or item.exit_code == 0:
-            continue
-        role = getattr(getattr(item, "role", None), "value", getattr(item, "role", None))
-        if role == CommandRole.BUILD.value:
-            levels.append(TestLevel.BUILD.value)
-        elif role == CommandRole.UNIT_TEST.value:
-            levels.append(TestLevel.UNIT.value)
-        elif role == CommandRole.INTEGRATION_TEST.value:
-            levels.append(TestLevel.INTEGRATION.value)
-        elif role == CommandRole.SMOKE_TEST.value:
-            levels.append(TestLevel.SMOKE.value)
-    return _unique(levels)
-
-
-def _explicit_failure_class(*, execution: ExecutionResult | None, blocker_kinds: list[str], failed_check_levels: list[str]) -> str | None:
-    if execution is not None and execution.stage_failure is not None:
-        return "stage_failure"
-    lowered_blocker_kinds = {str(item).lower() for item in blocker_kinds}
-    if BlockerKind.TEST_FAILURE.value in lowered_blocker_kinds:
-        return "test_failure"
-    environment_kinds = {
-        BlockerKind.MISSING_ENVIRONMENT_DEPENDENCY.value,
-        BlockerKind.MISSING_RUNTIME_PREREQUISITE.value,
-        BlockerKind.INTEGRATION_ENVIRONMENT_UNAVAILABLE.value,
-    }
-    if lowered_blocker_kinds & environment_kinds:
-        return "runtime_dependency_gap"
-    failed_levels = {str(item).lower() for item in failed_check_levels}
-    if failed_levels & {TestLevel.BUILD.value, TestLevel.UNIT.value, TestLevel.INTEGRATION.value, TestLevel.SMOKE.value}:
-        return "build_or_test_failure"
-    return None
+def _lower(value: object) -> str:
+    return str(value or "").strip().lower()

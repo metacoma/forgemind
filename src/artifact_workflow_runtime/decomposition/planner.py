@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Iterable
 from artifact_workflow_runtime.models import AcceptanceObligationKind, DiscoveredImpactKind, ObligationAnalysis, Task, TaskAcceptanceContract
 from artifact_workflow_runtime.strategy import StrategyId
 
-from .models import DecompositionComplexity, DecompositionPlan, ExecutionPacket, ExecutionPacketStatus, ExecutionPacketType
+from .models import DecompositionComplexity, DecompositionPlan, ExecutionPacket, ExecutionPacketStatus, ExecutionPacketType, PacketLocalContract
 from .validator import DecompositionValidator
 
 if TYPE_CHECKING:
@@ -46,7 +46,8 @@ class DecompositionPlanner:
             risks=_dedupe(flags["risks"]),
             assumptions=_dedupe(flags["assumptions"]),
             decomposition_reason=_decomposition_reason(strategy, complexity, flags),
-            metadata={"planner": "rule_based_v2", "task_id": task_obj.id, "runtime_facts": runtime_facts},
+            metadata={"planner": "rule_based_v3", "task_id": task_obj.id, "runtime_facts": runtime_facts},
+            local_contract=_plan_local_contract(flags),
         )
         validation = self.validator.validate(plan, fallback_to_single_packet=self.fallback_to_single_packet)
         return validation.normalized_plan or plan
@@ -96,6 +97,9 @@ class DecompositionPlanner:
             dependencies: list[str] | None = None,
             prepend: bool = False,
         ) -> ExecutionPacket:
+            local_contract = _packet_local_contract(packet_type, flags)
+            packet_allowed_files = _packet_allowed_files(packet_type, allowed_files, target_areas, local_contract)
+            packet_target_areas = _packet_target_areas(packet_type, target_areas, local_contract)
             nonlocal next_index, packets
             packet = _packet(
                 plan_id,
@@ -108,9 +112,10 @@ class DecompositionPlanner:
                 success_criteria=success_criteria,
                 required_evidence=required_evidence,
                 dependencies=dependencies,
-                allowed_files=allowed_files,
-                target_areas=target_areas,
+                allowed_files=packet_allowed_files,
+                target_areas=packet_target_areas,
                 forbidden_actions=base_forbidden,
+                local_contract=local_contract,
             )
             next_index += 1
             if prepend:
@@ -274,6 +279,61 @@ class DecompositionPlanner:
         return packets[:5]
 
 
+def _plan_local_contract(flags: dict[str, object]) -> PacketLocalContract:
+    return PacketLocalContract(
+        environment_nodes=_dedupe(list(flags.get("environment_nodes", []))),
+        work_surfaces=_dedupe(list(flags.get("target_areas", []))),
+        verification_levels=_dedupe(list(flags.get("verification_levels", []))),
+        publish_requirements=_dedupe(list(flags.get("publish_requirements", []))),
+    )
+
+
+def _packet_local_contract(packet_type: ExecutionPacketType, flags: dict[str, object]) -> PacketLocalContract:
+    environment_nodes = list(flags.get("environment_nodes", []))
+    work_surfaces = list(flags.get("target_areas", []))
+    verification_levels = list(flags.get("verification_levels", []))
+    publish_requirements = list(flags.get("publish_requirements", []))
+    docs_surfaces = list(flags.get("docs_surfaces", []))
+    ci_surfaces = list(flags.get("ci_surfaces", []))
+    if packet_type == ExecutionPacketType.SETUP:
+        return PacketLocalContract(environment_nodes=environment_nodes)
+    if packet_type == ExecutionPacketType.IMPLEMENTATION:
+        return PacketLocalContract(work_surfaces=work_surfaces)
+    if packet_type == ExecutionPacketType.INTEGRATION:
+        return PacketLocalContract(environment_nodes=environment_nodes, work_surfaces=work_surfaces, verification_levels=[level for level in verification_levels if level in {"integration", "smoke", "runtime", "runtime_proof", "e2e", "end-to-end"}] or ["integration"])
+    if packet_type == ExecutionPacketType.TEST:
+        return PacketLocalContract(work_surfaces=work_surfaces, verification_levels=verification_levels or ["build", "unit"])
+    if packet_type == ExecutionPacketType.DOCS:
+        return PacketLocalContract(work_surfaces=docs_surfaces or work_surfaces)
+    if packet_type == ExecutionPacketType.PUBLISH_PREPARATION:
+        return PacketLocalContract(work_surfaces=ci_surfaces or work_surfaces, publish_requirements=publish_requirements)
+    if packet_type == ExecutionPacketType.VERIFICATION:
+        return PacketLocalContract(environment_nodes=environment_nodes, work_surfaces=work_surfaces, verification_levels=verification_levels)
+    if packet_type == ExecutionPacketType.REPAIR:
+        return PacketLocalContract(environment_nodes=environment_nodes, work_surfaces=work_surfaces, verification_levels=verification_levels, publish_requirements=publish_requirements)
+    return PacketLocalContract(work_surfaces=work_surfaces)
+
+
+def _packet_allowed_files(packet_type: ExecutionPacketType, allowed_files: list[str], target_areas: list[str], local_contract: PacketLocalContract) -> list[str]:
+    if packet_type == ExecutionPacketType.SETUP:
+        return []
+    if packet_type in {ExecutionPacketType.DOCS, ExecutionPacketType.PUBLISH_PREPARATION}:
+        return _dedupe(local_contract.work_surfaces or allowed_files or target_areas)
+    return _dedupe(local_contract.work_surfaces or allowed_files or target_areas)
+
+
+def _packet_target_areas(packet_type: ExecutionPacketType, target_areas: list[str], local_contract: PacketLocalContract) -> list[str]:
+    if packet_type == ExecutionPacketType.SETUP:
+        return _dedupe(local_contract.environment_nodes)
+    if packet_type in {ExecutionPacketType.TEST, ExecutionPacketType.INTEGRATION, ExecutionPacketType.VERIFICATION}:
+        return _dedupe([*local_contract.work_surfaces, *local_contract.verification_levels])
+    if packet_type == ExecutionPacketType.PUBLISH_PREPARATION:
+        return _dedupe([*local_contract.work_surfaces, *local_contract.publish_requirements])
+    return _dedupe(local_contract.work_surfaces or target_areas)
+
+
+
+
 def _packet(
     plan_id: str,
     index: int,
@@ -289,6 +349,7 @@ def _packet(
     allowed_files: list[str] | None = None,
     target_areas: list[str] | None = None,
     forbidden_actions: list[str] | None = None,
+    local_contract: PacketLocalContract | None = None,
 ) -> ExecutionPacket:
     return ExecutionPacket(
         packet_id=_stable_packet_id(plan_id, index, title),
@@ -305,6 +366,7 @@ def _packet(
         success_criteria=_dedupe(success_criteria),
         required_evidence=_dedupe(required_evidence),
         metadata={"packet_index": index},
+        local_contract=local_contract or PacketLocalContract(),
     )
 
 
@@ -435,15 +497,21 @@ def _obligation_flags(
             and bool(runtime_facts.get("has_existing_mutation"))
         )
     )
-    has_setup = (
-        bool(runtime_facts.get("environment_gaps"))
-        or "setup" in discovered_types
-        or (bool(obligations and obligations.required_setup_steps) and (bool(runtime_facts.get("has_existing_mutation")) or bool(runtime_facts.get("environment_gaps"))))
-    )
     target_areas = list(obligations.affected_surfaces if obligations else []) + list(runtime_facts.get("target_areas", []))
     allowed_files = list(obligations.affected_surfaces if obligations else []) + list(runtime_facts.get("allowed_files", []))
     risks = list(obligations.blocker_conditions if obligations else []) + list(runtime_facts.get("known_blockers", []))
     assumptions = list(obligations.required_environment_conditions if obligations else []) + list(runtime_facts.get("environment_gaps", []))
+    environment_nodes = list(obligations.required_environment_conditions if obligations else []) + list(obligations.required_setup_steps if obligations else []) + list(runtime_facts.get("environment_gaps", []))
+    has_setup = (
+        bool(runtime_facts.get("environment_gaps"))
+        or "setup" in discovered_types
+        or bool(environment_nodes)
+        or bool(obligations and obligations.required_setup_steps)
+    )
+    verification_levels = list(obligations.required_test_levels if obligations else [])
+    docs_surfaces = list(obligations.required_documentation_updates if obligations else []) + list(obligations.required_examples_updates if obligations else [])
+    ci_surfaces = list(obligations.required_ci_updates if obligations else []) + list(obligations.required_codegen_or_build_updates if obligations else [])
+    publish_requirements = list(obligations.required_publish_actions if obligations else [])
     if obligations is not None:
         assumptions.extend(obligations.required_setup_steps)
     if has_ci:
@@ -460,6 +528,11 @@ def _obligation_flags(
         "allowed_files": _dedupe(allowed_files),
         "risks": _dedupe(risks),
         "assumptions": _dedupe(assumptions),
+        "environment_nodes": _dedupe(environment_nodes),
+        "verification_levels": _dedupe(verification_levels),
+        "docs_surfaces": _dedupe(docs_surfaces),
+        "ci_surfaces": _dedupe(ci_surfaces),
+        "publish_requirements": _dedupe(publish_requirements),
         "completed_packet_types": completed_packet_types,
         "implementation_completed": ExecutionPacketType.IMPLEMENTATION.value in completed_packet_types,
     }

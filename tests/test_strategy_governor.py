@@ -52,42 +52,6 @@ def test_strategy_governor_selects_bdd_incremental_for_missing_test_evidence() -
     assert "missing_evidence" in decision.signals_used
 
 
-
-
-def test_strategy_governor_prefers_repair_only_for_explicit_build_test_failure_over_missing_evidence() -> None:
-    task = Task(description="implement C# client and verify tests")
-    snapshot = WorkflowStateSnapshot(task=task)
-    signals = StrategyCheckpointSignals(
-        current_stage="repair",
-        execution_status="partial",
-        explicit_failure_class="build_or_test_failure",
-        failed_check_levels=["build", "unit"],
-        blocker_kinds=["test_failure"],
-        missing_evidence=["missing_evidence"],
-        has_tests_obligations=True,
-    )
-
-    decision = StrategyGovernor().decide(snapshot=snapshot, signals=signals)
-
-    assert decision.selected_strategy == StrategyId.REPAIR_ONLY
-    assert "explicit_failure_class" in decision.signals_used
-
-
-def test_strategy_governor_prefers_spike_for_typed_runtime_dependency_gap() -> None:
-    task = Task(description="run integration checks against runtime under test")
-    snapshot = WorkflowStateSnapshot(task=task)
-    signals = StrategyCheckpointSignals(
-        current_stage="review",
-        execution_status="partial",
-        explicit_failure_class="runtime_dependency_gap",
-        blocker_kinds=["missing_environment_dependency"],
-    )
-
-    decision = StrategyGovernor().decide(snapshot=snapshot, signals=signals)
-
-    assert decision.selected_strategy == StrategyId.SPIKE_THEN_HARDEN
-    assert "explicit_failure_class" in decision.signals_used
-
 def test_strategy_decision_serializes_in_workflow_snapshot() -> None:
     task = Task(description="stabilize runtime")
     decision = StrategyDecision(

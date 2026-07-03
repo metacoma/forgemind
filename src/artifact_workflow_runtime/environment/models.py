@@ -22,6 +22,9 @@ class EnvironmentPlanItem(RuntimeModel):
     runtime_probe_command: str | None = None
     runtime_probe_source_kind: str | None = None
     runtime_probe_candidates: list[str] = Field(default_factory=list)
+    resolved_version: str | None = None
+    evidence_artifact_ids: list[str] = Field(default_factory=list)
+    metadata: dict[str, object] = Field(default_factory=dict)
     failure_mode: str = "needs_environment"
 
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .common import *
-from artifact_workflow_runtime.control_plane.stage_filters import execute_prompt_steps, execute_success_criteria as build_execute_success_criteria, execute_verification_commands
+from artifact_workflow_runtime.control_plane.stage_filters import execute_prompt_steps, execute_success_criteria as build_execute_success_criteria, execute_verification_commands, packet_scoped_execute_items
 from artifact_workflow_runtime.environment import EnvironmentPlan
 from artifact_workflow_runtime.state.workspace import infer_workspace_root_from_execution, workspace_root_from_state
 
@@ -89,8 +89,8 @@ class ExecutionStageMixin:
             packet = _packet_from_state({"active_packet_id": active_packet_id}, decomposition_plan)
             packet_block = _packet_prompt_block(packet)
             env_plan = EnvironmentPlan.model_validate(state["environment_plan"]) if state.get("environment_plan") else None
-            execute_steps = execute_prompt_steps(plan)
-            execute_success = build_execute_success_criteria(plan)
+            execute_steps = packet_scoped_execute_items(execute_prompt_steps(plan), packet)
+            execute_success = packet_scoped_execute_items(build_execute_success_criteria(plan), packet)
             setup_block = _environment_materialization_block(env_plan, packet=packet)
             if setup_block["suggested_steps"]:
                 execute_steps = list(dict.fromkeys([*setup_block["suggested_steps"], *execute_steps]))
@@ -133,7 +133,7 @@ class ExecutionStageMixin:
                 objective="execute approved controller plan",
                 plan_steps=execute_steps,
                 expected_changes=list(plan.expected_repo_changes),
-                verification_commands=execute_verification_commands(plan),
+                verification_commands=packet_scoped_execute_items(execute_verification_commands(plan), packet),
                 scope_constraints=["do not choose next workflow step", "do not expand task scope", "collect structured evidence"],
                 plan_summary=plan.summary,
                 context_packet_id=context_packet.id if context_packet else None,
